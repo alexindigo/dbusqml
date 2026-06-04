@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_DIR="${1:-build-release}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BUILD_ABS="$(cd "${PROJECT_DIR}/${BUILD_DIR}" 2>/dev/null && pwd || echo "${BUILD_DIR}")"
+
+echo ""
+echo "Running all examples sequentially."
+echo "Close each window to proceed to the next."
+echo ""
+
+for example in "${PROJECT_DIR}"/examples/*/*.qml; do
+    name="$(basename "${example}")"
+    dir="$(basename "$(dirname "${example}")")"
+
+    echo "--- ${dir}/${name} ---"
+    echo "Close the window to continue..."
+    QML_IMPORT_PATH="${BUILD_ABS}" qml6 "${example}"
+    echo ""
+done
+
+echo "All examples finished."

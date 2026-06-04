@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_DIR="${1:-build-release}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BUILD_ABS="$(cd "${PROJECT_DIR}/${BUILD_DIR}" 2>/dev/null && pwd || echo "${BUILD_DIR}")"
+
+echo "=== Running QML tests ==="
+
+QML_IMPORT_PATH="${BUILD_ABS}" /usr/lib/qt6/bin/qmltestrunner -v2 -input "${PROJECT_DIR}/tests/test_api.qml"
+QML_EXIT=$?
+
+if [ ${QML_EXIT} -eq 0 ]; then
+    echo ""
+    echo "All QML tests passed."
+else
+    echo ""
+    echo "QML tests FAILED (exit code ${QML_EXIT})"
+    exit 1
+fi
+echo "Done."

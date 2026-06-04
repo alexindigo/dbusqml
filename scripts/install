@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_DIR="${BUILD_DIR:-build-release}"
+PREFIX="${PREFIX:-$(qmake6 -query QT_INSTALL_PREFIX 2>/dev/null || echo /usr)}"
+
+if [ ! -d "${BUILD_DIR}" ]; then
+    echo "error: build directory not found. run scripts/build first."
+    exit 1
+fi
+
+cmake --install "${BUILD_DIR}" --prefix "${PREFIX}"

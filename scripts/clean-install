@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_DIR="${BUILD_DIR:-build-release}"
+
+if [ ! -f "${BUILD_DIR}/install_manifest.txt" ]; then
+    echo "Nothing to uninstall."
+    exit 0
+fi
+
+while read -r file; do
+    if [ -f "$file" ] || [ -d "$file" ]; then
+        rm -rf "$file"
+    fi
+done < "${BUILD_DIR}/install_manifest.txt"
+
+rm -f "${BUILD_DIR}/install_manifest.txt"
+echo "Uninstall complete."

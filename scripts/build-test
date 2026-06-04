@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_DIR="${BUILD_DIR:-build-debug}"
+
+rm -rf "${BUILD_DIR}"
+
+cmake -B "${BUILD_DIR}" -S . \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DBUILD_TEST_MODE=ON \
+    -DENABLE_COVERAGE=ON
+
+cmake --build "${BUILD_DIR}" -j"$(nproc)"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+"${SCRIPT_DIR}/run-tests" "${BUILD_DIR}"

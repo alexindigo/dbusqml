@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_DIR="${BUILD_DIR:-build-dev}"
+
+cmake -B "${BUILD_DIR}" -S . \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DBUILD_TEST_MODE=ON
+
+cmake --build "${BUILD_DIR}" -j"$(nproc)"

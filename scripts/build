@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_DIR="${BUILD_DIR:-build-release}"
+
+rm -rf "${BUILD_DIR}"
+
+cmake -B "${BUILD_DIR}" -S . \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TEST_MODE=OFF
+
+cmake --build "${BUILD_DIR}" -j"$(nproc)"

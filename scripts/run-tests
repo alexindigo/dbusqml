@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+BUILD_DIR="${1:-build-debug}"
+COVERAGE_DIR="coverage"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+LCOV_OPTS="--ignore-errors inconsistent,empty"
+REMOVE_OPTS="--ignore-errors unused,inconsistent,empty"
+EXCLUDE_PATTERNS=('*_autogen*' '*/tests/*' '/usr/*')
+
+OVERALL_EXIT=0
+
+run_pipeline() {
+    local label=$1
+    local prefix=$2
+    local test_command=$3
+    local exit_code=0
+
+    echo ""
+    echo "=== ${label} ==="
+
+    lcov --directory "${BUILD_DIR}" -z ${LCOV_OPTS} > /dev/null 2>&1
+
+    eval "${test_command}" || exit_code=$?
+
+    if lcov --capture --directory "${BUILD_DIR}" \
+            -o "${COVERAGE_DIR}/${prefix}_raw.info" ${LCOV_OPTS} > /dev/null 2>&1 \
+            && [ -s "${COVERAGE_DIR}/${prefix}_raw.info" ]; then
+        lcov --remove "${COVERAGE_DIR}/${prefix}_raw.info" "${EXCLUDE_PATTERNS[@]}" \
+             -o "${COVERAGE_DIR}/${prefix}_clean.info" ${REMOVE_OPTS} > /dev/null 2>&1
+        genhtml "${COVERAGE_DIR}/${prefix}_clean.info" \
+                --output-directory "${COVERAGE_DIR}/html_${prefix}" > /dev/null 2>&1
+        echo "  Coverage: ${COVERAGE_DIR}/html_${prefix}/index.html"
+    else
+        echo "  (no coverage data)"
+    fi
+
+    if [ ${exit_code} -ne 0 ]; then
+        echo "  ${label}: FAILED (exit code ${exit_code})"
+        OVERALL_EXIT=${exit_code}
+    else
+        echo "  ${label}: PASSED"
+    fi
+}
+
+mkdir -p "${COVERAGE_DIR}"
+
+run_pipeline \
+    "C++ unit tests" \
+    "cpp" \
+    "(cd '${BUILD_DIR}' && ctest --output-on-failure -R test_types)"
+
+run_pipeline \
+    "D-Bus integration tests" \
+    "dbus" \
+    "(cd '${BUILD_DIR}' && ctest --output-on-failure -R test_dbus)"
+
+run_pipeline \
+    "QML API tests" \
+    "qml" \
+    "QML_IMPORT_PATH='${BUILD_DIR}' '${SCRIPT_DIR}/run-qml-tests' '${BUILD_DIR}'"
+
+COMBINE_FILES=()
+for f in "${COVERAGE_DIR}"/cpp_clean.info "${COVERAGE_DIR}"/dbus_clean.info "${COVERAGE_DIR}"/qml_clean.info; do
+    [ -f "$f" ] && COMBINE_FILES+=(-a "$f")
+done
+if [ ${#COMBINE_FILES[@]} -ge 2 ]; then
+    lcov "${COMBINE_FILES[@]}" -o "${COVERAGE_DIR}/combined.info" ${LCOV_OPTS} > /dev/null 2>&1
+    genhtml "${COVERAGE_DIR}/combined.info" \
+            --output-directory "${COVERAGE_DIR}/html_combined" > /dev/null 2>&1
+    echo ""
+    echo "Combined coverage: ${COVERAGE_DIR}/html_combined/index.html"
+fi
+
+echo ""
+for f in "${COVERAGE_DIR}"/cpp_clean.info "${COVERAGE_DIR}"/dbus_clean.info "${COVERAGE_DIR}"/qml_clean.info; do
+    [ -f "$f" ] && lcov --summary "$f" 2>&1 | grep -E "lines|functions" || true
+done
+
+echo ""
+if [ ${OVERALL_EXIT} -ne 0 ]; then
+    echo "Some tests failed."
+else
+    echo "All tests passed."
+fi
+echo "Done."
+
+exit ${OVERALL_EXIT}
