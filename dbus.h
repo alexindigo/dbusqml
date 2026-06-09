@@ -49,7 +49,11 @@ public:
     Status status() const { return m_status; }
 
     Q_INVOKABLE void call(const QString &method, const QVariantList &args = {});
+    Q_INVOKABLE void emitSignal(const QString &name, const QVariantList &args = {});
     Q_INVOKABLE static DBusConnection *connectToBus(const QString &address);
+    Q_INVOKABLE static void emitSignal(const QString &service, const QString &path,
+                                        const QString &iface, const QString &name,
+                                        const QVariantList &args = {});
 
 Q_SIGNALS:
     void serviceChanged();

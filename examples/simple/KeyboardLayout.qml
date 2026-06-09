@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -72,12 +73,12 @@ Window {
         }
     }
 
-    DBusQML.DBus {
+    DBus {
         id: locale
         service: "org.freedesktop.locale1"
         path: "/org/freedesktop/locale1"
         iface: "org.freedesktop.locale1"
-        connection: DBusQML.SystemBus
+        connection: SystemBus
 
         onIntrospectionCompleted: {
             layoutLabel.text = locale.x11Layout ? locale.x11Layout.toUpperCase() : "??"
@@ -91,7 +92,7 @@ Window {
         }
     }
 
-    DBusQML.DBus {
+    DBus {
         id: sessionBus
         service: "org.freedesktop.DBus"
         path: "/org/freedesktop/DBus"
@@ -102,14 +103,14 @@ Window {
         }
     }
 
-    DBusQML.DBus {
+    DBus {
         id: ibus
         service: "org.freedesktop.IBus"
         path: "/org/freedesktop/IBus"
         iface: "org.freedesktop.IBus"
     }
 
-    DBusQML.DBus {
+    DBus {
         id: fcitx
         service: "org.fcitx.Fcitx5.Controller1"
         path: "/controller"

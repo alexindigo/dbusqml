@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -97,7 +98,7 @@ Window {
     }
 
     // KDE Connect daemon proxy — devices() is callable directly.
-    DBusQML.DBus {
+    DBus {
         id: daemon
         service: "org.kde.kdeconnect"
         path: "/modules/kdeconnect"

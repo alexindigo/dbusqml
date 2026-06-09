@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -100,12 +101,12 @@ Window {
     // Reboot(), and PowerOff() are callable directly.
 
     // Bus daemon proxy (system bus) — NameHasOwner() is callable directly.
-    DBusQML.DBus {
+    DBus {
         id: sysd
         service: "org.freedesktop.DBus"
         path: "/org/freedesktop/DBus"
         iface: "org.freedesktop.DBus"
-        connection: DBusQML.SystemBus
+        connection: SystemBus
     }
 
 

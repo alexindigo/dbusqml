@@ -835,6 +835,32 @@ private slots:
             delete conn;
         }
     }
+
+    void testEmitSignalStatic()
+    {
+        DBusProxy::emitSignal(
+            QStringLiteral("org.freedesktop.portal.Desktop"),
+            QStringLiteral("/org/freedesktop/portal/desktop"),
+            QStringLiteral("org.freedesktop.portal.Settings"),
+            QStringLiteral("SettingChanged"),
+            { QVariant::fromValue(QStringLiteral("org.freedesktop.appearance")),
+              QVariant::fromValue(QStringLiteral("color-scheme")),
+              QVariant::fromValue(1) }
+        );
+        QVERIFY(true);
+    }
+
+    void testEmitSignalInstance()
+    {
+        DBusProxy proxy;
+        proxy.setService("org.dbusqml.TestService");
+        proxy.setPath("/TestService");
+        proxy.setIface("org.dbusqml.TestService");
+
+        proxy.emitSignal(QStringLiteral("pong"),
+            { QVariant::fromValue(QStringLiteral("hello")) });
+        QVERIFY(true);
+    }
 };
 
 int main(int argc, char *argv[])

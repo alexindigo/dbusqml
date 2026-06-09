@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -108,12 +109,12 @@ Window {
     }
 
     // Dynamic proxy — onBattery, lidIsClosed are available as properties.
-    DBusQML.DBus {
+    DBus {
         id: upower
         service: "org.freedesktop.UPower"
         path: "/org/freedesktop/UPower"
         iface: "org.freedesktop.UPower"
-        connection: DBusQML.SystemBus
+        connection: SystemBus
     }
 
     function formatTime(seconds) {

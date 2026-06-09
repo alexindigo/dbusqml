@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -100,12 +101,12 @@ Window {
     }
 
     // Dynamic proxy — UnInhibit() is callable directly after introspection.
-    DBusQML.DBus {
+    DBus {
         id: screensaver
         service: "org.freedesktop.ScreenSaver"
         path: "/org/freedesktop/ScreenSaver"
         iface: "org.freedesktop.ScreenSaver"
-        connection: DBusQML.SessionBus
+        connection: SessionBus
     }
     Text {
         anchors.right: parent.right

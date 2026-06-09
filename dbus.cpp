@@ -152,6 +152,35 @@ DBusConnection *DBusProxy::connectToBus(const QString &address)
     return new DBusConnection(conn, QString());
 }
 
+void DBusProxy::emitSignal(const QString &name, const QVariantList &args)
+{
+    if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
+        return;
+
+    QDBusMessage msg = QDBusMessage::createSignal(m_path, m_iface, name);
+    if (!args.isEmpty()) {
+        QVariantList converted = args;
+        for (int i = 0; i < converted.size(); ++i)
+            converted[i] = toDbusVariant(converted[i]);
+        msg.setArguments(converted);
+    }
+    m_bus.send(msg);
+}
+
+void DBusProxy::emitSignal(const QString &service, const QString &path,
+                            const QString &iface, const QString &name,
+                            const QVariantList &args)
+{
+    QDBusMessage msg = QDBusMessage::createSignal(path, iface, name);
+    if (!args.isEmpty()) {
+        QVariantList converted = args;
+        for (int i = 0; i < converted.size(); ++i)
+            converted[i] = toDbusVariant(converted[i]);
+        msg.setArguments(converted);
+    }
+    QDBusConnection::sessionBus().send(msg);
+}
+
 void DBusProxy::call(const QString &method, const QVariantList &args)
 {
     QDBusMessage msg = QDBusMessage::createMethodCall(m_service, m_path, m_iface, method);

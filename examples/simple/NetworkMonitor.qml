@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -114,7 +115,7 @@ Window {
     Component.onCompleted: fetchStatus()
 
     // Dynamic proxy — GetAvailable(), GetMetered(), etc. are callable directly.
-    DBusQML.DBus {
+    DBus {
         id: net
         service: "org.freedesktop.portal.Desktop"
         path: "/org/freedesktop/portal/desktop"

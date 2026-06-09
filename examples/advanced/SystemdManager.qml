@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -88,20 +89,20 @@ Window {
 
     // Dynamic proxy — after introspection, StartUnit(), StopUnit(),
     // and RestartUnit() are callable directly.
-    DBusQML.DBus {
+    DBus {
         id: systemd
         service: "org.freedesktop.systemd1"
         path: "/org/freedesktop/systemd1"
         iface: "org.freedesktop.systemd1.Manager"
-        connection: DBusQML.SystemBus
+        connection: SystemBus
     }
 
-    DBusQML.DBus {
+    DBus {
         id: systemdUnit
         service: "org.freedesktop.systemd1"
         path: "/org/freedesktop/systemd1"
         iface: "org.freedesktop.systemd1.Unit"
-        connection: DBusQML.SystemBus
+        connection: SystemBus
     }
 
     function checkUnit(name) {

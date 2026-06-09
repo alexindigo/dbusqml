@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -98,7 +99,7 @@ Window {
         }
     }
 
-    DBusQML.DBus {
+    DBus {
         id: dbusProxy
         service: "org.freedesktop.DBus"
         path: "/org/freedesktop/DBus"
