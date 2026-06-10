@@ -14,6 +14,8 @@ include(GNUInstallDirs)
 
 # Production sources
 set(DBUSQML_SOURCES
+    dbusadaptor.cpp
+    dbusadaptor.h
     dbusconnection.cpp
     dbusconnection.h
     dbuserror.h

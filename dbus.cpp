@@ -2,6 +2,7 @@
 #include "dbuspendingreply.h"
 
 #include <QDBusConnection>
+#include <QDBusConnectionInterface>
 #include <QDBusMessage>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
@@ -154,6 +155,76 @@ void DBusProxy::doIntrospect()
             });
 }
 
+void DBusProxy::setSignalsEnabled(bool v)
+{
+    if (m_signalsEnabled == v) return;
+    m_signalsEnabled = v;
+    if (m_signalsConnected) {
+        m_bus.disconnect(QString(), m_path, QString(), QString(),
+                         this, SLOT(onPropertiesChanged(QDBusMessage)));
+        m_bus.disconnect(m_service, m_path,
+                         "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                         this, SLOT(onPropertiesChanged(QDBusMessage)));
+        m_signalsConnected = false;
+    }
+    if (v && !m_service.isEmpty() && !m_path.isEmpty() && !m_iface.isEmpty())
+        QTimer::singleShot(0, this, &DBusProxy::doIntrospect);
+    emit signalsEnabledChanged();
+}
+
+void DBusProxy::setPropertiesEnabled(bool v)
+{
+    if (m_propertiesEnabled == v) return;
+    m_propertiesEnabled = v;
+    if (v && !m_service.isEmpty() && !m_path.isEmpty() && !m_iface.isEmpty())
+        fetchProperties();
+    emit propertiesEnabledChanged();
+}
+
+void DBusProxy::setWatchServiceStatus(bool v)
+{
+    if (m_watchServiceStatus == v) return;
+    m_watchServiceStatus = v;
+
+    if (v && !m_service.isEmpty()) {
+        if (!m_serviceWatcher) {
+            m_serviceWatcher = new QDBusServiceWatcher(m_service, m_bus,
+                QDBusServiceWatcher::WatchForRegistration
+                | QDBusServiceWatcher::WatchForUnregistration, this);
+            connect(m_serviceWatcher, &QDBusServiceWatcher::serviceRegistered,
+                    this, [this]() { m_serviceAvailable = true; emit serviceAvailableChanged(); });
+            connect(m_serviceWatcher, &QDBusServiceWatcher::serviceUnregistered,
+                    this, [this]() { m_serviceAvailable = false; emit serviceAvailableChanged(); });
+        }
+
+        // Check initial state: call NameHasOwner on the bus daemon
+        QDBusMessage msg = QDBusMessage::createMethodCall(
+            QStringLiteral("org.freedesktop.DBus"),
+            QStringLiteral("/org/freedesktop/DBus"),
+            QStringLiteral("org.freedesktop.DBus"),
+            QStringLiteral("NameHasOwner"));
+        msg.setArguments({ m_service });
+        QDBusPendingReply<bool> nameReply = m_bus.asyncCall(msg);
+        auto *watcher = new QDBusPendingCallWatcher(nameReply, this);
+        connect(watcher, &QDBusPendingCallWatcher::finished, this,
+                [this](QDBusPendingCallWatcher *w) {
+                    QDBusPendingReply<bool> reply = *w;
+                    if (!reply.isError()) {
+                        m_serviceAvailable = reply.value();
+                        emit serviceAvailableChanged();
+                    }
+                    w->deleteLater();
+                });
+    }
+
+    if (!v && m_serviceWatcher) {
+        m_serviceWatcher->deleteLater();
+        m_serviceWatcher = nullptr;
+    }
+
+    emit watchServiceStatusChanged();
+}
+
 void DBusProxy::setConnection(DBusConnection *v)
 {
     if (m_conn == v) return;
@@ -234,6 +305,33 @@ void DBusProxy::call(const QString &method, const QVariantList &args)
             converted[i] = toDbusVariant(converted[i]);
         msg.setArguments(converted);
     }
+    m_bus.asyncCall(msg);
+}
+
+DBusPendingReply *DBusProxy::getProperty(const QString &name)
+{
+    if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
+        return nullptr;
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        m_service, m_path, "org.freedesktop.DBus.Properties", "Get");
+    msg.setArguments({ m_iface, name });
+
+    auto pending = m_bus.asyncCall(msg);
+    auto watcher = new QDBusPendingCallWatcher(pending, this);
+    auto reply = new DBusPendingReply(this);
+    reply->setWatcher(watcher);
+    return reply;
+}
+
+void DBusProxy::setProperty(const QString &name, const QVariant &value)
+{
+    if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
+        return;
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
+    msg.setArguments({ m_iface, name, QVariant::fromValue(QDBusVariant(value)) });
     m_bus.asyncCall(msg);
 }
 
@@ -360,20 +458,23 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
                  qPrintable(m_iface), qPrintable(reader.errorString()));
     }
 
-    for (const QString &sigName : signalNames) {
-        m_bus.connect(QString(), m_path, m_iface, sigName,
+    if (m_signalsEnabled) {
+        for (const QString &sigName : signalNames) {
+            m_bus.connect(QString(), m_path, m_iface, sigName,
+                          this, SLOT(onPropertiesChanged(QDBusMessage)));
+        }
+
+        m_bus.connect(m_service, m_path,
+                      "org.freedesktop.DBus.Properties", "PropertiesChanged",
                       this, SLOT(onPropertiesChanged(QDBusMessage)));
+
+        m_signalsConnected = true;
     }
-
-    m_bus.connect(m_service, m_path,
-                  "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                  this, SLOT(onPropertiesChanged(QDBusMessage)));
-
-    m_signalsConnected = true;
 
     setupDynamicMethods(methodNames);
 
-    fetchProperties();
+    if (m_propertiesEnabled)
+        fetchProperties();
 }
 
 #include "dbus.moc"
