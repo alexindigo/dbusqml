@@ -40,6 +40,19 @@ private:
     DBusProxy *m_proxy;
 };
 
+// Convert D-Bus PascalCase property name to QML camelCase.
+// Handles abbreviations: "Percentage" → percentage, "URL" → url, "XMLConfig" → xmlConfig
+static QString dbusPropToQml(const QString &name)
+{
+    if (name.isEmpty()) return name;
+    int upper = 0;
+    while (upper < name.size() && name[upper].isUpper())
+        ++upper;
+    if (upper <= 1)
+        return name.at(0).toLower() + name.mid(1);
+    return name.left(upper).toLower() + name.mid(upper);
+}
+
 DBusProxy::DBusProxy(QObject *parent)
     : QQmlPropertyMap(this, parent)
     , m_bus(QDBusConnection::sessionBus())
@@ -49,9 +62,10 @@ DBusProxy::DBusProxy(QObject *parent)
 DBusProxy::~DBusProxy()
 {
     if (m_signalsConnected) {
-        m_bus.disconnect(m_service, m_path, QString(), QString(),
+        m_bus.disconnect(QString(), m_path, QString(), QString(),
                          this, SLOT(onPropertiesChanged(QDBusMessage)));
-        m_bus.disconnect(m_service, m_path, m_iface, QString(),
+        m_bus.disconnect(m_service, m_path,
+                         "org.freedesktop.DBus.Properties", "PropertiesChanged",
                          this, SLOT(onPropertiesChanged(QDBusMessage)));
         m_signalsConnected = false;
     }
@@ -85,13 +99,15 @@ void DBusProxy::setPath(const QString &v)
 void DBusProxy::setIface(const QString &v)
 {
     if (m_iface == v) return;
+    QString oldIface = m_iface;
     m_iface = v;
     emit ifaceChanged();
 
     if (m_signalsConnected) {
-        m_bus.disconnect(m_service, m_path, QString(), QString(),
+        m_bus.disconnect(QString(), m_path, QString(), QString(),
                          this, SLOT(onPropertiesChanged(QDBusMessage)));
-        m_bus.disconnect(m_service, m_path, m_iface, QString(),
+        m_bus.disconnect(m_service, m_path,
+                         "org.freedesktop.DBus.Properties", "PropertiesChanged",
                          this, SLOT(onPropertiesChanged(QDBusMessage)));
         m_signalsConnected = false;
     }
@@ -108,6 +124,13 @@ void DBusProxy::doIntrospect()
     if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
         return;
 
+    QString cacheKey = m_service + QLatin1Char('|') + m_path;
+    auto it = m_introspectCache.find(cacheKey);
+    if (it != m_introspectCache.end()) {
+        onIntrospectionReady(it.value());
+        return;
+    }
+
     m_status = Loading;
     emit statusChanged();
 
@@ -117,12 +140,13 @@ void DBusProxy::doIntrospect()
     m_introspectWatcher = new QDBusPendingCallWatcher(pending, this);
 
     connect(m_introspectWatcher, &QDBusPendingCallWatcher::finished, this,
-            [this](QDBusPendingCallWatcher *w) {
+            [this, cacheKey](QDBusPendingCallWatcher *w) {
                 m_introspectWatcher = nullptr;
                 QDBusPendingReply<QString> reply = *w;
-                if (!reply.isError())
+                if (!reply.isError()) {
+                    m_introspectCache.insert(cacheKey, reply.value());
                     onIntrospectionReady(reply.value());
-                else {
+                } else {
                     m_status = Error;
                     emit statusChanged();
                 }
@@ -133,6 +157,16 @@ void DBusProxy::doIntrospect()
 void DBusProxy::setConnection(DBusConnection *v)
 {
     if (m_conn == v) return;
+
+    if (m_signalsConnected) {
+        m_bus.disconnect(QString(), m_path, QString(), QString(),
+                         this, SLOT(onPropertiesChanged(QDBusMessage)));
+        m_bus.disconnect(m_service, m_path,
+                         "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                         this, SLOT(onPropertiesChanged(QDBusMessage)));
+        m_signalsConnected = false;
+    }
+
     m_conn = v;
     if (v) {
         m_bus = static_cast<QDBusConnection>(*v);
@@ -140,6 +174,10 @@ void DBusProxy::setConnection(DBusConnection *v)
         m_bus = QDBusConnection::sessionBus();
     }
     emit connectionChanged();
+
+    // Re-introspect on the new bus to re-establish signal subscriptions
+    if (!m_service.isEmpty() && !m_path.isEmpty() && !m_iface.isEmpty())
+        QTimer::singleShot(0, this, &DBusProxy::doIntrospect);
 }
 
 DBusConnection *DBusProxy::connectToBus(const QString &address)
@@ -156,6 +194,12 @@ void DBusProxy::emitSignal(const QString &name, const QVariantList &args)
 {
     if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
         return;
+
+    // Try to claim the service name so the signal appears to come from the
+    // expected service (e.g. org.freedesktop.portal.Desktop).
+    // If the name is already owned (by the real portal), this silently fails.
+    if (!m_service.startsWith(':'))
+        m_bus.registerService(m_service);
 
     QDBusMessage msg = QDBusMessage::createSignal(m_path, m_iface, name);
     if (!args.isEmpty()) {
@@ -217,7 +261,7 @@ void DBusProxy::fetchProperties()
                 if (!reply.isError()) {
                     QVariantMap props = reply.value();
                     for (auto it = props.begin(); it != props.end(); ++it) {
-                        QString qmlName = it.key().at(0).toLower() + it.key().mid(1);
+                        QString qmlName = dbusPropToQml(it.key());
                         insert(qmlName, it.value());
                     }
                     m_status = Ready;
@@ -238,7 +282,7 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg)
         if (msg.member() == "PropertiesChanged" && msg.arguments().size() >= 2) {
             QVariantMap changed = qdbus_cast<QVariantMap>(msg.arguments()[1]);
             for (auto it = changed.begin(); it != changed.end(); ++it) {
-                QString qmlName = it.key().at(0).toLower() + it.key().mid(1);
+                QString qmlName = dbusPropToQml(it.key());
                 insert(qmlName, it.value());
             }
         }
@@ -254,21 +298,26 @@ void DBusProxy::setupDynamicMethods(const QStringList &methodNames)
 
     auto *helper = new DbusMethodHelper(this, this);
     QJSValue helperObj = engine->newQObject(helper);
-    engine->globalObject().setProperty(QStringLiteral("__dbus_helper"), helperObj);
+
+    // Use a per-proxy key so multiple instances sharing the same engine
+    // don't overwrite each other's helper
+    QString helperKey = QStringLiteral("__dbus_helper_%1").arg(reinterpret_cast<quintptr>(this));
+    engine->globalObject().setProperty(helperKey, helperObj);
+
+    QString jsTemplate = QStringLiteral(
+        "(function() {"
+        "  var $g = Function('return this')();"
+        "  var helperKey = '%1';"
+        "  var methodName = '%2';"
+        "  return function(...args) {"
+        "    return $g[helperKey].callMethod(methodName, args);"
+        "  };"
+        "})()");
 
     for (const QString &name : methodNames) {
         if (name.isEmpty()) continue;
 
-        QString js = QStringLiteral(
-            "(function() {"
-            "  var methodName = '%1';"
-            "  return function(...args) {"
-            "    return __dbus_helper.callMethod(methodName, args);"
-            "  };"
-            "})()")
-            .arg(name);
-
-        QJSValue fn = engine->evaluate(js);
+        QJSValue fn = engine->evaluate(jsTemplate.arg(helperKey, name));
         if (fn.isError()) {
             qWarning("DBusProxy: failed to create method '%s': %s",
                      qPrintable(name), qPrintable(fn.toString()));
@@ -312,7 +361,7 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
     }
 
     for (const QString &sigName : signalNames) {
-        m_bus.connect(m_service, m_path, m_iface, sigName,
+        m_bus.connect(QString(), m_path, m_iface, sigName,
                       this, SLOT(onPropertiesChanged(QDBusMessage)));
     }
 

@@ -861,6 +861,33 @@ private slots:
             { QVariant::fromValue(QStringLiteral("hello")) });
         QVERIFY(true);
     }
+
+    void testEmitSignalRegistersName()
+    {
+        // Verify that emitSignal tries to claim the service name
+        DBusProxy proxy;
+        proxy.setService("org.dbusqml.TestPortalName");
+        proxy.setPath("/Test");
+        proxy.setIface("org.dbusqml.TestName");
+
+        QDBusConnection bus = QDBusConnection::sessionBus();
+
+        // The name shouldn't be owned yet
+        QDBusReply<bool> before = bus.interface()->isServiceRegistered(
+            QStringLiteral("org.dbusqml.TestPortalName"));
+        QVERIFY(before.isValid());
+        QCOMPARE(before.value(), false);
+
+        // Emit — should register the name internally
+        proxy.emitSignal(QStringLiteral("test"), {});
+        QTest::qWait(500);
+
+        // The name should now be owned by our connection
+        QDBusReply<bool> after = bus.interface()->isServiceRegistered(
+            QStringLiteral("org.dbusqml.TestPortalName"));
+        QVERIFY(after.isValid());
+        QCOMPARE(after.value(), true);
+    }
 };
 
 int main(int argc, char *argv[])

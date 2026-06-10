@@ -2,6 +2,7 @@
 
 #include <QDBusConnection>
 #include <QDBusPendingCallWatcher>
+#include <QHash>
 #include <QJSValue>
 #include <QObject>
 #include <QQmlEngine>
@@ -86,4 +87,5 @@ private:
     Status m_status = Null;
     QDBusPendingCallWatcher *m_introspectWatcher = nullptr;
     QList<QJSValue> m_cachedFunctions;
+    QHash<QString, QString> m_introspectCache;
 };
