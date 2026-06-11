@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "../assets"
 import DBus 1.0
 import DBus 1.0 as DBusQML
 
@@ -121,21 +122,7 @@ Window {
         path: "/org/freedesktop/portal/desktop"
         iface: "org.freedesktop.portal.NetworkMonitor"
     }
-    Text {
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: 8
-        text: "✕"
-        font.pixelSize: 16
-        color: mouseArea.containsMouse ? "black" : "#999"
-
-        MouseArea {
-            id: mouseArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: Qt.quit()
-        }
-    }
+    CloseButton {}
+    
 
 }

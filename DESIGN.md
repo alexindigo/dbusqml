@@ -89,11 +89,6 @@ onSignalReceived: function(name, args) {
 }
 ```
 
-### `BusType` (enum)
-
-- `BusType.Session`
-- `BusType.System`
-
 ### `DBusError` (value type)
 
 ```qml

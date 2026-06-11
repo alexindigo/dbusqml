@@ -55,7 +55,7 @@ public:
 
     Status status() const { return m_status; }
 
-    Q_INVOKABLE void call(const QString &method, const QVariantList &args = {});
+    Q_INVOKABLE DBusPendingReply *call(const QString &method, const QVariantList &args = {});
     Q_INVOKABLE DBusPendingReply *getProperty(const QString &name);
     Q_INVOKABLE void setProperty(const QString &name, const QVariant &value);
     Q_INVOKABLE void emitSignal(const QString &name, const QVariantList &args = {});

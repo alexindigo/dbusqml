@@ -12,6 +12,13 @@ import DBus 1.0
 
 ## Core Components
 
+### `busType` (Enum)
+
+```qml
+busType.Session      // The session bus (personal applications)
+busType.System       // The system bus (system services)
+```
+
 ### Bus Connections
 
 The module provides singleton access to the standard D-Bus connections.
@@ -64,7 +71,7 @@ bat.isPresent              // → Properties.Get("...Device", "IsPresent")
 bat.timeToEmpty            // → Properties.Get("...Device", "TimeToEmpty")
 ```
 
-Properties auto-update via `PropertiesChanged` signals.
+Properties auto-update via `PropertiesChanged` signals. Property names follow QML camelCase — see Property Name Conventions below.
 
 #### Configuration Properties
 
@@ -75,13 +82,27 @@ Properties auto-update via `PropertiesChanged` signals.
 | `iface` | `string` | The D-Bus interface name. |
 | `connection` | `DBusConnection` | The connection associated with this proxy. |
 
+#### Runtime Properties
+
+| Property | Type | Description |
+| :--- | :--- | :--- |
+| `status` | `enum` | Null (0), Loading (1), Ready (2), Error (3) — introspection state. |
+| `serviceAvailable` | `bool` | Whether the remote service is currently on the bus (requires `watchServiceStatus`). |
+| `signalsEnabled` | `bool` | Whether D-Bus signal subscription is active (default true). |
+| `watchServiceStatus` | `bool` | Whether to monitor if the remote service is running (default false). |
+| `propertiesEnabled` | `bool` | Whether to auto-fetch D-Bus properties after introspection (default true). |
+
 #### Built-in Methods
 
-| Method | Arguments | Description |
-| :--- | :--- | :--- |
-| `call(method, args)` | `string method`, `list args` | Generic fallback for calling any D-Bus method. |
+| Method | Arguments | Returns | Description |
+| :--- | :--- | :--- | :--- |
+| `call(method, args)` | `string method`, `list args` | `DBusPendingReply` | Call any D-Bus method. Returns a pending reply for error/result feedback. |
+| `getProperty(name)` | `string name` | `DBusPendingReply` | Read a single D-Bus property directly via `Properties.Get`. |
+| `setProperty(name, value)` | `string name`, `variant value` | — | Write a D-Bus property directly via `Properties.Set`. |
+| `emitSignal(name, args)` | `string name`, `list args` | — | Emit a D-Bus signal from this proxy's path/interface. |
+| `connectToBus(address)` | `string address` | `DBusConnection` | (static) Connect to a custom D-Bus address. Returns null on failure. |
 
-#### Signals
+#### Configuration Signals
 
 | Signal | Arguments | Description |
 | :--- | :--- | :--- |
@@ -89,8 +110,28 @@ Properties auto-update via `PropertiesChanged` signals.
 | `pathChanged` | | Emitted when the `path` property changes. |
 | `ifaceChanged` | | Emitted when the `iface` property changes. |
 | `connectionChanged` | | Emitted when the `connection` property changes. |
-| `signalReceived(name, args)` | `string name`, `list args` | Emitted when a D-Bus signal is received on this object. |
+
+#### Lifecycle Signals
+
+| Signal | Arguments | Description |
+| :--- | :--- | :--- |
+| `statusChanged` | | Emitted when `status` changes (Null/Loading/Ready/Error). |
+| `introspectionCompleted` | | Emitted after introspection finishes and dynamic methods/properties are ready. |
+| `serviceAvailableChanged` | | Emitted when `serviceAvailable` changes (requires `watchServiceStatus`). |
+
+#### Data Signals
+
+| Signal | Arguments | Description |
+| :--- | :--- | :--- |
+| `signalReceived(name, args)` | `string name`, `list args` | Emitted when a D-Bus signal is received. |
 | `valueChanged(key, value)` | `string key`, `variant value` | Emitted when a dynamic property changes (from QQmlPropertyMap). |
+
+#### Toggle Signals
+
+| Signal | Description |
+| :--- | :--- |
+| `signalsEnabledChanged` | Emitted when `signalsEnabled` is toggled. |
+| `propertiesEnabledChanged` | Emitted when `propertiesEnabled` is toggled. |
 
 Example usage:
 
@@ -119,7 +160,17 @@ DBus {
 
 ### `DBusConnection`
 
-`DBusConnection` provides methods for making asynchronous calls to the bus.
+`DBusConnection` provides methods for making asynchronous calls to the bus. Obtain one via `connectToBus()` or reuse the built-in `SessionBus`/`SystemBus`:
+
+```qml
+// Use the built-in singletons
+SessionBus.asyncCall({...})
+SystemBus.asyncCall({...})
+
+// Connect to a custom bus address
+var custom = DBus.connectToBus("unix:path=/tmp/kvm-bus")
+custom.asyncCall({...})
+```
 
 #### Methods
 
@@ -161,7 +212,73 @@ SessionBus.asyncCall({
 
 ---
 
+### `DBusAdaptor` (Server Element)
+
+The `DBusAdaptor` element registers a D-Bus object on the bus and responds to incoming method calls. It is the server-side counterpart of the `DBus` proxy element.
+
+```qml
+DBusAdaptor {
+    id: adaptor
+    service: "org.freedesktop.impl.portal.atmosphera"
+    path: "/org/freedesktop/portal/desktop"
+    iface: "org.freedesktop.impl.portal.Settings"
+
+    // QML properties become D-Bus properties (readable via Properties.Get/GetAll)
+    property int colorScheme: 0
+
+    // QML functions become D-Bus methods (callable from other processes)
+    function readSetting(ns, key) {
+        if (ns === "org.freedesktop.appearance" && key === "color-scheme")
+            return colorScheme
+        return ""
+    }
+}
+```
+
+When the adaptor is registered on the bus, other processes can call `Get`, `GetAll`, `Set` on its properties, and invoke its QML functions as D-Bus methods.
+
+**Limitations:**
+- Function names must follow QML camelCase convention (lowercase first letter)
+- Signal forwarding to D-Bus requires explicit `emitSignal()` calls — QML `signal` declarations are not automatically forwarded
+- Maximum 5 parameters for forwarded signals
+
+#### Properties
+
+| Property | Type | Description |
+| :--- | :--- | :--- |
+| `service` | `string` | The D-Bus service name to claim (optional — omit for unique-name-only registration). |
+| `path` | `string` | The object path to register at. |
+| `iface` | `string` | The interface name to expose. |
+| `connection` | `DBusConnection` | The bus to register on (default session bus). |
+
+#### Methods
+
+| Method | Arguments | Description |
+| :--- | :--- | :--- |
+| `emitSignal(name, args)` | `string name`, `list args` | Emit a D-Bus signal on this adaptor's path/interface. |
+
+---
+
 ## Data Types
+
+### Property Name Conventions
+
+D-Bus property names use PascalCase (`Percentage`, `IsPresent`). When exposed as QML properties, the first letter is lowercased automatically:
+
+| D-Bus name | QML property |
+|:---|:---|
+| `Percentage` | `percentage` |
+| `IsPresent` | `isPresent` |
+| `TimeToEmpty` | `timeToEmpty` |
+| `X11Layout` | `x11Layout` |
+
+For consecutive uppercase prefixes (abbreviations), the entire prefix is lowercased:
+
+| D-Bus name | QML property |
+|:---|:---|
+| `URL` | `url` |
+| `XMLConfig` | `xmlConfig` |
+| `DBusAddress` | `dbusAddress` |
 
 ### `DBusMessage` (Structured Value)
 
@@ -221,11 +338,14 @@ Represents a D-Bus error.
 
 ### D-Bus Value Types
 
-These types are used for explicit typing of D-Bus data. Access them through a module alias when `import DBus 1.0` (the element `DBus` shadows the module namespace):
+These types are used for explicit typing of D-Bus data when Qt's auto-conversion doesn't produce the correct D-Bus type signature. Access them through a module alias — the `DBus` element shadows the module namespace, so value types use a separate import:
 
 ```qml
-import DBus 1.0 as DBusQML
+import DBus 1.0
+import DBus 1.0 as DBusQML    // alias for value types
 
+// Without alias: element is DBus {}, singletons are SessionBus, etc.
+// With alias: value types are DBusQML.uint32(), DBusQML.string(), etc.
 DBusQML.uint32(42)
 DBusQML.int64(21474836470)
 DBusQML.string("hello")
@@ -234,6 +354,8 @@ DBusQML.objectPath("/org/freedesktop/UPower")
 DBusQML.variant("any value")
 DBusQML.dict({ key: "value" })
 ```
+
+Most examples don't need value types — plain JS strings/numbers/booleans work for common cases. Value types are only needed when you must force a specific D-Bus signature (e.g., distinguish `uint32` from `int32`).
 
 | C++ Type | QML Type | Description |
 | :--- | :--- | :--- |

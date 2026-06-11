@@ -9,6 +9,57 @@
 #include <QRegularExpression>
 #include <qqmlinfo.h>
 
+// Helper: forwards QML signal emissions to D-Bus.
+// One relay per signal, with the signal name baked in at construction.
+class SignalRelay : public QObject {
+    Q_OBJECT
+public:
+    SignalRelay(DBusAdaptor *adaptor, const QString &signalName, QObject *parent = nullptr)
+        : QObject(parent), m_adaptor(adaptor), m_name(signalName) {}
+
+public slots:
+    void forward() {
+        QDBusConnection conn = m_adaptor->connection()
+            ? static_cast<QDBusConnection>(*m_adaptor->connection())
+            : QDBusConnection::sessionBus();
+        conn.send(QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name));
+    }
+    void forward(QVariant a0) {
+        QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
+        msg.setArguments({a0});
+        busConn().send(msg);
+    }
+    void forward(QVariant a0, QVariant a1) {
+        QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
+        msg.setArguments({a0, a1});
+        busConn().send(msg);
+    }
+    void forward(QVariant a0, QVariant a1, QVariant a2) {
+        QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
+        msg.setArguments({a0, a1, a2});
+        busConn().send(msg);
+    }
+    void forward(QVariant a0, QVariant a1, QVariant a2, QVariant a3) {
+        QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
+        msg.setArguments({a0, a1, a2, a3});
+        busConn().send(msg);
+    }
+    void forward(QVariant a0, QVariant a1, QVariant a2, QVariant a3, QVariant a4) {
+        QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
+        msg.setArguments({a0, a1, a2, a3, a4});
+        busConn().send(msg);
+    }
+
+private:
+    QDBusConnection busConn() const {
+        return m_adaptor->connection()
+            ? static_cast<QDBusConnection>(*m_adaptor->connection())
+            : QDBusConnection::sessionBus();
+    }
+    DBusAdaptor *m_adaptor;
+    QString m_name;
+};
+
 DBusAdaptor::DBusAdaptor(QObject *parent)
     : QDBusVirtualObject(parent)
 {
@@ -71,6 +122,35 @@ void DBusAdaptor::componentComplete()
         if (!conn.registerService(m_service)) {
             qmlInfo(this) << "Failed to register service" << m_service;
         }
+    }
+
+    // Auto-connect user-defined QML signals to D-Bus
+    const QMetaObject *meta = metaObject();
+    static const QStringList builtInSignals = {
+        QStringLiteral("destroyed"), QStringLiteral("objectNameChanged"),
+        QStringLiteral("serviceChanged"), QStringLiteral("pathChanged"),
+        QStringLiteral("ifaceChanged"), QStringLiteral("connectionChanged")
+    };
+
+    for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
+        QMetaMethod sig = meta->method(i);
+        if (sig.methodType() != QMetaMethod::Signal) continue;
+        QString name = QString::fromLatin1(sig.name());
+        if (builtInSignals.contains(name)) continue;
+
+        int paramCount = sig.parameterCount();
+        if (paramCount > 5) {
+            qmlInfo(this) << "Signal" << name << "has" << paramCount
+                         << "parameters — max 5 supported for auto-forwarding";
+            continue;
+        }
+
+        auto *relay = new SignalRelay(this, name, this);
+        // Connect signal to the matching forward slot
+        // The slot indices are: 1=forward(), 2=forward(QVariant), 3=forward(QVariant,QVariant)...
+        int slotIdx = relay->metaObject()->methodOffset() + paramCount;
+        QMetaMethod slot = relay->metaObject()->method(slotIdx);
+        QObject::connect(this, sig, relay, slot);
     }
 }
 
@@ -265,3 +345,5 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
     return false;
 }
+
+#include "dbusadaptor.moc"

@@ -296,8 +296,11 @@ void DBusProxy::emitSignal(const QString &service, const QString &path,
     QDBusConnection::sessionBus().send(msg);
 }
 
-void DBusProxy::call(const QString &method, const QVariantList &args)
+DBusPendingReply *DBusProxy::call(const QString &method, const QVariantList &args)
 {
+    if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
+        return nullptr;
+
     QDBusMessage msg = QDBusMessage::createMethodCall(m_service, m_path, m_iface, method);
     if (!args.isEmpty()) {
         QVariantList converted = args;
@@ -305,7 +308,11 @@ void DBusProxy::call(const QString &method, const QVariantList &args)
             converted[i] = toDbusVariant(converted[i]);
         msg.setArguments(converted);
     }
-    m_bus.asyncCall(msg);
+    auto pending = m_bus.asyncCall(msg);
+    auto watcher = new QDBusPendingCallWatcher(pending, this);
+    auto reply = new DBusPendingReply(this);
+    reply->setWatcher(watcher);
+    return reply;
 }
 
 DBusPendingReply *DBusProxy::getProperty(const QString &name)
