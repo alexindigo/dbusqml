@@ -79,7 +79,7 @@ Window {
     }
 
     function inhibit() {
-        var reply = screensaver.Inhibit(
+        var reply = screensaver.inhibit(
             "dbusqml-example",
             "Example demonstrating ScreenSaver API"
         )
@@ -95,7 +95,7 @@ Window {
     }
 
     function uninhibit() {
-        screensaver.UnInhibit(inhibitCookie)
+        screensaver.unInhibit(inhibitCookie)
         inhibitCookie = 0
         inhibited = false
         statusText.text = "ScreenSaver unhibited"

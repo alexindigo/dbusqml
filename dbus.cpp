@@ -1,5 +1,6 @@
 #include "dbus.h"
 #include "dbuspendingreply.h"
+#include "dbustypes.h"
 
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
@@ -11,12 +12,68 @@
 #include <QTimer>
 #include <QXmlStreamReader>
 
+// Map a D-Bus type signature character to the corresponding C++ QVariant type.
+// Used to convert JS values to the correct D-Bus type before calling a method.
+static QVariant toTypedDbusVariant(const QVariant &v, const QString &dbusType)
+{
+    if (dbusType.isEmpty() || dbusType == "v")
+        return toDbusVariant(v);
+
+    if (v.userType() == qMetaTypeId<DBus::Uint32>())
+        return QVariant::fromValue(v.value<DBus::Uint32>().value);
+    if (v.userType() == qMetaTypeId<DBus::Int32>())
+        return QVariant::fromValue(v.value<DBus::Int32>().value);
+    // ... other typed wrappers are handled by toDbusVariant fallback
+
+    // Plain JS value — coerce to the expected D-Bus type
+    if (dbusType == "u") {
+        bool ok = false;
+        uint val = v.toUInt(&ok);
+        if (ok) return QVariant::fromValue(val);
+    }
+    if (dbusType == "i") {
+        bool ok = false;
+        int val = v.toInt(&ok);
+        if (ok) return QVariant::fromValue(val);
+    }
+    if (dbusType == "b")
+        return QVariant::fromValue(v.toBool());
+    if (dbusType == "d")
+        return QVariant::fromValue(v.toDouble());
+    if (dbusType == "y")
+        return QVariant::fromValue(v.value<uchar>());
+    if (dbusType == "n") {
+        bool ok = false;
+        short val = v.toInt(&ok);
+        if (ok) return QVariant::fromValue(val);
+    }
+    if (dbusType == "q") {
+        bool ok = false;
+        ushort val = v.toUInt(&ok);
+        if (ok) return QVariant::fromValue(val);
+    }
+    if (dbusType == "x") {
+        bool ok = false;
+        qint64 val = v.toLongLong(&ok);
+        if (ok) return QVariant::fromValue(val);
+    }
+    if (dbusType == "t") {
+        bool ok = false;
+        quint64 val = v.toULongLong(&ok);
+        if (ok) return QVariant::fromValue(val);
+    }
+    if (dbusType == "s")
+        return QVariant::fromValue(v.toString());
+
+    return toDbusVariant(v);
+}
+
 // Helper object exposed to the JS engine so evaluated functions can make D-Bus calls
 class DbusMethodHelper : public QObject {
     Q_OBJECT
 public:
-    DbusMethodHelper(DBusProxy *proxy, QObject *parent = nullptr)
-        : QObject(parent), m_proxy(proxy) {}
+    DbusMethodHelper(DBusProxy *proxy, const QHash<QString, QStringList> *argTypes, QObject *parent = nullptr)
+        : QObject(parent), m_proxy(proxy), m_argTypes(argTypes) {}
 
     Q_INVOKABLE DBusPendingReply *callMethod(const QString &method, const QVariantList &args) {
         QDBusConnection bus = m_proxy->connection()
@@ -25,9 +82,14 @@ public:
         QDBusMessage msg = QDBusMessage::createMethodCall(
             m_proxy->service(), m_proxy->path(), m_proxy->iface(), method);
         if (!args.isEmpty()) {
+            QStringList types = m_argTypes ? m_argTypes->value(method) : QStringList();
             QVariantList converted = args;
-            for (int i = 0; i < converted.size(); ++i)
-                converted[i] = toDbusVariant(converted[i]);
+            for (int i = 0; i < converted.size(); ++i) {
+                QString expectedType;
+                if (i < types.size())
+                    expectedType = types[i];
+                converted[i] = toTypedDbusVariant(converted[i], expectedType);
+            }
             msg.setArguments(converted);
         }
         auto pending = bus.asyncCall(msg);
@@ -39,6 +101,7 @@ public:
 
 private:
     DBusProxy *m_proxy;
+    const QHash<QString, QStringList> *m_argTypes;
 };
 
 // Convert D-Bus PascalCase property name to QML camelCase.
@@ -303,9 +366,14 @@ DBusPendingReply *DBusProxy::call(const QString &method, const QVariantList &arg
 
     QDBusMessage msg = QDBusMessage::createMethodCall(m_service, m_path, m_iface, method);
     if (!args.isEmpty()) {
+        QStringList types = m_methodArgTypes.value(method);
         QVariantList converted = args;
-        for (int i = 0; i < converted.size(); ++i)
-            converted[i] = toDbusVariant(converted[i]);
+        for (int i = 0; i < converted.size(); ++i) {
+            QString expectedType;
+            if (i < types.size())
+                expectedType = types[i];
+            converted[i] = toTypedDbusVariant(converted[i], expectedType);
+        }
         msg.setArguments(converted);
     }
     auto pending = m_bus.asyncCall(msg);
@@ -401,7 +469,7 @@ void DBusProxy::setupDynamicMethods(const QStringList &methodNames)
     auto *engine = qmlEngine(this);
     if (!engine) return;
 
-    auto *helper = new DbusMethodHelper(this, this);
+    auto *helper = new DbusMethodHelper(this, &m_methodArgTypes, this);
     QJSValue helperObj = engine->newQObject(helper);
 
     // Use a per-proxy key so multiple instances sharing the same engine
@@ -430,7 +498,8 @@ void DBusProxy::setupDynamicMethods(const QStringList &methodNames)
         }
 
         m_cachedFunctions.append(fn);
-        insert(name, QVariant::fromValue(fn));
+        QString qmlName = dbusPropToQml(name);
+        insert(qmlName, QVariant::fromValue(fn));
     }
 }
 
@@ -439,21 +508,36 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
     QXmlStreamReader reader(xml);
     QStringList signalNames;
     QStringList methodNames;
+    m_methodArgTypes.clear();
 
     while (!reader.atEnd()) {
         reader.readNext();
         if (reader.isStartElement()) {
             if (reader.name() == "interface" &&
                 reader.attributes().value("name") == m_iface) {
+                QString currentMethod;
+                QStringList currentArgs;
                 while (!(reader.isEndElement() && reader.name() == "interface")) {
                     reader.readNext();
                     if (reader.isStartElement()) {
                         if (reader.name() == "signal") {
                             signalNames << reader.attributes().value("name").toString();
                         } else if (reader.name() == "method") {
-                            methodNames << reader.attributes().value("name").toString();
+                if (!currentMethod.isEmpty()) {
+                    m_methodArgTypes.insert(currentMethod, currentArgs);
+                    m_methodArgTypes.insert(dbusPropToQml(currentMethod), currentArgs);
+                }
+                currentMethod = reader.attributes().value("name").toString();
+                currentArgs.clear();
+                methodNames << currentMethod;
+                        } else if (reader.name() == "arg" && !currentMethod.isEmpty()) {
+                            currentArgs << reader.attributes().value("type").toString();
                         }
                     }
+                }
+                if (!currentMethod.isEmpty()) {
+                    m_methodArgTypes.insert(currentMethod, currentArgs);
+                    m_methodArgTypes.insert(dbusPropToQml(currentMethod), currentArgs);
                 }
                 break;
             }

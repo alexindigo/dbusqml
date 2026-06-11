@@ -205,7 +205,9 @@ Window {
         })
     }
 
-    Component.onCompleted: fetchDevices()
+    Component.onCompleted: {
+        daemon.introspectionCompleted.connect(fetchDevices)
+    }
 
     Text {
         anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 8

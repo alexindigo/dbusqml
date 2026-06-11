@@ -37,7 +37,7 @@ Window {
             font.pixelSize: 16
             onClicked: {
                 statusText.text = "Calling Suspend..."
-                logind.Suspend(true)
+                logind.suspend(true)
             }
         }
 
@@ -48,7 +48,7 @@ Window {
             font.pixelSize: 16
             onClicked: {
                 statusText.text = "Calling Hibernate..."
-                logind.Hibernate(true)
+                logind.hibernate(true)
             }
         }
 
@@ -59,7 +59,7 @@ Window {
             font.pixelSize: 16
             onClicked: {
                 statusText.text = "Calling Reboot..."
-                logind.Reboot(true)
+                logind.reboot(true)
             }
         }
 
@@ -70,7 +70,7 @@ Window {
             font.pixelSize: 16
             onClicked: {
                 statusText.text = "Calling Power Off..."
-                logind.PowerOff(true)
+                logind.powerOff(true)
             }
         }
 
@@ -88,7 +88,7 @@ Window {
             text: "Check if logind is available"
             Layout.alignment: Qt.AlignHCenter
             onClicked: {
-                var reply = sysd.NameHasOwner("org.freedesktop.login1")
+                var reply = sysd.nameHasOwner("org.freedesktop.login1")
                 reply.finished.connect(function() {
                     statusText.text = reply.value
                         ? "logind is available"
@@ -98,10 +98,16 @@ Window {
         }
     }
 
-    // Dynamic proxy — after introspection, Suspend(), Hibernate(),
-    // Reboot(), and PowerOff() are callable directly.
+    // Dynamic proxy — Suspend(), Hibernate(), Reboot(), PowerOff() are callable directly.
+    DBus {
+        id: logind
+        service: "org.freedesktop.login1"
+        path: "/org/freedesktop/login1"
+        iface: "org.freedesktop.login1.Manager"
+        connection: SystemBus
+    }
 
-    // Bus daemon proxy (system bus) — NameHasOwner() is callable directly.
+    // Bus daemon proxy — NameHasOwner() is callable directly.
     DBus {
         id: sysd
         service: "org.freedesktop.DBus"

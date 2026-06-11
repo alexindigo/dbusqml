@@ -81,15 +81,15 @@ Window {
 
                 Button {
                     text: "⏮"
-                    onClicked: playerProxy.Previous()
+                    onClicked: playerProxy.previous()
                 }
                 Button {
                     text: playerProxy.playbackStatus === "Playing" ? "⏸" : "▶"
-                    onClicked: playerProxy.PlayPause()
+                    onClicked: playerProxy.playPause()
                 }
                 Button {
                     text: "⏭"
-                    onClicked: playerProxy.Next()
+                    onClicked: playerProxy.next()
                 }
                 }
             }
@@ -129,7 +129,7 @@ Window {
     }
 
     function discoverPlayers() {
-        var reply = bus.ListNames()
+        var reply = bus.listNames()
         reply.finished.connect(function() {
             if (reply.isError) return
             playersModel.clear()
@@ -147,7 +147,9 @@ Window {
         })
     }
 
-    Component.onCompleted: discoverPlayers()
+    Component.onCompleted: {
+        bus.introspectionCompleted.connect(discoverPlayers)
+    }
 
     // Dynamic proxy — ListNames() is callable directly after introspection.
     DBus {

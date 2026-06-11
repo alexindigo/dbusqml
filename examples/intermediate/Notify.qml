@@ -45,7 +45,7 @@ Window {
             var expireTimeout = 5000
 
             statusText.text = "Sending notification..."
-            notificationProxy.Notify(
+            notificationProxy.notify(
                 appName, replacesId, appIcon,
                 summary, body, actions,
                 hints, expireTimeout
@@ -58,16 +58,6 @@ Window {
             text: "Click the button to send a notification"
             color: "#666"
         }
-
-        Component.onCompleted: {
-            notificationProxy.signalReceived.connect(function(name, args) {
-                if (name === "NotificationClosed") {
-                    statusText.text = "Notification was closed"
-                } else if (name === "ActionInvoked") {
-                    statusText.text = "Action invoked: " + args[1]
-                }
-            })
-        }
     }
 
     DBus {
@@ -76,6 +66,14 @@ Window {
         path: "/org/freedesktop/Notifications"
         iface: "org.freedesktop.Notifications"
         connection: SessionBus
+
+        onSignalReceived: function(name, args) {
+            if (name === "NotificationClosed") {
+                statusText.text = "Notification was closed"
+            } else if (name === "ActionInvoked") {
+                statusText.text = "Action invoked: " + args[1]
+            }
+        }
     }
     CloseButton {}
     

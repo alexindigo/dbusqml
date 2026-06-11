@@ -130,7 +130,7 @@ Window {
     }
 
     function checkService(name) {
-        var reply = dbusProxy.NameHasOwner(name)
+        var reply = dbusProxy.nameHasOwner(name)
         reply.finished.connect(function() {
             if (reply.isError) {
                 statusText.text = "Error checking " + name + ": " + reply.error.message
@@ -143,7 +143,7 @@ Window {
     function refreshServices() {
         servicesModel.clear()
 
-        var reply = dbusProxy.ListNames()
+        var reply = dbusProxy.listNames()
         reply.finished.connect(function() {
             if (reply.isError) return
             var names = reply.value
@@ -159,7 +159,9 @@ Window {
         })
     }
 
-    Component.onCompleted: refreshServices()
+    Component.onCompleted: {
+        dbusProxy.introspectionCompleted.connect(refreshServices)
+    }
     CloseButton {}
     
 

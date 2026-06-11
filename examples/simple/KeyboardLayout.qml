@@ -49,6 +49,8 @@ Window {
                 color: "#666"
                 font.pixelSize: 13
                 font.family: "monospace"
+                horizontalAlignment: Text.AlignHCenter
+                Layout.fillWidth: true
                 text: locale.locale ? locale.locale[0].replace("LANG=", "") : ""
             }
 
@@ -63,6 +65,8 @@ Window {
                 id: inputLabel
                 color: "#888"
                 font.pixelSize: 13
+                horizontalAlignment: Text.AlignHCenter
+                Layout.fillWidth: true
                 text: "Detecting..."
             }
         }
@@ -119,7 +123,7 @@ Window {
     }
 
     function fetchInputMethod() {
-        var busReply = sessionBus.ListNames()
+        var busReply = sessionBus.listNames()
         busReply.finished.connect(function() {
             if (busReply.isError) {
                 inputLabel.text = "Input method: error"
@@ -137,7 +141,7 @@ Window {
     }
 
     function queryIbusEngine() {
-        var reply = ibus.CurrentInputContext()
+        var reply = ibus.currentInputContext()
         reply.finished.connect(function() {
             if (reply.isError) {
                 inputLabel.text = "Input method: IBus (error)"
@@ -148,7 +152,7 @@ Window {
     }
 
     function queryFcitx5() {
-        var reply = fcitx.CurrentIM()
+        var reply = fcitx.currentIM()
         reply.finished.connect(function() {
             if (reply.isError) {
                 inputLabel.text = "Input method: Fcitx5 (error)"

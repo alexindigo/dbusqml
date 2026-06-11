@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
+import QtQml
 import "../assets"
 import DBus 1.0
 
@@ -41,10 +42,29 @@ Window {
             model: ListModel { id: namesModel }
             ScrollBar.vertical: ScrollBar {}
 
-            delegate: Text {
-                text: "• " + model.name
-                font.pixelSize: 12
-                font.family: "monospace"
+            delegate: Item {
+                width: listView.width
+                height: textEdit.implicitHeight + 4
+
+                TextEdit {
+                    id: textEdit
+                    x: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "• " + model.name
+                    font.pixelSize: 12
+                    font.family: "monospace"
+                    selectByMouse: true
+                    readOnly: true
+                    width: implicitWidth
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.RightButton
+                    onClicked: {
+                        Clipboard.text = model.name
+                    }
+                }
             }
         }
     }
@@ -66,7 +86,7 @@ Window {
         iface: "org.freedesktop.DBus"
 
         onIntrospectionCompleted: {
-            var reply = bus.ListNames()
+            var reply = bus.listNames()
             reply.finished.connect(function() {
                 if (reply.isError) {
                     console.error("Error:", reply.error.message)

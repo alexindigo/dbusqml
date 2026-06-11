@@ -148,7 +148,7 @@ Window {
     function refreshAll() {
         devicesModel.clear()
 
-        var enumReply = upower.EnumerateDevices()
+        var enumReply = upower.enumerateDevices()
         enumReply.finished.connect(function() {
             if (enumReply.isError) {
                 statusText.text = "UPower not available"
@@ -173,7 +173,9 @@ Window {
         })
     }
 
-    Component.onCompleted: refreshAll()
+    Component.onCompleted: {
+        upower.introspectionCompleted.connect(refreshAll)
+    }
     CloseButton {}
     
 }

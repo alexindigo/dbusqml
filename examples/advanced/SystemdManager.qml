@@ -60,21 +60,21 @@ Window {
                 text: "Start"
                 onClicked: {
                     statusText.text = "Starting " + unitInput.text + "..."
-                    systemd.StartUnit(unitInput.text, "replace")
+                    systemd.startUnit(unitInput.text, "replace")
                 }
             }
             Button {
                 text: "Stop"
                 onClicked: {
                     statusText.text = "Stopping " + unitInput.text + "..."
-                    systemd.StopUnit(unitInput.text, "replace")
+                    systemd.stopUnit(unitInput.text, "replace")
                 }
             }
             Button {
                 text: "Restart"
                 onClicked: {
                     statusText.text = "Restarting " + unitInput.text + "..."
-                    systemd.RestartUnit(unitInput.text, "replace")
+                    systemd.restartUnit(unitInput.text, "replace")
                 }
             }
         }
@@ -108,7 +108,7 @@ Window {
 
     function checkUnit(name) {
         statusText.text = "Looking up " + name + "..."
-        var reply = systemd.GetUnit(name)
+        var reply = systemd.getUnit(name)
         reply.finished.connect(function() {
             if (reply.isError) {
                 statusText.text = "Unit not found: " + reply.error.message

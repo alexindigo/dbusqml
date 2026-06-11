@@ -100,7 +100,7 @@ Window {
     }
 
     function fetchSettings() {
-        var reply = portal.ReadOne("org.freedesktop.appearance", "color-scheme")
+        var reply = portal.readOne("org.freedesktop.appearance", "color-scheme")
         reply.finished.connect(function() {
             if (reply.isError) {
                 errorText.text = "Portal not available"
@@ -110,7 +110,7 @@ Window {
             statusText.text = "Color scheme: " + (darkMode ? "Dark (prefer)" : "Light (prefer)")
         })
 
-        var accentReply = portal.ReadOne("org.freedesktop.appearance", "accent-color")
+        var accentReply = portal.readOne("org.freedesktop.appearance", "accent-color")
         accentReply.finished.connect(function() {
             if (accentReply.isError) return
             accentColor = accentReply.value !== ""
@@ -118,10 +118,7 @@ Window {
     }
 
     Component.onCompleted: {
-        if (typeof portal.ReadOne === "function")
-            fetchSettings()
-        else
-            portal.introspectionCompleted.connect(fetchSettings)
+        portal.introspectionCompleted.connect(fetchSettings)
     }
 
     DBus {

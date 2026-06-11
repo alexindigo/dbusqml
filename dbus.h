@@ -116,4 +116,5 @@ private:
     QDBusPendingCallWatcher *m_introspectWatcher = nullptr;
     QList<QJSValue> m_cachedFunctions;
     QHash<QString, QString> m_introspectCache;
+    QHash<QString, QStringList> m_methodArgTypes;
 };

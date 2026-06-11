@@ -3,13 +3,15 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../assets"
 import DBus 1.0
-import DBus 1.0 as DBusQML
 
 Window {
+    id: root
     visible: true
-    width: 420
-    height: 300
+    width: 480
+    height: 360
     title: "DBus — Network Monitor"
+    minimumWidth: 460
+    minimumHeight: 320
 
     ColumnLayout {
         anchors.fill: parent
@@ -27,6 +29,7 @@ Window {
             color: "#888"
             font.italic: true
             wrapMode: Text.WordWrap
+            Layout.fillWidth: true
         }
 
         GroupBox {
@@ -40,13 +43,17 @@ Window {
                 columnSpacing: 16
 
                 Text { text: "Available:"; font.bold: true }
-                Text { id: availableText; text: "—" }
+                Text { text: net.available !== undefined ? (net.available ? "Yes" : "No") : "—" }
 
                 Text { text: "Metered:"; font.bold: true }
-                Text { id: meteredText; text: "—" }
+                Text { text: net.metered !== undefined ? (net.metered ? "Yes" : "No") : "—" }
 
                 Text { text: "Connectivity:"; font.bold: true }
-                Text { id: connectivityText; text: "—" }
+                Text {
+                    text: net.connectivity !== undefined
+                        ? (["Local", "Limited", "Captive Portal", "Full"][net.connectivity] || "Unknown")
+                        : "—"
+                }
             }
         }
 
@@ -62,7 +69,7 @@ Window {
 
             Button {
                 text: "Ping"
-                onClicked: canReach(hostInput.text, 80)
+                onClicked: root.canReach(hostInput.text, 80)
             }
         }
 
@@ -72,38 +79,17 @@ Window {
             font.italic: true
         }
 
-        Item { Layout.fillHeight: true }
-
-        Button {
-            text: "Refresh"
-            Layout.alignment: Qt.AlignHCenter
-            onClicked: fetchStatus()
+        Label {
+            id: statusLabel
+            color: "red"
+            visible: false
         }
-    }
 
-    function fetchStatus() {
-        var r1 = net.GetAvailable()
-        r1.finished.connect(function() {
-            if (r1.isError) return
-            availableText.text = r1.value ? "Yes" : "No"
-        })
-
-        var r2 = net.GetMetered()
-        r2.finished.connect(function() {
-            if (r2.isError) return
-            meteredText.text = r2.value ? "Yes" : "No"
-        })
-
-        var r3 = net.GetConnectivity()
-        r3.finished.connect(function() {
-            if (r3.isError) return
-            var labels = ["Local", "Limited", "Captive Portal", "Full"]
-            connectivityText.text = labels[r3.value] || "Unknown (" + r3.value + ")"
-        })
+        Item { Layout.fillHeight: true }
     }
 
     function canReach(host, port) {
-        var reply = net.CanReach(host, port)
+        var reply = net.canReach(host, port)
         reply.finished.connect(function() {
             if (reply.isError) {
                 pingResult.text = "Error: " + reply.error.message
@@ -113,16 +99,22 @@ Window {
         })
     }
 
-    Component.onCompleted: fetchStatus()
-
-    // Dynamic proxy — GetAvailable(), GetMetered(), etc. are callable directly.
+    // D-Bus properties (available, metered, connectivity) auto-bind as QML properties
+    // after fetchProperties() runs on introspection completion.
+    // canReach is a method — called dynamically.
     DBus {
         id: net
         service: "org.freedesktop.portal.Desktop"
         path: "/org/freedesktop/portal/desktop"
         iface: "org.freedesktop.portal.NetworkMonitor"
+
+        onStatusChanged: {
+            if (status === 3) {
+                statusLabel.text = "Network portal not available"
+                statusLabel.visible = true
+            }
+        }
     }
     CloseButton {}
-    
 
 }
