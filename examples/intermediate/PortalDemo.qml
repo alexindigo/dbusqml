@@ -54,7 +54,7 @@ Window {
                         onClicked: {
                             var reply = portal.readSetting("org.freedesktop.appearance", "color-scheme")
                             reply.finished.connect(function() {
-                                if (reply.isError) { statusText.text = "Error: " + reply.error.message; return }
+                                if (reply.isError) { statusText.lastError = "Error: " + reply.error.message; statusText.text = statusText.lastError; return }
                                 root.colorScheme = reply.value
                                 adaptor.colorScheme = reply.value
                                 statusText.text = "Read color-scheme = " + reply.value
@@ -62,7 +62,33 @@ Window {
                         }
                     }
                 }
-                Text { id: statusText; color: "#888"; font.italic: true; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                Text {
+                    id: statusText
+                    property string lastError: ""
+                    color: "#888"
+                    font.italic: true
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: {
+                            if (parent.text.indexOf("Error:") === 0) {
+                                clipBoard.text = parent.text
+                                clipBoard.selectAll()
+                                clipBoard.copy()
+                                parent.text = "Copied!"
+                                restoreTimer.start()
+                            }
+                        }
+                    }
+                    Timer {
+                        id: restoreTimer
+                        interval: 2000
+                        onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+                    }
+                }
             }
         }
     }
@@ -94,6 +120,8 @@ Window {
             }
         }
     }
+
+    TextEdit { id: clipBoard; visible: false }
 
     Text {
         anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 8

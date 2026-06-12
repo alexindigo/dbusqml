@@ -95,7 +95,31 @@ Window {
             }
         }
 
-        Text { id: statusText; color: "#666"; font.italic: true }
+        Text {
+            id: statusText
+            property string lastError: ""
+            color: "#666"
+            font.italic: true
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text
+                        clipBoard.selectAll()
+                        clipBoard.copy()
+                        parent.text = "Copied!"
+                        restoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: restoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
+        }
     }
 
     // KDE Connect daemon proxy — devices() is callable directly.
@@ -189,7 +213,7 @@ Window {
         var reply = daemon.devices()
         reply.finished.connect(function() {
             if (reply.isError) {
-                statusText.text = "KDE Connect daemon not available"
+                statusText.lastError = "KDE Connect daemon not available"; statusText.text = statusText.lastError
                 return
             }
             var ids = reply.value
@@ -208,6 +232,8 @@ Window {
     Component.onCompleted: {
         daemon.introspectionCompleted.connect(fetchDevices)
     }
+
+    TextEdit { id: clipBoard; visible: false }
 
     Text {
         anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 8

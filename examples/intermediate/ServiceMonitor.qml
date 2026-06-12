@@ -95,8 +95,28 @@ Window {
 
         Text {
             id: statusText
+            property string lastError: ""
             color: "#666"
             font.italic: true
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text
+                        clipBoard.selectAll()
+                        clipBoard.copy()
+                        parent.text = "Copied!"
+                        restoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: restoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
         }
     }
 
@@ -133,7 +153,7 @@ Window {
         var reply = dbusProxy.nameHasOwner(name)
         reply.finished.connect(function() {
             if (reply.isError) {
-                statusText.text = "Error checking " + name + ": " + reply.error.message
+                statusText.lastError = "Error checking " + name + ": " + reply.error.message; statusText.text = statusText.lastError
             } else {
                 statusText.text = name + " is " + (reply.value ? "running" : "not running")
             }
@@ -162,6 +182,7 @@ Window {
     Component.onCompleted: {
         dbusProxy.introspectionCompleted.connect(refreshServices)
     }
+    TextEdit { id: clipBoard; visible: false }
     CloseButton {}
     
 

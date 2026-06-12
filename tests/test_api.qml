@@ -300,8 +300,8 @@ TestCase {
         // Wait for introspection to discover methods
         var found = false
         for (var i = 0; i < 10; ++i) {
-            if (typeof proxy.ListNames === "function"
-                && typeof proxy.NameHasOwner === "function") {
+            if (typeof proxy.listNames === "function"
+                && typeof proxy.nameHasOwner === "function") {
                 found = true
                 break
             }
@@ -318,14 +318,14 @@ TestCase {
         )
         // Wait for introspection
         for (var i = 0; i < 10; ++i) {
-            if (typeof proxy.ListNames === "function") break
+            if (typeof proxy.listNames === "function") break
             wait(500)
         }
-        verify(typeof proxy.ListNames === "function",
+        verify(typeof proxy.listNames === "function",
                "ListNames should exist after introspection")
 
         // Dynamic method should return a DBusPendingReply
-        var reply = proxy.ListNames()
+        var reply = proxy.listNames()
         verify(reply !== undefined, "dynamic method should return a value")
         verify(typeof reply.finished !== "undefined",
                "returned value should have a finished signal")
@@ -343,14 +343,14 @@ TestCase {
         )
         // Wait for introspection
         for (var i = 0; i < 10; ++i) {
-            if (typeof proxy.NameHasOwner === "function") break
+            if (typeof proxy.nameHasOwner === "function") break
             wait(500)
         }
-        verify(typeof proxy.NameHasOwner === "function",
+        verify(typeof proxy.nameHasOwner === "function",
                "NameHasOwner should exist after introspection")
 
         // Dynamic method with typed argument should return a DBusPendingReply
-        var reply = proxy.NameHasOwner(new DBusQML.string("org.freedesktop.DBus"))
+        var reply = proxy.nameHasOwner(new DBusQML.string("org.freedesktop.DBus"))
         verify(reply !== undefined, "dynamic method should return a value")
         tryVerify(() => reply.isFinished, 5000)
         verify(!reply.isError, "NameHasOwner should not error")

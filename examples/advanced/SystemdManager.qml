@@ -81,10 +81,30 @@ Window {
 
         Text {
             id: statusText
+            property string lastError: ""
             color: "#666"
             font.italic: true
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text
+                        clipBoard.selectAll()
+                        clipBoard.copy()
+                        parent.text = "Copied!"
+                        restoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: restoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
         }
     }
 
@@ -111,7 +131,7 @@ Window {
         var reply = systemd.getUnit(name)
         reply.finished.connect(function() {
             if (reply.isError) {
-                statusText.text = "Unit not found: " + reply.error.message
+                statusText.lastError = "Unit not found: " + reply.error.message; statusText.text = statusText.lastError
                 unitName = ""
                 return
             }
@@ -135,6 +155,7 @@ Window {
                 unitLoadState.text = "LoadState: " + value
         }
     }
+    TextEdit { id: clipBoard; visible: false }
     CloseButton {}
     
 }

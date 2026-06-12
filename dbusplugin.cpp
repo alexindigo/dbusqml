@@ -13,6 +13,8 @@ static void registerTypeConverters()
     if (registered) return;
     registered = true;
 
+    qDBusRegisterMetaType<QStringList>();
+
     QMetaType::registerConverter<DBus::Bool, bool>();
     QMetaType::registerConverter<DBus::Int16, short>();
     QMetaType::registerConverter<DBus::Int32, int>();

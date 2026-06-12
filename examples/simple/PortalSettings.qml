@@ -3,7 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../assets"
 import DBus 1.0
-import DBus 1.0 as DBusQML
 
 Window {
     id: root
@@ -13,7 +12,6 @@ Window {
     title: "DBus — Portal Settings"
 
     property bool darkMode: false
-    property bool accentColor: false
 
     ColumnLayout {
         anchors.fill: parent
@@ -53,25 +51,9 @@ Window {
                         checked: darkMode
                         onToggled: {
                             darkMode = checked
-                            var value = darkMode ? 1 : 0
-                            portal.emitSignal(
-                                "SettingChanged",
-                                ["org.freedesktop.appearance", "color-scheme", value]
-                            )
-                            statusText.text = "Emitted SettingChanged(color-scheme="
-                                + (darkMode ? "1" : "0") + ") on D-Bus"
+                            statusText.text = "Dark mode: " + (darkMode ? "on" : "off")
                         }
                     }
-                }
-
-                RowLayout {
-                    spacing: 8
-                    Rectangle {
-                        width: 16; height: 16; radius: 3
-                        color: accentColor ? "#1e88e5" : "#ccc"
-                        border.color: "#ccc"
-                    }
-                    Text { text: accentColor ? "Accent color enabled" : "No accent color"; font.pixelSize: 16 }
                 }
 
                 Text {
@@ -85,17 +67,37 @@ Window {
         Item { Layout.fillHeight: true }
 
         Button {
-            text: "Refresh from portal"
+            text: "Read from portal"
             Layout.alignment: Qt.AlignHCenter
             onClicked: fetchSettings()
         }
 
         Text {
             id: statusText
+            property string lastError: ""
             color: "#888"
             font.italic: true
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text
+                        clipBoard.selectAll()
+                        clipBoard.copy()
+                        parent.text = "Copied!"
+                        restoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: restoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
         }
     }
 
@@ -103,17 +105,11 @@ Window {
         var reply = portal.readOne("org.freedesktop.appearance", "color-scheme")
         reply.finished.connect(function() {
             if (reply.isError) {
-                errorText.text = "Portal not available"
+                statusText.lastError = "Portal not available (is xdg-desktop-portal running?)"; statusText.text = statusText.lastError
                 return
             }
             darkMode = reply.value === 1
             statusText.text = "Color scheme: " + (darkMode ? "Dark (prefer)" : "Light (prefer)")
-        })
-
-        var accentReply = portal.readOne("org.freedesktop.appearance", "accent-color")
-        accentReply.finished.connect(function() {
-            if (accentReply.isError) return
-            accentColor = accentReply.value !== ""
         })
     }
 
@@ -128,19 +124,16 @@ Window {
         iface: "org.freedesktop.portal.Settings"
 
         onSignalReceived: function(name, args) {
-            // Listen for real SettingChanged signals from the portal
             if (name === "SettingChanged" && args.length >= 3) {
-                var ns = args[0]
-                var key = args[1]
-                var value = args[2]
-                if (ns === "org.freedesktop.appearance" && key === "color-scheme") {
-                    darkMode = (value === 1 || value === "1")
+                if (args[0] === "org.freedesktop.appearance" && args[1] === "color-scheme") {
+                    darkMode = (args[2] === 1 || args[2] === "1")
                     statusText.text = "Portal signaled: color-scheme changed to "
                         + (darkMode ? "Dark" : "Light")
                 }
             }
         }
     }
+    TextEdit { id: clipBoard; visible: false }
     CloseButton {}
-    
+
 }

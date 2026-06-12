@@ -75,14 +75,54 @@ Window {
 
         Text {
             id: pingResult
+            property string lastError: ""
             color: "#888"
             font.italic: true
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text
+                        clipBoard.selectAll()
+                        clipBoard.copy()
+                        parent.text = "Copied!"
+                        pingRestoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: pingRestoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
         }
 
         Label {
             id: statusLabel
+            property string lastError: ""
             color: "red"
             visible: false
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text
+                        clipBoard.selectAll()
+                        clipBoard.copy()
+                        parent.text = "Copied!"
+                        statusRestoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: statusRestoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
         }
 
         Item { Layout.fillHeight: true }
@@ -92,7 +132,7 @@ Window {
         var reply = net.canReach(host, port)
         reply.finished.connect(function() {
             if (reply.isError) {
-                pingResult.text = "Error: " + reply.error.message
+                pingResult.lastError = "Error: " + reply.error.message; pingResult.text = pingResult.lastError
                 return
             }
             pingResult.text = host + ":" + port + " is " + (reply.value ? "reachable" : "not reachable")
@@ -110,11 +150,13 @@ Window {
 
         onStatusChanged: {
             if (status === 3) {
-                statusLabel.text = "Network portal not available"
+                statusLabel.lastError = "Network portal not available"
+                statusLabel.text = statusLabel.lastError
                 statusLabel.visible = true
             }
         }
     }
+    TextEdit { id: clipBoard; visible: false }
     CloseButton {}
 
 }

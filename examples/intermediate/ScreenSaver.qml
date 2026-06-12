@@ -73,8 +73,28 @@ Window {
 
         Text {
             id: statusText
+            property string lastError: ""
             color: "#888"
             font.italic: true
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text
+                        clipBoard.selectAll()
+                        clipBoard.copy()
+                        parent.text = "Copied!"
+                        restoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: restoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
         }
     }
 
@@ -85,7 +105,7 @@ Window {
         )
         reply.finished.connect(function() {
             if (reply.isError) {
-                statusText.text = "Failed to inhibit: " + reply.error.message
+                statusText.lastError = "Failed to inhibit: " + reply.error.message; statusText.text = statusText.lastError
                 return
             }
             inhibitCookie = reply.value
@@ -109,6 +129,7 @@ Window {
         iface: "org.freedesktop.ScreenSaver"
         connection: SessionBus
     }
+    TextEdit { id: clipBoard; visible: false }
     CloseButton {}
     
 

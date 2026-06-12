@@ -19,6 +19,23 @@ static QVariant toTypedDbusVariant(const QVariant &v, const QString &dbusType)
     if (dbusType.isEmpty() || dbusType == "v")
         return toDbusVariant(v);
 
+    // Complex types — build via QDBusArgument for correct marshaling
+    if (dbusType == "as") {
+        QDBusArgument arg;
+        arg.beginArray(QMetaType::QString);
+        if (v.canConvert<QVariantList>()) {
+            const auto list = v.toList();
+            for (const auto &item : list)
+                arg << item.toString();
+        }
+        arg.endArray();
+        return QVariant::fromValue(arg);
+    }
+    if (dbusType == "a{sv}") {
+        return v.toMap();
+    }
+
+    // Typed wrappers
     if (v.userType() == qMetaTypeId<DBus::Uint32>())
         return QVariant::fromValue(v.value<DBus::Uint32>().value);
     if (v.userType() == qMetaTypeId<DBus::Int32>())

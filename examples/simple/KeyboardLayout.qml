@@ -63,11 +63,31 @@ Window {
 
             Label {
                 id: inputLabel
+                property string lastError: ""
                 color: "#888"
                 font.pixelSize: 13
                 horizontalAlignment: Text.AlignHCenter
                 Layout.fillWidth: true
                 text: "Detecting..."
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: {
+                        if (parent.text.indexOf("Error:") === 0) {
+                            clipBoard.text = parent.text
+                            clipBoard.selectAll()
+                            clipBoard.copy()
+                            parent.text = "Copied!"
+                            restoreTimer.start()
+                        }
+                    }
+                }
+                Timer {
+                    id: restoreTimer
+                    interval: 2000
+                    onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+                }
             }
         }
 
@@ -126,7 +146,7 @@ Window {
         var busReply = sessionBus.listNames()
         busReply.finished.connect(function() {
             if (busReply.isError) {
-                inputLabel.text = "Input method: error"
+                inputLabel.lastError = "Input method: error"; inputLabel.text = inputLabel.lastError
                 return
             }
             var names = busReply.value
@@ -144,7 +164,7 @@ Window {
         var reply = ibus.currentInputContext()
         reply.finished.connect(function() {
             if (reply.isError) {
-                inputLabel.text = "Input method: IBus (error)"
+                inputLabel.lastError = "Input method: IBus (error)"; inputLabel.text = inputLabel.lastError
                 return
             }
             inputLabel.text = "Input method: IBus"
@@ -155,7 +175,7 @@ Window {
         var reply = fcitx.currentIM()
         reply.finished.connect(function() {
             if (reply.isError) {
-                inputLabel.text = "Input method: Fcitx5 (error)"
+                inputLabel.lastError = "Input method: Fcitx5 (error)"; inputLabel.text = inputLabel.lastError
                 return
             }
             inputLabel.text = "Input method: Fcitx5"
@@ -165,6 +185,7 @@ Window {
     Component.onCompleted: {
         // locale properties auto-bind via QML; sessionBus triggers fetchInputMethod
     }
+    TextEdit { id: clipBoard; visible: false }
     CloseButton {}
     
 }
