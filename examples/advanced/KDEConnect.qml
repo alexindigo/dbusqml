@@ -106,9 +106,7 @@ Window {
                 cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
                 onClicked: {
                     if (parent.text.indexOf("Error:") === 0) {
-                        clipBoard.text = parent.text
-                        clipBoard.selectAll()
-                        clipBoard.copy()
+                        clipBoard.text = parent.text; clipBoard.selectAll(); clipBoard.copy()
                         parent.text = "Copied!"
                         restoreTimer.start()
                     }
@@ -232,8 +230,6 @@ Window {
     Component.onCompleted: {
         daemon.introspectionCompleted.connect(fetchDevices)
     }
-
-    TextEdit { id: clipBoard; visible: false }
 
     Text {
         anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 8

@@ -21,15 +21,11 @@ static QVariant toTypedDbusVariant(const QVariant &v, const QString &dbusType)
 
     // Complex types — build via QDBusArgument for correct marshaling
     if (dbusType == "as") {
-        QDBusArgument arg;
-        arg.beginArray(QMetaType::QString);
-        if (v.canConvert<QVariantList>()) {
-            const auto list = v.toList();
-            for (const auto &item : list)
-                arg << item.toString();
-        }
-        arg.endArray();
-        return QVariant::fromValue(arg);
+        const auto list = v.toList();
+        DBusAsArray arr;
+        for (const auto &item : list)
+            arr.value << item.toString();
+        return QVariant::fromValue(arr);
     }
     if (dbusType == "a{sv}") {
         return v.toMap();
@@ -96,19 +92,19 @@ public:
         QDBusConnection bus = m_proxy->connection()
             ? static_cast<QDBusConnection>(*m_proxy->connection())
             : QDBusConnection::sessionBus();
+
+        // Convert arguments to match expected D-Bus types (basic types only)
+        QVariantList converted = args;
+        if (m_argTypes) {
+            QStringList types = m_argTypes->value(method);
+            for (int i = 0; i < converted.size() && i < types.size(); ++i)
+                converted[i] = toTypedDbusVariant(converted[i], types[i]);
+        }
+
         QDBusMessage msg = QDBusMessage::createMethodCall(
             m_proxy->service(), m_proxy->path(), m_proxy->iface(), method);
-        if (!args.isEmpty()) {
-            QStringList types = m_argTypes ? m_argTypes->value(method) : QStringList();
-            QVariantList converted = args;
-            for (int i = 0; i < converted.size(); ++i) {
-                QString expectedType;
-                if (i < types.size())
-                    expectedType = types[i];
-                converted[i] = toTypedDbusVariant(converted[i], expectedType);
-            }
+        if (!converted.isEmpty())
             msg.setArguments(converted);
-        }
         auto pending = bus.asyncCall(msg);
         auto watcher = new QDBusPendingCallWatcher(pending, this);
         auto reply = new DBusPendingReply(this);

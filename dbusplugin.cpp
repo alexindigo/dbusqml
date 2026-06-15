@@ -14,6 +14,17 @@ static void registerTypeConverters()
     registered = true;
 
     qDBusRegisterMetaType<QStringList>();
+    qDBusRegisterMetaType<DBusAsArray>();
+    {
+        auto mt = QMetaType::fromType<QStringList>();
+        if (mt.isValid())
+            QDBusMetaType::registerCustomType(mt, QByteArray("as"));
+    }
+    {
+        auto mt = QMetaType::fromType<DBusAsArray>();
+        if (mt.isValid())
+            QDBusMetaType::registerCustomType(mt, QByteArray("as"));
+    }
 
     QMetaType::registerConverter<DBus::Bool, bool>();
     QMetaType::registerConverter<DBus::Int16, short>();

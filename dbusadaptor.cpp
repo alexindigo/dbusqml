@@ -4,8 +4,12 @@
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QDBusMetaType>
+#include <QJSValue>
+#include <QJSValueList>
 #include <QMetaMethod>
 #include <QMetaProperty>
+#include <QQmlEngine>
+#include <QQmlProperty>
 #include <QRegularExpression>
 #include <qqmlinfo.h>
 
@@ -327,19 +331,53 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             continue;
 
         QVariantList dbusArgs = msg.arguments();
-        if (method.parameterCount() != dbusArgs.size())
+        if (method.parameterCount() != dbusArgs.size()) {
             continue;
-
-        QVariant retVal = method.invoke(this, dbusArgs);
-        if (!retVal.isValid())
-            return false;
-
-        if (method.returnType() != QMetaType::Void && retVal.isValid()) {
-            QList<QVariant> replyArgs = { retVal };
-            conn.send(msg.createReply(replyArgs));
-        } else {
-            conn.send(msg.createReply());
         }
+
+        QVariant retVal;
+        bool invoked = false;
+        QQmlEngine *engine = qmlEngine(this);
+        if (engine) {
+            // Build JavaScript to call the QML method
+            engine->globalObject().setProperty(QStringLiteral("__dbusAdaptor"),
+                                                engine->newQObject(this));
+            QString js = QStringLiteral("__dbusAdaptor.%1(").arg(member);
+            for (int i = 0; i < dbusArgs.size(); ++i) {
+                if (i > 0) js += QStringLiteral(",");
+                const QVariant &arg = dbusArgs.at(i);
+                if (arg.userType() == QMetaType::QString) {
+                    QString s = arg.toString();
+                    s.replace(QLatin1Char('\\'), QLatin1String("\\\\"));
+                    s.replace(QLatin1Char('"'), QLatin1String("\\\""));
+                    js += QStringLiteral("\"%1\"").arg(s);
+                } else {
+                    js += arg.toString();
+                }
+            }
+            js += QStringLiteral(")");
+            QJSValue result = engine->evaluate(js);
+            if (!result.isError()) {
+                retVal = result.isUndefined() ? QVariant() : result.toVariant();
+                invoked = true;
+            }
+            engine->globalObject().deleteProperty(QStringLiteral("__dbusAdaptor"));
+        }
+        if (!invoked) {
+            QByteArray methodName = member.toLatin1();
+            switch (dbusArgs.size()) {
+            case 0: invoked = QMetaObject::invokeMethod(this, methodName.constData(), Qt::DirectConnection); break;
+            case 1: invoked = QMetaObject::invokeMethod(this, methodName.constData(), Qt::DirectConnection, Q_ARG(QVariant, dbusArgs.at(0))); break;
+            case 2: invoked = QMetaObject::invokeMethod(this, methodName.constData(), Qt::DirectConnection, Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1))); break;
+            case 3: invoked = QMetaObject::invokeMethod(this, methodName.constData(), Qt::DirectConnection, Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)), Q_ARG(QVariant, dbusArgs.at(2))); break;
+            case 4: invoked = QMetaObject::invokeMethod(this, methodName.constData(), Qt::DirectConnection, Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)), Q_ARG(QVariant, dbusArgs.at(2)), Q_ARG(QVariant, dbusArgs.at(3))); break;
+            case 5: invoked = QMetaObject::invokeMethod(this, methodName.constData(), Qt::DirectConnection, Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)), Q_ARG(QVariant, dbusArgs.at(2)), Q_ARG(QVariant, dbusArgs.at(3)), Q_ARG(QVariant, dbusArgs.at(4))); break;
+            default: return false;
+            }
+        }
+
+        QList<QVariant> replyArgs = { retVal };
+        conn.send(msg.createReply(replyArgs));
         return true;
     }
 

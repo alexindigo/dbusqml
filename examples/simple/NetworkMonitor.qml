@@ -84,9 +84,7 @@ Window {
                 cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
                 onClicked: {
                     if (parent.text.indexOf("Error:") === 0) {
-                        clipBoard.text = parent.text
-                        clipBoard.selectAll()
-                        clipBoard.copy()
+                        clipBoard.text = parent.text; clipBoard.selectAll(); clipBoard.copy()
                         parent.text = "Copied!"
                         pingRestoreTimer.start()
                     }
@@ -110,9 +108,7 @@ Window {
                 cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
                 onClicked: {
                     if (parent.text.indexOf("Error:") === 0) {
-                        clipBoard.text = parent.text
-                        clipBoard.selectAll()
-                        clipBoard.copy()
+                        clipBoard.text = parent.text; clipBoard.selectAll(); clipBoard.copy()
                         parent.text = "Copied!"
                         statusRestoreTimer.start()
                     }
@@ -156,7 +152,7 @@ Window {
             }
         }
     }
-    TextEdit { id: clipBoard; visible: false }
     CloseButton {}
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
 
 }

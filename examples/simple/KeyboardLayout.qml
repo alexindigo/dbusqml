@@ -75,9 +75,7 @@ Window {
                     cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onClicked: {
                         if (parent.text.indexOf("Error:") === 0) {
-                            clipBoard.text = parent.text
-                            clipBoard.selectAll()
-                            clipBoard.copy()
+                            clipBoard.text = parent.text; clipBoard.selectAll(); clipBoard.copy()
                             parent.text = "Copied!"
                             restoreTimer.start()
                         }
@@ -185,7 +183,7 @@ Window {
     Component.onCompleted: {
         // locale properties auto-bind via QML; sessionBus triggers fetchInputMethod
     }
-    TextEdit { id: clipBoard; visible: false }
     CloseButton {}
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
     
 }

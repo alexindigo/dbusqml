@@ -3,8 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../assets"
 import DBus 1.0
-import "../assets"
-import DBus 1.0
 
 Window {
     visible: true
@@ -95,10 +93,6 @@ Window {
             }
         }
 
-        TextEdit {
-            id: clipBoard
-            visible: false
-        }
     }
 
     DBus {
@@ -117,6 +111,6 @@ Window {
         }
     }
     CloseButton {}
-    
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
 
 }
