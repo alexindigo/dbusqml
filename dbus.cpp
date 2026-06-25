@@ -448,7 +448,9 @@ void DBusProxy::fetchProperties()
                     QVariantMap props = reply.value();
                     for (auto it = props.begin(); it != props.end(); ++it) {
                         QString qmlName = dbusPropToQml(it.key());
-                        insert(qmlName, it.value());
+                        // Don't overwrite dynamic method callbacks with property values
+                        if (!m_methodArgTypes.contains(it.key()) && !m_methodArgTypes.contains(qmlName))
+                            insert(qmlName, it.value());
                     }
                     m_status = Ready;
                 } else {

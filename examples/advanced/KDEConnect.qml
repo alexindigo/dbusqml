@@ -32,7 +32,7 @@ Window {
             model: ListModel { id: devicesModel }
 
             delegate: Rectangle {
-                width: parent.width
+                width: deviceList.width
                 height: deviceExpanded ? 200 : 60
                 color: index % 2 === 0 ? "#f5f5f5" : "#ffffff"
                 clip: true
@@ -208,7 +208,7 @@ Window {
         devicesModel.clear()
         statusText.text = "Fetching devices..."
 
-        var reply = daemon.devices()
+        var reply = daemon.getProperty("devices")
         reply.finished.connect(function() {
             if (reply.isError) {
                 statusText.lastError = "KDE Connect daemon not available"; statusText.text = statusText.lastError
