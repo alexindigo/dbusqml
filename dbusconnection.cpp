@@ -1,11 +1,59 @@
 #include "dbusconnection.h"
 #include "dbustypes.h"
 
+#include <QDBusArgument>
 #include <QDBusMessage>
+#include <QDBusMetaType>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
+#include <QDBusVariant>
 #include <QJSValue>
 #include <QJSValueList>
+
+// Recursively unwrap QDBusVariant / QDBusArgument values into plain QVariant
+// containers so QML can traverse them as JavaScript objects. Handles nested
+// a{sv}, a{ss}, av, as, ao, etc.
+QVariant unwrapDbus(const QVariant &v)
+{
+    if (v.userType() == qMetaTypeId<QDBusVariant>())
+        return unwrapDbus(v.value<QDBusVariant>().variant());
+
+    if (v.userType() == qMetaTypeId<QDBusArgument>()) {
+        const QDBusArgument arg = v.value<QDBusArgument>();
+        const QString sig = arg.currentSignature();
+
+        if (sig.startsWith("a{s")) {  // a{sv}, a{ss}, a{sa{sv}}, ...
+            QVariantMap map;
+            arg >> map;
+            QVariantMap out;
+            for (auto it = map.begin(); it != map.end(); ++it)
+                out.insert(it.key(), unwrapDbus(it.value()));
+            return out;
+        }
+        if (sig.startsWith("a")) {  // as, ao, ai, au, ax, at, av, ay, ...
+            QVariantList list;
+            arg.beginArray();
+            while (!arg.atEnd()) {
+                QVariant elem;
+                arg >> elem;
+                list.append(unwrapDbus(elem));
+            }
+            arg.endArray();
+            return list;
+        }
+        // Fallback for other types: try QVariantMap
+        QVariantMap m;
+        arg >> m;
+        if (!m.isEmpty()) {
+            QVariantMap out;
+            for (auto it = m.begin(); it != m.end(); ++it)
+                out.insert(it.key(), unwrapDbus(it.value()));
+            return out;
+        }
+        return v;
+    }
+    return v;
+}
 
 QVariant toDbusVariant(const QVariant &v)
 {

@@ -11,6 +11,11 @@
 
 QVariant toDbusVariant(const QVariant &v);
 
+// Recursively unwrap QDBusVariant / QDBusArgument values into plain QVariant
+// containers (QVariantMap, QVariantList) so QML can traverse them as
+// JavaScript objects. Handles nested a{sv}, a{ss}, av, as, ao, etc.
+QVariant unwrapDbus(const QVariant &v);
+
 class busType {
     Q_GADGET
     QML_NAMED_ELEMENT(busType)

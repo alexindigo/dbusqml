@@ -60,6 +60,7 @@ public:
     Q_INVOKABLE void setProperty(const QString &name, const QVariant &value);
     Q_INVOKABLE void emitSignal(const QString &name, const QVariantList &args = {});
     Q_INVOKABLE static DBusConnection *connectToBus(const QString &address);
+    Q_INVOKABLE static void reloadTypes();
     Q_INVOKABLE static void emitSignal(const QString &service, const QString &path,
                                         const QString &iface, const QString &name,
                                         const QVariantList &args = {});

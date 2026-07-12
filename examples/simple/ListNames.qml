@@ -2,7 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
-import QtQml
 import "../assets"
 import DBus 1.0
 
@@ -62,7 +61,9 @@ Window {
                     anchors.fill: parent
                     acceptedButtons: Qt.RightButton
                     onClicked: {
-                        Clipboard.text = model.name
+                        clipBoard.text = model.name
+                        clipBoard.selectAll()
+                        clipBoard.copy()
                     }
                 }
             }
@@ -98,6 +99,6 @@ Window {
         }
     }
     CloseButton {}
-    
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
 
 }

@@ -237,4 +237,5 @@ Window {
         color: mouseArea.containsMouse ? "black" : "#999"
         MouseArea { id: mouseArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Qt.quit() }
     }
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
 }
