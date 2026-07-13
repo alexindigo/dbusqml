@@ -1,13 +1,17 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import DBus 1.0 as DBusQML
+import "../assets"
+import DBus 1.0
 
 Window {
+    id: root
     visible: true
-    width: 420
-    height: 300
+    width: 480
+    height: 360
     title: "DBus — Network Monitor"
+    minimumWidth: 460
+    minimumHeight: 320
 
     ColumnLayout {
         anchors.fill: parent
@@ -25,6 +29,7 @@ Window {
             color: "#888"
             font.italic: true
             wrapMode: Text.WordWrap
+            Layout.fillWidth: true
         }
 
         GroupBox {
@@ -38,13 +43,17 @@ Window {
                 columnSpacing: 16
 
                 Text { text: "Available:"; font.bold: true }
-                Text { id: availableText; text: "—" }
+                Text { text: net.available !== undefined ? (net.available ? "Yes" : "No") : "—" }
 
                 Text { text: "Metered:"; font.bold: true }
-                Text { id: meteredText; text: "—" }
+                Text { text: net.metered !== undefined ? (net.metered ? "Yes" : "No") : "—" }
 
                 Text { text: "Connectivity:"; font.bold: true }
-                Text { id: connectivityText; text: "—" }
+                Text {
+                    text: net.connectivity !== undefined
+                        ? (["Local", "Limited", "Captive Portal", "Full"][net.connectivity] || "Unknown")
+                        : "—"
+                }
             }
         }
 
@@ -60,81 +69,90 @@ Window {
 
             Button {
                 text: "Ping"
-                onClicked: canReach(hostInput.text, 80)
+                onClicked: root.canReach(hostInput.text, 80)
             }
         }
 
         Text {
             id: pingResult
+            property string lastError: ""
             color: "#888"
             font.italic: true
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text; clipBoard.selectAll(); clipBoard.copy()
+                        parent.text = "Copied!"
+                        pingRestoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: pingRestoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
+        }
+
+        Label {
+            id: statusLabel
+            property string lastError: ""
+            color: "red"
+            visible: false
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text; clipBoard.selectAll(); clipBoard.copy()
+                        parent.text = "Copied!"
+                        statusRestoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: statusRestoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
         }
 
         Item { Layout.fillHeight: true }
-
-        Button {
-            text: "Refresh"
-            Layout.alignment: Qt.AlignHCenter
-            onClicked: fetchStatus()
-        }
-    }
-
-    function fetchStatus() {
-        var r1 = net.GetAvailable()
-        r1.finished.connect(function() {
-            if (r1.isError) return
-            availableText.text = r1.value ? "Yes" : "No"
-        })
-
-        var r2 = net.GetMetered()
-        r2.finished.connect(function() {
-            if (r2.isError) return
-            meteredText.text = r2.value ? "Yes" : "No"
-        })
-
-        var r3 = net.GetConnectivity()
-        r3.finished.connect(function() {
-            if (r3.isError) return
-            var labels = ["Local", "Limited", "Captive Portal", "Full"]
-            connectivityText.text = labels[r3.value] || "Unknown (" + r3.value + ")"
-        })
     }
 
     function canReach(host, port) {
-        var reply = net.CanReach(host, port)
+        var reply = net.canReach(host, port)
         reply.finished.connect(function() {
             if (reply.isError) {
-                pingResult.text = "Error: " + reply.error.message
+                pingResult.lastError = "Error: " + reply.error.message; pingResult.text = pingResult.lastError
                 return
             }
             pingResult.text = host + ":" + port + " is " + (reply.value ? "reachable" : "not reachable")
         })
     }
 
-    Component.onCompleted: fetchStatus()
-
-    // Dynamic proxy — GetAvailable(), GetMetered(), etc. are callable directly.
-    DBusQML.DBus {
+    // D-Bus properties (available, metered, connectivity) auto-bind as QML properties
+    // after fetchProperties() runs on introspection completion.
+    // canReach is a method — called dynamically.
+    DBus {
         id: net
         service: "org.freedesktop.portal.Desktop"
         path: "/org/freedesktop/portal/desktop"
         iface: "org.freedesktop.portal.NetworkMonitor"
-    }
-    Text {
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: 8
-        text: "✕"
-        font.pixelSize: 16
-        color: mouseArea.containsMouse ? "black" : "#999"
 
-        MouseArea {
-            id: mouseArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: Qt.quit()
+        onStatusChanged: {
+            if (status === 3) {
+                statusLabel.lastError = "Network portal not available"
+                statusLabel.text = statusLabel.lastError
+                statusLabel.visible = true
+            }
         }
     }
+    CloseButton {}
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
 
 }

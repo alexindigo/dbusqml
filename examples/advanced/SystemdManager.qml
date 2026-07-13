@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "../assets"
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -58,58 +60,76 @@ Window {
                 text: "Start"
                 onClicked: {
                     statusText.text = "Starting " + unitInput.text + "..."
-                    systemd.StartUnit(unitInput.text, "replace")
+                    systemd.startUnit(unitInput.text, "replace")
                 }
             }
             Button {
                 text: "Stop"
                 onClicked: {
                     statusText.text = "Stopping " + unitInput.text + "..."
-                    systemd.StopUnit(unitInput.text, "replace")
+                    systemd.stopUnit(unitInput.text, "replace")
                 }
             }
             Button {
                 text: "Restart"
                 onClicked: {
                     statusText.text = "Restarting " + unitInput.text + "..."
-                    systemd.RestartUnit(unitInput.text, "replace")
+                    systemd.restartUnit(unitInput.text, "replace")
                 }
             }
         }
 
         Text {
             id: statusText
+            property string lastError: ""
             color: "#666"
             font.italic: true
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text; clipBoard.selectAll(); clipBoard.copy()
+                        parent.text = "Copied!"
+                        restoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: restoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
         }
     }
 
     // Dynamic proxy — after introspection, StartUnit(), StopUnit(),
     // and RestartUnit() are callable directly.
-    DBusQML.DBus {
+    DBus {
         id: systemd
         service: "org.freedesktop.systemd1"
         path: "/org/freedesktop/systemd1"
         iface: "org.freedesktop.systemd1.Manager"
-        connection: DBusQML.SystemBus
+        connection: SystemBus
     }
 
-    DBusQML.DBus {
+    DBus {
         id: systemdUnit
         service: "org.freedesktop.systemd1"
         path: "/org/freedesktop/systemd1"
         iface: "org.freedesktop.systemd1.Unit"
-        connection: DBusQML.SystemBus
+        connection: SystemBus
     }
 
     function checkUnit(name) {
         statusText.text = "Looking up " + name + "..."
-        var reply = systemd.GetUnit(name)
+        var reply = systemd.getUnit(name)
         reply.finished.connect(function() {
             if (reply.isError) {
-                statusText.text = "Unit not found: " + reply.error.message
+                statusText.lastError = "Unit not found: " + reply.error.message; statusText.text = statusText.lastError
                 unitName = ""
                 return
             }
@@ -133,21 +153,7 @@ Window {
                 unitLoadState.text = "LoadState: " + value
         }
     }
-
-    Text {
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: 8
-        text: "✕"
-        font.pixelSize: 16
-        color: mouseArea.containsMouse ? "black" : "#999"
-
-        MouseArea {
-            id: mouseArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: Qt.quit()
-        }
-    }
+    CloseButton {}
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
+    
 }

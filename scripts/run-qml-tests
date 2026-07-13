@@ -6,9 +6,34 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_ABS="$(cd "${PROJECT_DIR}/${BUILD_DIR}" 2>/dev/null && pwd || echo "${BUILD_DIR}")"
 
+# Find qmltestrunner — try common paths, fall back to PATH lookup
+QMLTESTRUNNER=""
+for candidate in \
+    "/usr/lib/qt6/bin/qmltestrunner" \
+    "/usr/lib/x86_64-linux-gnu/qt6/bin/qmltestrunner" \
+    "/usr/lib64/qt6/bin/qmltestrunner"; do
+    if [ -x "$candidate" ]; then
+        QMLTESTRUNNER="$candidate"
+        break
+    fi
+done
+
+# Fall back to qmake6 -query or which
+if [ -z "$QMLTESTRUNNER" ]; then
+    QT_PREFIX=$(qmake6 -query QT_INSTALL_PREFIX 2>/dev/null || echo "")
+    if [ -n "$QT_PREFIX" ] && [ -x "${QT_PREFIX}/lib/qt6/bin/qmltestrunner" ]; then
+        QMLTESTRUNNER="${QT_PREFIX}/lib/qt6/bin/qmltestrunner"
+    elif command -v qmltestrunner &>/dev/null; then
+        QMLTESTRUNNER="qmltestrunner"
+    else
+        echo "error: qmltestrunner not found. Install qt6-declarative or set QMLTESTRUNNER env var."
+        exit 1
+    fi
+fi
+
 echo "=== Running QML tests ==="
 
-QML_IMPORT_PATH="${BUILD_ABS}" /usr/lib/qt6/bin/qmltestrunner -v2 -input "${PROJECT_DIR}/tests/test_api.qml"
+QML_IMPORT_PATH="${BUILD_ABS}" "${QMLTESTRUNNER}" -v2 -input "${PROJECT_DIR}/tests/test_api.qml"
 QML_EXIT=$?
 
 if [ ${QML_EXIT} -eq 0 ]; then

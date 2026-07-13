@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "../assets"
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -36,7 +38,37 @@ Window {
             }
         }
 
-        Label { text: "Registered services:"; font.bold: true }
+        Text {
+            id: checkResult
+            color: "#666"
+            font.italic: true
+            font.pixelSize: 12
+            visible: text !== ""
+        }
+
+        RowLayout {
+            spacing: 8
+
+            Label { text: "Registered services:"; font.bold: true }
+
+            Text {
+                id: serviceCount
+                color: "#888"
+                font.pixelSize: 12
+            }
+
+            Text {
+                id: copyFeedback
+                color: "#4caf50"
+                font.pixelSize: 12
+                visible: false
+                Timer {
+                    id: copyTimer
+                    interval: 1500
+                    onTriggered: copyFeedback.visible = false
+                }
+            }
+        }
 
         ListView {
             id: serviceList
@@ -47,7 +79,7 @@ Window {
             model: ListModel { id: servicesModel }
 
             delegate: Rectangle {
-                width: parent.width
+                width: serviceList.width
                 height: 28
                 color: index % 2 === 0 ? "#f5f5f5" : "#ffffff"
 
@@ -62,6 +94,18 @@ Window {
                         font.family: "monospace"
                         font.pixelSize: 12
                         elide: Text.ElideRight
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: {
+                                clipBoard.text = model.name
+                                clipBoard.selectAll()
+                                clipBoard.copy()
+                                copyFeedback.text = "Copied: " + model.name
+                                copyFeedback.visible = true
+                                copyTimer.start()
+                            }
+                        }
                     }
 
                     Rectangle {
@@ -90,15 +134,9 @@ Window {
                 color: "#333"
             }
         }
-
-        Text {
-            id: statusText
-            color: "#666"
-            font.italic: true
-        }
     }
 
-    DBusQML.DBus {
+    DBus {
         id: dbusProxy
         service: "org.freedesktop.DBus"
         path: "/org/freedesktop/DBus"
@@ -128,12 +166,12 @@ Window {
     }
 
     function checkService(name) {
-        var reply = dbusProxy.NameHasOwner(name)
+        var reply = dbusProxy.nameHasOwner(name)
         reply.finished.connect(function() {
             if (reply.isError) {
-                statusText.text = "Error checking " + name + ": " + reply.error.message
+                checkResult.text = "Error: " + reply.error.message
             } else {
-                statusText.text = name + " is " + (reply.value ? "running" : "not running")
+                checkResult.text = name + " is " + (reply.value ? "running" : "not running")
             }
         })
     }
@@ -141,11 +179,11 @@ Window {
     function refreshServices() {
         servicesModel.clear()
 
-        var reply = dbusProxy.ListNames()
+        var reply = dbusProxy.listNames()
         reply.finished.connect(function() {
             if (reply.isError) return
             var names = reply.value
-            statusText.text = names.length + " services on the bus"
+            serviceCount.text = names.length + " services on the bus"
 
             for (var i = 0; i < names.length; ++i) {
                 servicesModel.append({
@@ -157,22 +195,11 @@ Window {
         })
     }
 
-    Component.onCompleted: refreshServices()
-    Text {
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: 8
-        text: "✕"
-        font.pixelSize: 16
-        color: mouseArea.containsMouse ? "black" : "#999"
-
-        MouseArea {
-            id: mouseArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: Qt.quit()
-        }
+    Component.onCompleted: {
+        dbusProxy.introspectionCompleted.connect(refreshServices)
     }
+    CloseButton {}
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
+    
 
 }

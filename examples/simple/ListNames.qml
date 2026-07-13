@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
+import "../assets"
 import DBus 1.0
 
 Window {
@@ -40,10 +41,31 @@ Window {
             model: ListModel { id: namesModel }
             ScrollBar.vertical: ScrollBar {}
 
-            delegate: Text {
-                text: "• " + model.name
-                font.pixelSize: 12
-                font.family: "monospace"
+            delegate: Item {
+                width: listView.width
+                height: textEdit.implicitHeight + 4
+
+                TextEdit {
+                    id: textEdit
+                    x: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "• " + model.name
+                    font.pixelSize: 12
+                    font.family: "monospace"
+                    selectByMouse: true
+                    readOnly: true
+                    width: implicitWidth
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.RightButton
+                    onClicked: {
+                        clipBoard.text = model.name
+                        clipBoard.selectAll()
+                        clipBoard.copy()
+                    }
+                }
             }
         }
     }
@@ -65,7 +87,7 @@ Window {
         iface: "org.freedesktop.DBus"
 
         onIntrospectionCompleted: {
-            var reply = bus.ListNames()
+            var reply = bus.listNames()
             reply.finished.connect(function() {
                 if (reply.isError) {
                     console.error("Error:", reply.error.message)
@@ -76,21 +98,7 @@ Window {
             })
         }
     }
-    Text {
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: 8
-        text: "✕"
-        font.pixelSize: 16
-        color: mouseArea.containsMouse ? "black" : "#999"
-
-        MouseArea {
-            id: mouseArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: Qt.quit()
-        }
-    }
+    CloseButton {}
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
 
 }

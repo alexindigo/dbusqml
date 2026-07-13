@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "../assets"
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -30,7 +32,7 @@ Window {
             model: ListModel { id: devicesModel }
 
             delegate: Rectangle {
-                width: parent.width
+                width: deviceList.width
                 height: deviceExpanded ? 200 : 60
                 color: index % 2 === 0 ? "#f5f5f5" : "#ffffff"
                 clip: true
@@ -93,11 +95,33 @@ Window {
             }
         }
 
-        Text { id: statusText; color: "#666"; font.italic: true }
+        Text {
+            id: statusText
+            property string lastError: ""
+            color: "#666"
+            font.italic: true
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text; clipBoard.selectAll(); clipBoard.copy()
+                        parent.text = "Copied!"
+                        restoreTimer.start()
+                    }
+                }
+            }
+            Timer {
+                id: restoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
+        }
     }
 
     // KDE Connect daemon proxy — devices() is callable directly.
-    DBusQML.DBus {
+    DBus {
         id: daemon
         service: "org.kde.kdeconnect"
         path: "/modules/kdeconnect"
@@ -184,10 +208,10 @@ Window {
         devicesModel.clear()
         statusText.text = "Fetching devices..."
 
-        var reply = daemon.devices()
+        var reply = daemon.getProperty("devices")
         reply.finished.connect(function() {
             if (reply.isError) {
-                statusText.text = "KDE Connect daemon not available"
+                statusText.lastError = "KDE Connect daemon not available"; statusText.text = statusText.lastError
                 return
             }
             var ids = reply.value
@@ -203,7 +227,9 @@ Window {
         })
     }
 
-    Component.onCompleted: fetchDevices()
+    Component.onCompleted: {
+        daemon.introspectionCompleted.connect(fetchDevices)
+    }
 
     Text {
         anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 8
@@ -211,4 +237,5 @@ Window {
         color: mouseArea.containsMouse ? "black" : "#999"
         MouseArea { id: mouseArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Qt.quit() }
     }
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
 }

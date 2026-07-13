@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "../assets"
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -47,6 +49,8 @@ Window {
                 color: "#666"
                 font.pixelSize: 13
                 font.family: "monospace"
+                horizontalAlignment: Text.AlignHCenter
+                Layout.fillWidth: true
                 text: locale.locale ? locale.locale[0].replace("LANG=", "") : ""
             }
 
@@ -59,9 +63,29 @@ Window {
 
             Label {
                 id: inputLabel
+                property string lastError: ""
                 color: "#888"
                 font.pixelSize: 13
+                horizontalAlignment: Text.AlignHCenter
+                Layout.fillWidth: true
                 text: "Detecting..."
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: {
+                        if (parent.text.indexOf("Error:") === 0) {
+                            clipBoard.text = parent.text; clipBoard.selectAll(); clipBoard.copy()
+                            parent.text = "Copied!"
+                            restoreTimer.start()
+                        }
+                    }
+                }
+                Timer {
+                    id: restoreTimer
+                    interval: 2000
+                    onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+                }
             }
         }
 
@@ -72,12 +96,12 @@ Window {
         }
     }
 
-    DBusQML.DBus {
+    DBus {
         id: locale
         service: "org.freedesktop.locale1"
         path: "/org/freedesktop/locale1"
         iface: "org.freedesktop.locale1"
-        connection: DBusQML.SystemBus
+        connection: SystemBus
 
         onIntrospectionCompleted: {
             layoutLabel.text = locale.x11Layout ? locale.x11Layout.toUpperCase() : "??"
@@ -91,7 +115,7 @@ Window {
         }
     }
 
-    DBusQML.DBus {
+    DBus {
         id: sessionBus
         service: "org.freedesktop.DBus"
         path: "/org/freedesktop/DBus"
@@ -102,14 +126,14 @@ Window {
         }
     }
 
-    DBusQML.DBus {
+    DBus {
         id: ibus
         service: "org.freedesktop.IBus"
         path: "/org/freedesktop/IBus"
         iface: "org.freedesktop.IBus"
     }
 
-    DBusQML.DBus {
+    DBus {
         id: fcitx
         service: "org.fcitx.Fcitx5.Controller1"
         path: "/controller"
@@ -117,10 +141,10 @@ Window {
     }
 
     function fetchInputMethod() {
-        var busReply = sessionBus.ListNames()
+        var busReply = sessionBus.listNames()
         busReply.finished.connect(function() {
             if (busReply.isError) {
-                inputLabel.text = "Input method: error"
+                inputLabel.lastError = "Input method: error"; inputLabel.text = inputLabel.lastError
                 return
             }
             var names = busReply.value
@@ -135,10 +159,10 @@ Window {
     }
 
     function queryIbusEngine() {
-        var reply = ibus.CurrentInputContext()
+        var reply = ibus.currentInputContext()
         reply.finished.connect(function() {
             if (reply.isError) {
-                inputLabel.text = "Input method: IBus (error)"
+                inputLabel.lastError = "Input method: IBus (error)"; inputLabel.text = inputLabel.lastError
                 return
             }
             inputLabel.text = "Input method: IBus"
@@ -146,10 +170,10 @@ Window {
     }
 
     function queryFcitx5() {
-        var reply = fcitx.CurrentIM()
+        var reply = fcitx.currentIM()
         reply.finished.connect(function() {
             if (reply.isError) {
-                inputLabel.text = "Input method: Fcitx5 (error)"
+                inputLabel.lastError = "Input method: Fcitx5 (error)"; inputLabel.text = inputLabel.lastError
                 return
             }
             inputLabel.text = "Input method: Fcitx5"
@@ -159,20 +183,7 @@ Window {
     Component.onCompleted: {
         // locale properties auto-bind via QML; sessionBus triggers fetchInputMethod
     }
-
-    Text {
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: 8
-        text: "✕"
-        font.pixelSize: 16
-        color: mouseArea.containsMouse ? "black" : "#999"
-        MouseArea {
-            id: mouseArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: Qt.quit()
-        }
-    }
+    CloseButton {}
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
+    
 }

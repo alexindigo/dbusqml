@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eo pipefail
+set -euo pipefail
 
 BUILD_DIR="${1:-build-debug}"
 COVERAGE_DIR="coverage"

@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "../assets"
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 Window {
@@ -35,7 +37,7 @@ Window {
             font.pixelSize: 16
             onClicked: {
                 statusText.text = "Calling Suspend..."
-                logind.Suspend(true)
+                logind.suspend(true)
             }
         }
 
@@ -46,7 +48,7 @@ Window {
             font.pixelSize: 16
             onClicked: {
                 statusText.text = "Calling Hibernate..."
-                logind.Hibernate(true)
+                logind.hibernate(true)
             }
         }
 
@@ -57,7 +59,7 @@ Window {
             font.pixelSize: 16
             onClicked: {
                 statusText.text = "Calling Reboot..."
-                logind.Reboot(true)
+                logind.reboot(true)
             }
         }
 
@@ -68,7 +70,7 @@ Window {
             font.pixelSize: 16
             onClicked: {
                 statusText.text = "Calling Power Off..."
-                logind.PowerOff(true)
+                logind.powerOff(true)
             }
         }
 
@@ -86,7 +88,7 @@ Window {
             text: "Check if logind is available"
             Layout.alignment: Qt.AlignHCenter
             onClicked: {
-                var reply = sysd.NameHasOwner("org.freedesktop.login1")
+                var reply = sysd.nameHasOwner("org.freedesktop.login1")
                 reply.finished.connect(function() {
                     statusText.text = reply.value
                         ? "logind is available"
@@ -96,33 +98,23 @@ Window {
         }
     }
 
-    // Dynamic proxy — after introspection, Suspend(), Hibernate(),
-    // Reboot(), and PowerOff() are callable directly.
+    // Dynamic proxy — Suspend(), Hibernate(), Reboot(), PowerOff() are callable directly.
+    DBus {
+        id: logind
+        service: "org.freedesktop.login1"
+        path: "/org/freedesktop/login1"
+        iface: "org.freedesktop.login1.Manager"
+        connection: SystemBus
+    }
 
-    // Bus daemon proxy (system bus) — NameHasOwner() is callable directly.
-    DBusQML.DBus {
+    // Bus daemon proxy — NameHasOwner() is callable directly.
+    DBus {
         id: sysd
         service: "org.freedesktop.DBus"
         path: "/org/freedesktop/DBus"
         iface: "org.freedesktop.DBus"
-        connection: DBusQML.SystemBus
+        connection: SystemBus
     }
-
-
-    Text {
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: 8
-        text: "✕"
-        font.pixelSize: 16
-        color: mouseArea.containsMouse ? "black" : "#999"
-
-        MouseArea {
-            id: mouseArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: Qt.quit()
-        }
-    }
+    CloseButton {}
+    
 }

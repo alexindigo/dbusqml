@@ -1,12 +1,14 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import DBus 1.0 as DBusQML
+import "../assets"
+import DBus 1.0
 
 Window {
+    id: root
     visible: true
-    width: 500
-    height: 400
+    width: 600
+    height: 500
     title: "DBus — Battery Monitor"
 
     ColumnLayout {
@@ -14,21 +16,63 @@ Window {
         anchors.margins: 16
         spacing: 8
 
+        Label {
+            text: "Battery Status"
+            font.bold: true
+            font.pixelSize: 18
+        }
+
+        GroupBox {
+            title: "System Power"
+            Layout.fillWidth: true
+
+            GridLayout {
+                columns: 2
+                width: parent.width
+                rowSpacing: 4
+                columnSpacing: 12
+
+                Text { text: "Power Source:"; font.bold: true }
+                Text { text: upower.onBattery ? "Battery" : "AC Adapter"; color: upower.onBattery ? "#e53935" : "#4caf50" }
+
+                Text { text: "Daemon:"; font.bold: true }
+                Text { text: "UPower " + (upower.daemonVersion || "?"); color: "#666" }
+
+                Text { text: "Lid:"; font.bold: true }
+                Text { text: upower.lidIsPresent !== undefined ? (upower.lidIsClosed ? "Closed" : "Open") : "—"; color: "#666" }
+
+                Text { text: "Devices:"; font.bold: true }
+                Text { id: deviceCountText; text: "—"; color: "#666" }
+            }
+        }
+
         RowLayout {
-            spacing: 12
+            spacing: 8
 
-            Label {
-                text: "Battery Status"
-                font.bold: true
-                font.pixelSize: 18
-            }
+        Text {
+            id: statusText
+            property string lastError: ""
+            color: "#888"
+            font.italic: true
+            Layout.fillWidth: true
 
-            Rectangle {
-                id: onBatteryIndicator
-                width: 12; height: 12; radius: 6
-                color: upower.onBattery ? "#e53935" : "#4caf50"
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: parent.text.indexOf("Error:") === 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    if (parent.text.indexOf("Error:") === 0) {
+                        clipBoard.text = parent.text; clipBoard.selectAll(); clipBoard.copy()
+                        parent.text = "Copied!"
+                        restoreTimer.start()
+                    }
+                }
             }
-            Label { id: onBatteryLabel; text: upower.onBattery ? "On battery" : "On AC" }
+            Timer {
+                id: restoreTimer
+                interval: 2000
+                onTriggered: { if (parent.lastError) parent.text = parent.lastError }
+            }
+        }
 
             Button {
                 text: "Refresh"
@@ -41,36 +85,20 @@ Window {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
+            spacing: 4
 
             model: ListModel { id: devicesModel }
 
-            delegate: Rectangle {
+            delegate: GroupBox {
                 width: parent.width
-                height: 80
-                color: index % 2 === 0 ? "#f5f5f5" : "#ffffff"
-                radius: 6
+                title: {
+                    var types = ["AC Adapter", "Battery", "UPS", "Monitor", "Mouse", "Keyboard", "PDA", "Phone"]
+                    return (types[model.type - 1] || "Device") + (model.percentage !== undefined ? "  " + model.percentage.toFixed(0) + "%" : "")
+                }
 
                 ColumnLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
+                    width: parent.width
                     spacing: 4
-
-                    RowLayout {
-                        Layout.fillWidth: true
-
-                        Text {
-                            text: model.type || "Unknown"
-                            font.bold: true
-                            font.pixelSize: 14
-                            Layout.fillWidth: true
-                        }
-
-                        Text {
-                            text: model.percentage !== undefined ? Math.round(model.percentage) + "%" : "?"
-                            font.pixelSize: 14
-                            color: model.percentage !== undefined && model.percentage < 20 ? "#e53935" : "#333"
-                        }
-                    }
 
                     ProgressBar {
                         Layout.fillWidth: true
@@ -80,40 +108,72 @@ Window {
 
                     Text {
                         text: {
-                            var parts = []
-                            if (model.state === 1) parts.push("Charging")
-                            else if (model.state === 2) parts.push("Discharging")
-                            else if (model.state === 4) parts.push("Fully charged")
-                            else parts.push("Unknown state")
-
+                            var s = ({
+                                1: "Charging", 2: "Discharging",
+                                3: "Empty", 4: "Fully Charged",
+                                5: "Pending Charge", 6: "Pending Discharge"
+                            })[model.state] || "Unknown"
                             if (model.timeToEmpty > 0 && model.state === 2)
-                                parts.push(" — " + formatTime(model.timeToEmpty) + " remaining")
-                            if (model.timeToFull > 0 && model.state === 1)
-                                parts.push(" — " + formatTime(model.timeToFull) + " until full")
-
-                            return parts.join("")
+                                s += "  --  " + formatTime(model.timeToEmpty) + " remaining"
+                            if (model.timeToFull > 0 && (model.state === 1 || model.state === 5))
+                                s += "  --  " + formatTime(model.timeToFull) + " until full"
+                            return s
                         }
-                        font.pixelSize: 11
-                        color: "#888"
+                        font.pixelSize: 12
+                        color: "#666"
+                    }
+
+                    GridLayout {
+                        columns: 2
+                        width: parent.width
+                        rowSpacing: 2
+                        columnSpacing: 12
+
+                        Repeater {
+                            model: {
+                                var rows = []
+                                if ((model.energy || 0) > 0)
+                                    rows.push({ label: "Energy", value: model.energy.toFixed(1) + " / " + (model.energyFull || 0).toFixed(1) + " Wh" })
+                                if ((model.energyRate || 0) > 0)
+                                    rows.push({ label: "Rate", value: model.energyRate.toFixed(2) + " W" })
+                                if ((model.voltage || 0) > 0)
+                                    rows.push({ label: "Voltage", value: model.voltage.toFixed(2) + " V" })
+                                if ((model.temperature || 0) > 0)
+                                    rows.push({ label: "Temperature", value: model.temperature.toFixed(1) + " C" })
+                                if ((model.capacity || 0) > 0)
+                                    rows.push({ label: "Health", value: model.capacity.toFixed(0) + "%" })
+                                if ((model.chargeCycles || 0) > 0)
+                                    rows.push({ label: "Cycles", value: model.chargeCycles })
+                                if (model.vendor)
+                                    rows.push({ label: "Vendor", value: model.vendor })
+                                if (model.model)
+                                    rows.push({ label: "Model", value: model.model })
+                                if (model.serial)
+                                    rows.push({ label: "Serial", value: model.serial })
+                                if ((model.technology || 0) > 0) {
+                                    var techs = ["", "", "NiMH", "Li-ion", "Li-Po", "LiFePO4", "Lead Acid"]
+                                    rows.push({ label: "Chemistry", value: techs[model.technology] || "Unknown" })
+                                }
+                                return rows
+                            }
+
+                            Text {
+                                text: modelData.label + ":"
+                                font.bold: true
+                                font.pixelSize: 11
+                                color: "#888"
+                            }
+                            Text {
+                                text: modelData.value
+                                font.pixelSize: 11
+                                font.family: "monospace"
+                                color: "#333"
+                            }
+                        }
                     }
                 }
             }
         }
-
-        Text {
-            id: statusText
-            color: "#666"
-            font.italic: true
-        }
-    }
-
-    // Dynamic proxy — onBattery, lidIsClosed are available as properties.
-    DBusQML.DBus {
-        id: upower
-        service: "org.freedesktop.UPower"
-        path: "/org/freedesktop/UPower"
-        iface: "org.freedesktop.UPower"
-        connection: DBusQML.SystemBus
     }
 
     function formatTime(seconds) {
@@ -123,21 +183,32 @@ Window {
     }
 
     function fetchDeviceInfo(devicePath, idx) {
-        // Create a temporary proxy for this device — properties auto-load
         var dev = Qt.createQmlObject(
             'import DBus 1.0; DBus { service: "org.freedesktop.UPower"; path: "' + devicePath + '"; iface: "org.freedesktop.UPower.Device"; connection: SystemBus }',
             this
         )
         dev.introspectionCompleted.connect(function() {
             devicesModel.set(idx, {
-                path: devicePath,
-                type: dev.model || devicePath.split("/").pop(),
+                type: dev.type,
                 percentage: dev.percentage,
                 state: dev.state,
                 timeToEmpty: dev.timeToEmpty,
                 timeToFull: dev.timeToFull,
                 energy: dev.energy,
+                energyFull: dev.energyFull,
+                energyRate: dev.energyRate,
+                voltage: dev.voltage,
+                temperature: dev.temperature,
+                capacity: dev.capacity,
+                chargeCycles: dev.chargeCycles,
+                vendor: dev.vendor,
+                model: dev.model,
+                serial: dev.serial,
+                technology: dev.technology,
+                isPresent: dev.isPresent,
+                isRechargeable: dev.isRechargeable,
                 powerSupply: dev.powerSupply,
+                online: dev.online,
             })
             dev.destroy()
         })
@@ -145,47 +216,38 @@ Window {
 
     function refreshAll() {
         devicesModel.clear()
+        statusText.text = "Fetching devices..."
 
-        var enumReply = upower.EnumerateDevices()
+        var enumReply = upower.enumerateDevices()
         enumReply.finished.connect(function() {
             if (enumReply.isError) {
-                statusText.text = "UPower not available"
+                statusText.lastError = "UPower not available"; statusText.text = statusText.lastError
                 return
             }
             var devices = enumReply.value
-            statusText.text = devices.length + " power device(s)"
+            statusText.text = ""
+            deviceCountText.text = devices.length
 
             for (var i = 0; i < devices.length; ++i) {
-                devicesModel.append({
-                    path: devices[i],
-                    type: "Loading...",
-                    percentage: 0,
-                    state: 0,
-                    timeToEmpty: 0,
-                    timeToFull: 0,
-                    energy: 0,
-                    powerSupply: false,
-                })
+                devicesModel.append({})
                 fetchDeviceInfo(devices[i], i)
             }
         })
     }
 
-    Component.onCompleted: refreshAll()
-
-    Text {
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: 8
-        text: "✕"
-        font.pixelSize: 16
-        color: mouseArea.containsMouse ? "black" : "#999"
-        MouseArea {
-            id: mouseArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: Qt.quit()
-        }
+    // UPower properties auto-bind as QML properties after introspection.
+    DBus {
+        id: upower
+        service: "org.freedesktop.UPower"
+        path: "/org/freedesktop/UPower"
+        iface: "org.freedesktop.UPower"
+        connection: SystemBus
     }
+
+    Component.onCompleted: {
+        upower.introspectionCompleted.connect(refreshAll)
+    }
+    CloseButton {}
+    TextEdit { id: clipBoard; x: -9999; y: -9999 }
+
 }

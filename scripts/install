@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUILD_DIR="${BUILD_DIR:-build-release}"
+BUILD_DIR="${BUILD_DIR:-build-debug}"
 PREFIX="${PREFIX:-$(qmake6 -query QT_INSTALL_PREFIX 2>/dev/null || echo /usr)}"
 
 if [ ! -d "${BUILD_DIR}" ]; then

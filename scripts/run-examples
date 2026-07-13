@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_DIR="${BUILD_DIR:-build-debug}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BUILD_ABS="$(cd "${PROJECT_DIR}/${BUILD_DIR}" 2>/dev/null && pwd || echo "${BUILD_DIR}")"
+
+run_one() {
+    echo ""
+    echo "--- $1 ---"
+    QML_IMPORT_PATH="${BUILD_ABS}" qml6 "$1"
+    echo ""
+}
+
+list_examples() {
+    for f in "${PROJECT_DIR}/examples/simple/"*.qml \
+             "${PROJECT_DIR}/examples/intermediate/"*.qml \
+             "${PROJECT_DIR}/examples/advanced/"*.qml; do
+        basename "$f" .qml
+    done
+}
+
+if [ $# -eq 0 ]; then
+    # No args — run all examples sequentially
+    echo "Running all examples sequentially."
+    echo "Close each window to proceed to the next."
+    echo ""
+    for f in "${PROJECT_DIR}/examples/simple/"*.qml \
+             "${PROJECT_DIR}/examples/intermediate/"*.qml \
+             "${PROJECT_DIR}/examples/advanced/"*.qml; do
+        run_one "$f"
+    done
+    echo "All examples finished."
+    exit 0
+fi
+
+ARG="$1"
+
+# Check if arg is a direct path to a .qml file
+if [ -f "$ARG" ]; then
+    run_one "$(realpath "$ARG")"
+    exit 0
+fi
+
+# Check if arg is a subdirectory name
+if [ -d "${PROJECT_DIR}/examples/${ARG}" ]; then
+    echo "Running all examples in examples/${ARG}/"
+    echo "Close each window to proceed to the next."
+    echo ""
+    for f in "${PROJECT_DIR}/examples/${ARG}"/*.qml; do
+        run_one "$f"
+    done
+    echo "All examples in ${ARG}/ finished."
+    exit 0
+fi
+
+# Otherwise, treat as an example filename
+FOUND=""
+for f in "${PROJECT_DIR}/examples/simple/"*.qml \
+         "${PROJECT_DIR}/examples/intermediate/"*.qml \
+         "${PROJECT_DIR}/examples/advanced/"*.qml; do
+    basename=$(basename "$f" .qml)
+    if [ "$basename" = "$ARG" ]; then
+        FOUND="$f"
+        break
+    fi
+done
+
+if [ -z "$FOUND" ]; then
+    echo "error: '$ARG' is not an example name or subdirectory."
+    echo ""
+    echo "Usage: $0                       — run all examples"
+    echo "       $0 <name>                — run a specific example by name"
+    echo "       $0 <simple|intermediate|advanced> — run examples in a category"
+    echo "       $0 <path/to/file.qml>    — run a .qml file by path"
+    echo ""
+    echo "Available examples:"
+    list_examples
+    exit 1
+fi
+
+run_one "$FOUND"
