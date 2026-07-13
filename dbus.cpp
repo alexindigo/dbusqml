@@ -1,14 +1,20 @@
 #include "dbus.h"
+#include "dbuscatalog.h"
 #include "dbuspendingreply.h"
 #include "dbustypes.h"
 
+#include <QDBusArgument>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
+#include <QDBusMetaType>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusReply>
+#include <QDBusVariant>
 #include <QQmlEngine>
+#include <QSet>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QXmlStreamReader>
 
@@ -450,7 +456,7 @@ void DBusProxy::fetchProperties()
                         QString qmlName = dbusPropToQml(it.key());
                         // Don't overwrite dynamic method callbacks with property values
                         if (!m_methodArgTypes.contains(it.key()) && !m_methodArgTypes.contains(qmlName))
-                            insert(qmlName, it.value());
+                            insert(qmlName, unwrapDbus(it.value()));
                     }
                     m_status = Ready;
                 } else {
@@ -471,7 +477,7 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg)
             QVariantMap changed = qdbus_cast<QVariantMap>(msg.arguments()[1]);
             for (auto it = changed.begin(); it != changed.end(); ++it) {
                 QString qmlName = dbusPropToQml(it.key());
-                insert(qmlName, it.value());
+                insert(qmlName, unwrapDbus(it.value()));
             }
         }
     }
@@ -564,6 +570,36 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
                  qPrintable(m_iface), qPrintable(reader.errorString()));
     }
 
+    // Merge with user-land catalog (interface descriptors from XDG paths and
+    // bundled resources). Live introspection wins on arg types; catalog fills
+    // in missing methods / signals.
+    if (const auto *spec = DBusCatalog::instance().lookup(m_iface)) {
+        for (auto it = spec->methods.constBegin(); it != spec->methods.constEnd(); ++it) {
+            const QString &methodName = it.key();
+            if (!methodNames.contains(methodName)) {
+                methodNames << methodName;
+                m_methodArgTypes.insert(methodName, it.value().argTypes);
+                m_methodArgTypes.insert(dbusPropToQml(methodName), it.value().argTypes);
+            }
+        }
+        for (auto it = spec->signals_.constBegin(); it != spec->signals_.constEnd(); ++it) {
+            if (!signalNames.contains(it.key()))
+                signalNames << it.key();
+        }
+    } else if (methodNames.isEmpty() && signalNames.isEmpty()) {
+        static QSet<QString> warned;
+        if (!warned.contains(m_iface)) {
+            warned.insert(m_iface);
+            qWarning().nospace()
+                << "DBusProxy: interface " << m_iface
+                << " returned empty Introspect XML and no catalog entry exists. "
+                << "Use proxy.call(\"MethodName\", args) to invoke methods, "
+                << "or drop " << m_iface << ".xml at "
+                << QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation)
+                << "/dbusqml/types/";
+        }
+    }
+
     if (m_signalsEnabled) {
         for (const QString &sigName : signalNames) {
             m_bus.connect(QString(), m_path, m_iface, sigName,
@@ -581,6 +617,11 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
 
     if (m_propertiesEnabled)
         fetchProperties();
+}
+
+void DBusProxy::reloadTypes()
+{
+    DBusCatalog::instance().reload();
 }
 
 #include "dbus.moc"

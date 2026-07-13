@@ -7,8 +7,8 @@ import DBus 1.0
 Window {
     id: root
     visible: true
-    width: 560
-    height: 380
+    width: 480
+    height: 440
     title: "DBus — MPRIS Media Player Remote"
 
     property string activePlayer: ""
@@ -43,37 +43,86 @@ Window {
 
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 200
+            Layout.fillHeight: true
+            color: "white"
             border.color: "#ccc"
             radius: 8
 
             ColumnLayout {
-                anchors.centerIn: parent
-                spacing: 8
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 10
 
+                // Artwork
+                Image {
+                    id: artwork
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.preferredWidth: 160
+                    Layout.preferredHeight: 160
+                    fillMode: Image.PreserveAspectFit
+                    source: {
+                        var meta = playerProxy.metadata
+                        if (!meta) return ""
+                        var artUrl = meta["mpris:artUrl"]
+                        return artUrl ? artUrl : ""
+                    }
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 8
+                        color: "transparent"
+                        border.color: "#e0e0e0"
+                        visible: artwork.source === ""
+                    }
+                }
+
+                // Title
                 Label {
                     text: {
                         var meta = playerProxy.metadata
                         if (!meta) return activePlayer ? "Connecting..." : "No player selected"
-                        var artist = meta["xesam:artist"] ? meta["xesam:artist"][0] : "Unknown"
-                        var title  = meta["xesam:title"] || "Unknown Title"
-                        return artist + " — " + title
+                        return meta["xesam:title"] || "Unknown Title"
                     }
-                    font.pixelSize: 14
+                    color: "black"
+                    font.pixelSize: 15
                     font.bold: true
                     horizontalAlignment: Text.AlignHCenter
-                    Layout.alignment: Qt.AlignHCenter
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.rightMargin: 8
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
                 }
 
+                // Artist — Album
+                Label {
+                    text: {
+                        var meta = playerProxy.metadata
+                        if (!meta) return ""
+                        var artist = meta["xesam:artist"] ? meta["xesam:artist"][0] : ""
+                        var album  = meta["xesam:album"] || ""
+                        if (artist && album) return artist + " — " + album
+                        return artist || album
+                    }
+                    font.pixelSize: 12
+                    color: "#888"
+                    horizontalAlignment: Text.AlignHCenter
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                }
+
+                // Playback state
                 Label {
                     text: playerProxy.playbackStatus
                         ? (playerProxy.playbackStatus === "Playing" ? "▶ Playing" : "⏸ Paused")
                         : ""
-                    font.pixelSize: 13
-                    color: "#888"
+                    font.pixelSize: 12
+                    color: playerProxy.playbackStatus === "Playing" ? "#4caf50" : "#888"
                     Layout.alignment: Qt.AlignHCenter
                 }
 
+                // Controls
                 RowLayout {
                     spacing: 16
                     Layout.alignment: Qt.AlignHCenter
@@ -81,19 +130,24 @@ Window {
                     Button {
                         text: "⏮"
                         font.pixelSize: 18
-                        onClicked: playerProxy.call("Previous")
+                        flat: true
+                        onClicked: playerProxy.previous()
                     }
                     Button {
                         text: playerProxy.playbackStatus === "Playing" ? "⏸" : "▶"
-                        font.pixelSize: 22
-                        onClicked: playerProxy.call("PlayPause")
+                        font.pixelSize: 24
+                        flat: true
+                        onClicked: playerProxy.playPause()
                     }
                     Button {
                         text: "⏭"
                         font.pixelSize: 18
-                        onClicked: playerProxy.call("Next")
+                        flat: true
+                        onClicked: playerProxy.next()
                     }
                 }
+
+                Item { Layout.fillHeight: true }
             }
         }
 

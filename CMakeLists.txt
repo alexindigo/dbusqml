@@ -16,6 +16,8 @@ include(GNUInstallDirs)
 set(DBUSQML_SOURCES
     dbusadaptor.cpp
     dbusadaptor.h
+    dbuscatalog.cpp
+    dbuscatalog.h
     dbusconnection.cpp
     dbusconnection.h
     dbuserror.h
@@ -43,6 +45,19 @@ target_link_libraries(dbusqml PRIVATE
     Qt6::Core Qt6::Qml Qt6::DBus
 )
 
+qt_add_resources(dbusqml "catalog"
+    PREFIX "/dbusqml"
+    FILES
+        types/org.mpris.MediaPlayer2.xml
+        types/org.mpris.MediaPlayer2.Player.xml
+        types/org.freedesktop.Notifications.xml
+        types/org.freedesktop.ScreenSaver.xml
+        types/org.freedesktop.login1.Manager.xml
+        types/org.freedesktop.portal.Settings.xml
+        types/org.freedesktop.portal.NetworkMonitor.xml
+        types/org.freedesktop.UPower.xml
+)
+
 # ==================== INSTALLATION ====================
 install(TARGETS dbusqml
     DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -61,6 +76,10 @@ install(FILES
     dbustypes.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dbusqml
 )
+
+install(DIRECTORY types/
+        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/dbusqml/types/
+        FILES_MATCHING PATTERN "*.xml")
 
 # ==================== TESTS ====================
 option(BUILD_TEST_MODE "Build the C++ test executables" ON)

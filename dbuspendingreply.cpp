@@ -1,4 +1,5 @@
 #include "dbuspendingreply.h"
+#include "dbusconnection.h"
 
 #include <QDBusMessage>
 #include <QDBusPendingReply>
@@ -47,9 +48,7 @@ QVariant DBusPendingReply::value() const
         return {};
 
     QVariant val = reply.arguments().first();
-    if (val.userType() == qMetaTypeId<QDBusVariant>())
-        val = val.value<QDBusVariant>().variant();
-    return val;
+    return unwrapDbus(val);
 }
 
 QVariantList DBusPendingReply::values() const
@@ -58,10 +57,8 @@ QVariantList DBusPendingReply::values() const
         return {};
 
     QVariantList args = m_watcher->reply().arguments();
-    for (int i = 0; i < args.size(); ++i) {
-        if (args[i].userType() == qMetaTypeId<QDBusVariant>())
-            args[i] = args[i].value<QDBusVariant>().variant();
-    }
+    for (int i = 0; i < args.size(); ++i)
+        args[i] = unwrapDbus(args[i]);
     return args;
 }
 
