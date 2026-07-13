@@ -69,3 +69,6 @@ Testing/
 .cache/
 coverage/
 mpv-shot*.*
+
+# scratch review notes
+REVIEW.md

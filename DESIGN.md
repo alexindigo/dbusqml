@@ -89,11 +89,6 @@ onSignalReceived: function(name, args) {
 }
 ```
 
-### `BusType` (enum)
-
-- `BusType.Session`
-- `BusType.System`
-
 ### `DBusError` (value type)
 
 ```qml
@@ -116,6 +111,75 @@ DBus.dict({ key: "value" })
 Used when Qt's auto-conversion doesn't produce the correct D-Bus type signature.
 
 ## Architecture
+
+```
+Bus (session or system)
+  │
+  ├── Connection unique name (:1.42)
+  │
+  ├── Well-known service (org.freedesktop.DBus)
+  │     └── Object path (/org/freedesktop/DBus)
+  │           └── Interface (org.freedesktop.DBus)
+  │                 ├── Methods: ListNames, GetNameOwner, ...
+  │                 └── Signals: NameOwnerChanged
+  │
+  ├── Well-known service (org.kde.kdeconnect)
+  │     ├── Path (/modules/kdeconnect)
+  │     │     └── Iface (org.kde.kdeconnect.daemon)
+  │     │           ├── Methods: devices(), ...
+  │     │           └── Properties: ...
+  │     └── Path (/modules/kdeconnect/devices/{id})
+  │           └── Iface (org.kde.kdeconnect.device)
+  │                 ├── Methods: ...
+  │                 └── Properties: name, reachable, ...
+```
+
+A D-Bus **service** owns a well-known name (like `org.freedesktop.portal.Desktop`). Under that service, there can be multiple **object paths** (like `/org/freedesktop/portal/desktop`). Each path can expose multiple **interfaces** (like `org.freedesktop.portal.Settings`).
+
+Registering means:
+1. **Service** (optional) — Claim a well-known name on the bus via `registerService()`. Without it, connections are reachable only by their unique name (`:1.42`).
+2. **Path** — Register an object handler for a specific path via `registerObject()`. This is required to receive method calls.
+3. **Interface** — Part of the registered object's introspection XML. Defines which methods, signals, and properties the object exposes.
+
+The sender's unique name is included in every D-Bus message. A receiver can identify the caller via `QDBusMessage::sender()`, regardless of whether the sender owns a well-known name.
+
+## Registration (server-side)
+
+### `DBusAdaptor` (proposed)
+
+Inverse of the `DBus` proxy element. Registers a D-Bus object on the bus and maps QML properties/functions/signals to D-Bus properties/methods/signals.
+
+```qml
+DBusAdaptor {
+    id: portal
+    service: "org.freedesktop.impl.portal.atmosphera"  // optional — omit for unique-name-only
+    path: "/org/freedesktop/portal/desktop"
+    iface: "org.freedesktop.impl.portal.Settings"
+
+    // QML properties → D-Bus properties (read/write)
+    property int preferredDarkMode: 0
+
+    // QML functions → D-Bus methods
+    function Read(namespace, key) {
+        return settings[key] ?? ""
+    }
+
+    // QML signals → D-Bus signals
+    signal settingChanged(string ns, string key, variant value)
+}
+```
+
+The adaptor:
+- Claims `service` via `registerService()` (if specified)
+- Registers on `path` via `registerObject()` with `QDBusVirtualObject`
+- Exposes `iface` methods from QML functions
+- Exposes `iface` signals from QML signals
+- Exposes `iface` properties from QML properties
+- Handles incoming method calls: `QDBusVirtualObject::handleMethodCall()` dispatches to the matching QML function
+- Handles property get/set: `QDBusVirtualObject::property()` or custom dispatch
+- Emits signals via `QDBusConnection::send(QDBusMessage::createSignal(...))`
+
+Multiple interfaces on the same path use multiple `DBusAdaptor` instances with the same `service` and `path` but different `iface`.
 
 ```
 QML

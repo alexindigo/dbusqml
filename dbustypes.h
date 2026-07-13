@@ -7,6 +7,8 @@
 #include <QVariantMap>
 #include <qqmlregistration.h>
 
+class QDBusArgument;
+
 #define DBUS_QML_TYPE(TYPE, NAME, CTOR, STORE, SIG)                  \
     class TYPE {                                                      \
         Q_GADGET                                                      \
@@ -93,3 +95,13 @@ public:
 };
 
 } // namespace DBus
+
+// Distinct type to force D-Bus marshaling fallthrough to appendRegisteredType for "as".
+// QStringList is handled by Qt's internal marshaling but may produce "av";
+// a distinct type avoids that code path entirely.
+struct DBusAsArray {
+    QStringList value;
+};
+Q_DECLARE_METATYPE(DBusAsArray)
+QDBusArgument &operator<<(QDBusArgument &arg, const DBusAsArray &a);
+const QDBusArgument &operator>>(const QDBusArgument &arg, DBusAsArray &a);

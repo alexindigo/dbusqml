@@ -17,6 +17,7 @@
 #include "../dbusmessage.h"
 #include "../dbuspendingreply.h"
 #include "../dbus.h"
+#include "../dbusadaptor.h"
 #include "dbustypes.h"
 
 // ==================== Mock D-Bus Service ====================
@@ -834,6 +835,103 @@ private slots:
             QVERIFY(conn != nullptr);
             delete conn;
         }
+    }
+
+    void testEmitSignalStatic()
+    {
+        DBusProxy::emitSignal(
+            QStringLiteral("org.freedesktop.portal.Desktop"),
+            QStringLiteral("/org/freedesktop/portal/desktop"),
+            QStringLiteral("org.freedesktop.portal.Settings"),
+            QStringLiteral("SettingChanged"),
+            { QVariant::fromValue(QStringLiteral("org.freedesktop.appearance")),
+              QVariant::fromValue(QStringLiteral("color-scheme")),
+              QVariant::fromValue(1) }
+        );
+        QVERIFY(true);
+    }
+
+    void testEmitSignalInstance()
+    {
+        DBusProxy proxy;
+        proxy.setService("org.dbusqml.TestService");
+        proxy.setPath("/TestService");
+        proxy.setIface("org.dbusqml.TestService");
+
+        proxy.emitSignal(QStringLiteral("pong"),
+            { QVariant::fromValue(QStringLiteral("hello")) });
+        QVERIFY(true);
+    }
+
+    void testEmitSignalRegistersName()
+    {
+        // Verify that emitSignal tries to claim the service name
+        DBusProxy proxy;
+        proxy.setService("org.dbusqml.TestPortalName");
+        proxy.setPath("/Test");
+        proxy.setIface("org.dbusqml.TestName");
+
+        QDBusConnection bus = QDBusConnection::sessionBus();
+
+        QDBusReply<bool> before = bus.interface()->isServiceRegistered(
+            QStringLiteral("org.dbusqml.TestPortalName"));
+        QVERIFY(before.isValid());
+        QCOMPARE(before.value(), false);
+
+        proxy.emitSignal(QStringLiteral("test"), {});
+        QTest::qWait(500);
+
+        QDBusReply<bool> after = bus.interface()->isServiceRegistered(
+            QStringLiteral("org.dbusqml.TestPortalName"));
+        QVERIFY(after.isValid());
+        QCOMPARE(after.value(), true);
+    }
+
+    void testDBusAdaptor()
+    {
+        DBusAdaptor adaptor;
+        adaptor.setService("org.dbusqml.AdaptorTest");
+        adaptor.setPath("/Test");
+        adaptor.setIface("org.dbusqml.AdaptorTest");
+
+        adaptor.componentComplete();
+        QTest::qWait(500);
+
+        QDBusReply<bool> reg = QDBusConnection::sessionBus().interface()->isServiceRegistered(
+            QStringLiteral("org.dbusqml.AdaptorTest"));
+        QVERIFY(reg.isValid());
+        QCOMPARE(reg.value(), true);
+    }
+
+    void testDBusAdaptorGetProperty()
+    {
+        DBusAdaptor adaptor;
+        adaptor.setService("org.dbusqml.AdaptorGetTest");
+        adaptor.setPath("/Test");
+        adaptor.setIface("org.dbusqml.AdaptorGetTest");
+        adaptor.componentComplete();
+        QTest::qWait(500);
+
+        // Read the 'service' property via Properties.Get
+        DBusMessage msg;
+        msg.setService("org.dbusqml.AdaptorGetTest");
+        msg.setPath("/Test");
+        msg.setIface("org.freedesktop.DBus.Properties");
+        msg.setMember("Get");
+
+        QVariantList args;
+        args << QVariant::fromValue(QStringLiteral("org.dbusqml.AdaptorGetTest"))
+             << QVariant::fromValue(QStringLiteral("service"));
+        msg.setArguments(args);
+
+        SessionBusConnection bus;
+        auto *reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY(!reply->isError());
+        QCOMPARE(reply->value().toString(), QStringLiteral("org.dbusqml.AdaptorGetTest"));
+        delete reply;
     }
 };
 

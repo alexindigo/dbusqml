@@ -2,6 +2,8 @@
 
 #include <QDBusConnection>
 #include <QDBusPendingCallWatcher>
+#include <QDBusServiceWatcher>
+#include <QHash>
 #include <QJSValue>
 #include <QObject>
 #include <QQmlEngine>
@@ -21,6 +23,11 @@ class DBusProxy : public QQmlPropertyMap, public QQmlParserStatus {
     Q_PROPERTY(QString path READ path WRITE setPath NOTIFY pathChanged)
     Q_PROPERTY(QString iface READ iface WRITE setIface NOTIFY ifaceChanged)
     Q_PROPERTY(DBusConnection *connection READ connection WRITE setConnection NOTIFY connectionChanged)
+    Q_PROPERTY(Status status READ status NOTIFY statusChanged)
+    Q_PROPERTY(bool signalsEnabled READ signalsEnabled WRITE setSignalsEnabled NOTIFY signalsEnabledChanged)
+    Q_PROPERTY(bool watchServiceStatus READ watchServiceStatus WRITE setWatchServiceStatus NOTIFY watchServiceStatusChanged)
+    Q_PROPERTY(bool serviceAvailable READ serviceAvailable NOTIFY serviceAvailableChanged)
+    Q_PROPERTY(bool propertiesEnabled READ propertiesEnabled WRITE setPropertiesEnabled NOTIFY propertiesEnabledChanged)
     Q_PROPERTY(Status status READ status NOTIFY statusChanged)
 
 public:
@@ -48,8 +55,25 @@ public:
 
     Status status() const { return m_status; }
 
-    Q_INVOKABLE void call(const QString &method, const QVariantList &args = {});
+    Q_INVOKABLE DBusPendingReply *call(const QString &method, const QVariantList &args = {});
+    Q_INVOKABLE DBusPendingReply *getProperty(const QString &name);
+    Q_INVOKABLE void setProperty(const QString &name, const QVariant &value);
+    Q_INVOKABLE void emitSignal(const QString &name, const QVariantList &args = {});
     Q_INVOKABLE static DBusConnection *connectToBus(const QString &address);
+    Q_INVOKABLE static void emitSignal(const QString &service, const QString &path,
+                                        const QString &iface, const QString &name,
+                                        const QVariantList &args = {});
+
+    bool signalsEnabled() const { return m_signalsEnabled; }
+    void setSignalsEnabled(bool v);
+
+    bool watchServiceStatus() const { return m_watchServiceStatus; }
+    void setWatchServiceStatus(bool v);
+
+    bool serviceAvailable() const { return m_serviceAvailable; }
+
+    bool propertiesEnabled() const { return m_propertiesEnabled; }
+    void setPropertiesEnabled(bool v);
 
 Q_SIGNALS:
     void serviceChanged();
@@ -59,6 +83,10 @@ Q_SIGNALS:
     void signalReceived(const QString &name, const QVariantList &args);
     void statusChanged();
     void introspectionCompleted();
+    void signalsEnabledChanged();
+    void watchServiceStatusChanged();
+    void serviceAvailableChanged();
+    void propertiesEnabledChanged();
 
 protected:
     QVariant updateValue(const QString &key, const QVariant &input) override;
@@ -78,8 +106,15 @@ private:
     DBusConnection *m_conn = nullptr;
     QDBusConnection m_bus;
     bool m_signalsConnected = false;
+    bool m_signalsEnabled = true;
+    bool m_watchServiceStatus = false;
+    bool m_serviceAvailable = false;
+    bool m_propertiesEnabled = true;
     bool m_componentComplete = false;
+    QDBusServiceWatcher *m_serviceWatcher = nullptr;
     Status m_status = Null;
     QDBusPendingCallWatcher *m_introspectWatcher = nullptr;
     QList<QJSValue> m_cachedFunctions;
+    QHash<QString, QString> m_introspectCache;
+    QHash<QString, QStringList> m_methodArgTypes;
 };
