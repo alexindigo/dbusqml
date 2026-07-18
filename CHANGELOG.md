@@ -47,6 +47,11 @@ first tagged release.
 
 ### Fixed
 
+- `unwrapDbus` no longer crashes on concrete-type D-Bus arrays. `ao`
+  (object-path arrays returned by UPower `EnumerateDevices`, logind
+  `ListSessions`, etc.) previously segfaulted inside libdbus. Common
+  array signatures (`a{s*}`, `av`, `ao`, `as`, `ay`) are demarshaled
+  through their proper C++ target types and flattened for JS.
 - Re-introspection no longer leaks stale method callables. Switching a
   proxy's `iface` at runtime removes the previous iface's method keys
   from the property map, clears cached `QJSValue`s, and drops the old
