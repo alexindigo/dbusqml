@@ -6,6 +6,7 @@
 class DBusMessage {
     Q_GADGET
     QML_VALUE_TYPE(dbusMessage)
+    QML_CONSTRUCTIBLE_VALUE
     QML_STRUCTURED_VALUE
 
     Q_PROPERTY(QString service READ service WRITE setService)
