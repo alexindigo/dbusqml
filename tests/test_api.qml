@@ -312,39 +312,28 @@ TestCase {
     }
 
     function test_dynamic_method_call() {
-        console.warn("SPIKE dmc 1: entering")
         var proxy = Qt.createQmlObject(
             'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/org/freedesktop/DBus"; iface: "org.freedesktop.DBus" }',
             this
         )
-        console.warn("SPIKE dmc 2: createQmlObject returned, proxy =", proxy)
         // Wait for introspection
         for (var i = 0; i < 10; ++i) {
             if (typeof proxy.listNames === "function") break
             wait(500)
         }
-        console.warn("SPIKE dmc 3: post-wait iters=" + i + " typeof=" + (typeof proxy.listNames))
         verify(typeof proxy.listNames === "function",
                "ListNames should exist after introspection")
-        console.warn("SPIKE dmc 4: verified callable")
 
         // Dynamic method should return a DBusPendingReply
         var reply = proxy.listNames()
-        console.warn("SPIKE dmc 5: called listNames, reply =", reply)
         verify(reply !== undefined, "dynamic method should return a value")
         verify(typeof reply.finished !== "undefined",
                "returned value should have a finished signal")
-        console.warn("SPIKE dmc 6: about to tryVerify isFinished")
         tryVerify(() => reply.isFinished, 5000,
                   "ListNames should finish within timeout")
-        console.warn("SPIKE dmc 7: post-tryVerify")
         verify(!reply.isError, "ListNames should not error")
         verify(reply.isValid, "reply should be valid")
-        // SPIKE: destroy() removed to see if crash moves. If it does, the
-        // SIGSEGV is triggered by destroy() itself. If it stays, something
-        // else in the finalize path (queued callbacks, GC) is the cause.
-        console.warn("SPIKE dmc 8: skipping destroy() this round")
-        console.warn("SPIKE dmc 9: end of test")
+        proxy.destroy()
     }
 
     function test_dynamic_method_with_args() {
