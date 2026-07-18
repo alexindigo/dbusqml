@@ -48,7 +48,8 @@ QVariant unwrapDbus(const QVariant &v)
         const QDBusArgument arg = v.value<QDBusArgument>();
         const QString sig = arg.currentSignature();
 
-        if (sig.startsWith("a{s")) {  // a{sv}, a{ss}, a{sa{sv}}, ...
+        // Dicts with string keys — a{s*}
+        if (sig.startsWith("a{s")) {
             QVariantMap map;
             arg >> map;
             QVariantMap out;
@@ -56,7 +57,8 @@ QVariant unwrapDbus(const QVariant &v)
                 out.insert(it.key(), unwrapDbus(it.value()));
             return out;
         }
-        if (sig.startsWith("a")) {  // as, ao, ai, au, ax, at, av, ay, ...
+        // Array of variants — safe to iterate with QVariant target.
+        if (sig == "av") {
             QVariantList list;
             arg.beginArray();
             while (!arg.atEnd()) {
@@ -67,15 +69,33 @@ QVariant unwrapDbus(const QVariant &v)
             arg.endArray();
             return list;
         }
-        // Fallback for other types: try QVariantMap
-        QVariantMap m;
-        arg >> m;
-        if (!m.isEmpty()) {
-            QVariantMap out;
-            for (auto it = m.begin(); it != m.end(); ++it)
-                out.insert(it.key(), unwrapDbus(it.value()));
+        // Concrete-type arrays: demarshal via the C++ type, then flatten
+        // to QVariantList. Iterating a concrete-typed QDBusArgument with
+        // an untyped QVariant target crashes inside libdbus.
+        if (sig == "ao") {
+            QList<QDBusObjectPath> paths;
+            arg >> paths;
+            QVariantList out;
+            out.reserve(paths.size());
+            for (const auto &p : paths) out.append(p.path());
             return out;
         }
+        if (sig == "as") {
+            QStringList list;
+            arg >> list;
+            QVariantList out;
+            out.reserve(list.size());
+            for (const auto &s : list) out.append(s);
+            return out;
+        }
+        if (sig == "ay") {
+            QByteArray bytes;
+            arg >> bytes;
+            return bytes;
+        }
+        // Anything else — struct-array, typed-numeric-array, etc. — is
+        // left as the raw QDBusArgument. Callers that need those can
+        // demarshal explicitly with qdbus_cast<T>.
         return v;
     }
     return v;

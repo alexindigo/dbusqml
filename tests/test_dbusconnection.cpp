@@ -44,6 +44,9 @@ public slots:
     QDBusSignature echoSignature(const QDBusSignature &v) { return v; }
     QVariantMap echoDict(const QVariantMap &v) { return v; }
     QDBusVariant echoVariant(const QDBusVariant &v) { return v; }
+    QList<QDBusObjectPath> objectPathList() {
+        return { QDBusObjectPath("/a"), QDBusObjectPath("/b"), QDBusObjectPath("/c/d") };
+    }
 
     int methodWithArgs(int a, const QString &b) { return a + b.size(); }
     void noReturnMethod() {}
@@ -1018,6 +1021,38 @@ private slots:
         QVERIFY(spy.wait(3000));
         QVERIFY(!reply->isError());
         QCOMPARE(reply->value().toString(), QStringLiteral("org.dbusqml.AdaptorGetTest"));
+        delete reply;
+    }
+
+    // unwrapDbus previously crashed on 'ao' (array of object paths):
+    // Qt hands the reply back as a QDBusArgument, the generic 'a*' branch
+    // iterated with 'arg >> QVariant' — undefined for concrete-type arrays,
+    // segfault inside libdbus. Regression guard for the fix.
+    void testUnwrapAoDoesNotCrash()
+    {
+        DBusMessage msg;
+        msg.setService("org.dbusqml.TestService");
+        msg.setPath("/TestService");
+        msg.setIface("org.dbusqml.TestService");
+        msg.setMember("objectPathList");
+
+        SessionBusConnection bus;
+        auto *reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY(!reply->isError());
+
+        QVariant v = reply->value();
+        QVERIFY(v.isValid());
+        // Should have been unwrapped into a QVariantList of path strings.
+        QCOMPARE(v.userType(), qMetaTypeId<QVariantList>());
+        QVariantList list = v.toList();
+        QCOMPARE(list.size(), 3);
+        QCOMPARE(list.at(0).toString(), QStringLiteral("/a"));
+        QCOMPARE(list.at(1).toString(), QStringLiteral("/b"));
+        QCOMPARE(list.at(2).toString(), QStringLiteral("/c/d"));
+
         delete reply;
     }
 
