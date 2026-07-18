@@ -3,7 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../assets"
 import DBus 1.0
-import DBus 1.0 as DBusQML
 
 Window {
     visible: true

@@ -89,10 +89,7 @@ Window {
         onIntrospectionCompleted: {
             var reply = bus.listNames()
             reply.finished.connect(function() {
-                if (reply.isError) {
-                    console.error("Error:", reply.error.message)
-                    return
-                }
+                if (reply.isError) return
                 root.allNames = reply.value
                 root.applyFilter()
             })

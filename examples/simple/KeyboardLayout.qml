@@ -3,7 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../assets"
 import DBus 1.0
-import DBus 1.0 as DBusQML
 
 Window {
     id: root
@@ -180,9 +179,6 @@ Window {
         })
     }
 
-    Component.onCompleted: {
-        // locale properties auto-bind via QML; sessionBus triggers fetchInputMethod
-    }
     CloseButton {}
     TextEdit { id: clipBoard; x: -9999; y: -9999 }
     

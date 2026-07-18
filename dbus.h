@@ -28,7 +28,6 @@ class DBusProxy : public QQmlPropertyMap, public QQmlParserStatus {
     Q_PROPERTY(bool watchServiceStatus READ watchServiceStatus WRITE setWatchServiceStatus NOTIFY watchServiceStatusChanged)
     Q_PROPERTY(bool serviceAvailable READ serviceAvailable NOTIFY serviceAvailableChanged)
     Q_PROPERTY(bool propertiesEnabled READ propertiesEnabled WRITE setPropertiesEnabled NOTIFY propertiesEnabledChanged)
-    Q_PROPERTY(Status status READ status NOTIFY statusChanged)
 
 public:
     enum Status { Null, Loading, Ready, Error };

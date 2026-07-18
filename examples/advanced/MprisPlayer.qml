@@ -165,7 +165,7 @@ Window {
         iface: ""
 
         onStatusChanged: {
-            if (status === 3)
+            if (status === 3)   // Error
                 statusLine.text = "Failed to connect to " + (activePlayer || "player")
         }
     }

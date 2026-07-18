@@ -145,7 +145,7 @@ Window {
         iface: "org.freedesktop.portal.NetworkMonitor"
 
         onStatusChanged: {
-            if (status === 3) {
+            if (status === 3) {   // Error
                 statusLabel.lastError = "Network portal not available"
                 statusLabel.text = statusLabel.lastError
                 statusLabel.visible = true
