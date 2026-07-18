@@ -340,9 +340,11 @@ TestCase {
         console.warn("SPIKE dmc 7: post-tryVerify")
         verify(!reply.isError, "ListNames should not error")
         verify(reply.isValid, "reply should be valid")
-        console.warn("SPIKE dmc 8: about to destroy proxy")
-        proxy.destroy()
-        console.warn("SPIKE dmc 9: destroyed")
+        // SPIKE: destroy() removed to see if crash moves. If it does, the
+        // SIGSEGV is triggered by destroy() itself. If it stays, something
+        // else in the finalize path (queued callbacks, GC) is the cause.
+        console.warn("SPIKE dmc 8: skipping destroy() this round")
+        console.warn("SPIKE dmc 9: end of test")
     }
 
     function test_dynamic_method_with_args() {
