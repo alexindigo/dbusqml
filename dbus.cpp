@@ -547,16 +547,16 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
     while (!reader.atEnd()) {
         reader.readNext();
         if (reader.isStartElement()) {
-            if (reader.name() == "interface" &&
+            if (reader.name() == u"interface" &&
                 reader.attributes().value("name") == m_iface) {
                 QString currentMethod;
                 QStringList currentArgs;
-                while (!(reader.isEndElement() && reader.name() == "interface")) {
+                while (!(reader.isEndElement() && reader.name() == u"interface")) {
                     reader.readNext();
                     if (reader.isStartElement()) {
-                        if (reader.name() == "signal") {
+                        if (reader.name() == u"signal") {
                             signalNames << reader.attributes().value("name").toString();
-                        } else if (reader.name() == "method") {
+                        } else if (reader.name() == u"method") {
                 if (!currentMethod.isEmpty()) {
                     m_methodArgTypes.insert(currentMethod, currentArgs);
                     m_methodArgTypes.insert(dbusPropToQml(currentMethod), currentArgs);
@@ -564,7 +564,7 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
                 currentMethod = reader.attributes().value("name").toString();
                 currentArgs.clear();
                 methodNames << currentMethod;
-                        } else if (reader.name() == "arg" && !currentMethod.isEmpty()) {
+                        } else if (reader.name() == u"arg" && !currentMethod.isEmpty()) {
                             currentArgs << reader.attributes().value("type").toString();
                         }
                     }

@@ -46,6 +46,8 @@ jobs:
           QML_IMPORT_PATH: ${{ github.workspace }}/build
           QT_QPA_PLATFORM: offscreen
         run: |
-          QMLTESTRUNNER=$(find "$Qt6_DIR" -name qmltestrunner -type f | head -n1)
-          test -n "$QMLTESTRUNNER" || { echo "qmltestrunner not found under $Qt6_DIR"; exit 1; }
+          # install-qt-action exports QT_ROOT_DIR pointing at the Qt install
+          # root; qmltestrunner lives under $QT_ROOT_DIR/bin or /libexec.
+          QMLTESTRUNNER=$(find "$QT_ROOT_DIR" -name qmltestrunner -type f | head -n1)
+          test -n "$QMLTESTRUNNER" || { echo "qmltestrunner not found under $QT_ROOT_DIR"; exit 1; }
           dbus-run-session -- "$QMLTESTRUNNER" -input tests/test_api.qml
