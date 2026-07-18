@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        qt: ["6.5.3", "6.6.3", "6.7.3", "6.8.2", "6.9.3", "6.10.0"]
+        qt: ["6.8.2"]   # spike: single version — matrix will be restored after diagnosis
 
     steps:
       - uses: actions/checkout@v4

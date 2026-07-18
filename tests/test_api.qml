@@ -7,6 +7,58 @@ TestCase {
 
     property DBusQML.DBusPendingReply pendingReply
 
+    // ── SPIKE tests: isolate the Qt.createQmlObject + destroy() crash ──
+    // Named test_aaa/aab/aac so they run first alphabetically. Each marker
+    // is a console.warn — the last one printed before SEGV tells us which
+    // step caused it.
+
+    function test_aaa_spike_immediate_destroy() {
+        console.warn("SPIKE aaa: before create (no s/p/i, no introspection)")
+        var p = Qt.createQmlObject('import DBus 1.0; DBus {}', this)
+        console.warn("SPIKE aaa: created, calling destroy immediately")
+        p.destroy()
+        console.warn("SPIKE aaa: destroy() returned")
+        verify(true)
+    }
+
+    function test_aab_spike_destroy_after_introspection_no_call() {
+        console.warn("SPIKE aab: before create (full s/p/i, will introspect)")
+        var p = Qt.createQmlObject(
+            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/org/freedesktop/DBus"; iface: "org.freedesktop.DBus" }',
+            this
+        )
+        console.warn("SPIKE aab: created, waiting for introspection")
+        for (var i = 0; i < 10; ++i) {
+            if (typeof p.listNames === "function") break
+            wait(500)
+        }
+        console.warn("SPIKE aab: introspection done, typeof listNames=" + (typeof p.listNames))
+        // NO method call in this test — just destroy
+        p.destroy()
+        console.warn("SPIKE aab: destroy() returned")
+        verify(true)
+    }
+
+    function test_aac_spike_destroy_after_call() {
+        console.warn("SPIKE aac: before create (will call method then destroy)")
+        var p = Qt.createQmlObject(
+            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/org/freedesktop/DBus"; iface: "org.freedesktop.DBus" }',
+            this
+        )
+        for (var i = 0; i < 10; ++i) {
+            if (typeof p.listNames === "function") break
+            wait(500)
+        }
+        console.warn("SPIKE aac: about to call listNames")
+        var r = p.listNames()
+        console.warn("SPIKE aac: called, waiting for reply")
+        tryVerify(() => r.isFinished, 5000)
+        console.warn("SPIKE aac: reply finished, calling destroy")
+        p.destroy()
+        console.warn("SPIKE aac: destroy() returned")
+        verify(true)
+    }
+
     // ── Enum ───────────────────────────────────────────────
 
     function test_bus_type_enum() {
