@@ -85,12 +85,17 @@ class Variant {
     Q_GADGET
     QML_VALUE_TYPE(variant)
     QML_CONSTRUCTIBLE_VALUE
-    Q_PROPERTY(QDBusVariant value MEMBER value)
+    // Expose the payload as a plain QVariant. Using QDBusVariant here with
+    // MEMBER makes moc emit an inequality comparison the type doesn't
+    // support on Qt < 6.7, breaking the build on the declared 6.5 minimum.
+    Q_PROPERTY(QVariant value READ propValue WRITE setPropValue)
 public:
     explicit Variant() {}
     Q_INVOKABLE explicit Variant(const QJSValue &v) : value(v.toVariant()) {}
     Q_INVOKABLE QString toString() const { return value.variant().toString(); }
     operator QVariant() const { return value.variant(); }
+    QVariant propValue() const { return value.variant(); }
+    void setPropValue(const QVariant &v) { value = QDBusVariant(v); }
     QDBusVariant value;
 };
 
