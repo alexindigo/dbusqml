@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import DBus 1.0
 import DBus 1.0 as DBusQML
 
 TestCase {
@@ -7,103 +8,23 @@ TestCase {
 
     property DBusQML.DBusPendingReply pendingReply
 
-    // ── SPIKE tests: isolate the Qt.createQmlObject + destroy() crash ──
-    // Named test_a<n> so they run first alphabetically. Each marker is
-    // a console.warn — the last one before SEGV pinpoints the step.
-    // Order matters: any crash terminates the process, so later cases
-    // don't run. Put likely-passing tests first, likely-crashing last.
-
-    // Baseline: create without destroy.
-    function test_a0_baseline_no_destroy() {
-        console.warn("SPIKE a0: before create")
-        Qt.createQmlObject('import DBus 1.0; DBus {}', this)
-        console.warn("SPIKE a0: created, no destroy called")
-        verify(true)
+    // Shared proxies declared inline (declarative form). Two paths cover
+    // both shapes of test in this file. Declarative destruction (managed
+    // by the QML component tree at end of the run) sidesteps the Qt bug
+    // in `Qt.createQmlObject(...).destroy()` on QQmlPropertyMap-derived
+    // types that affects Qt 6.5–6.10. See KNOWN_ISSUES.md.
+    DBus {
+        id: rootProxy
+        service: "org.freedesktop.DBus"
+        path: "/"
+        iface: "org.freedesktop.DBus"
     }
 
-    // Control: plain QtObject (not our QQmlPropertyMap subclass) +
-    // immediate destroy. If this crashes too, the bug is generic
-    // Qt.createQmlObject+destroy, not QQmlPropertyMap-specific.
-    function test_a1_control_plain_qtobject_destroy() {
-        console.warn("SPIKE a1: before create (plain QtObject)")
-        var p = Qt.createQmlObject('import QtQml; QtObject {}', this)
-        console.warn("SPIKE a1: created, calling destroy immediately")
-        p.destroy()
-        console.warn("SPIKE a1: destroy() returned")
-        verify(true)
-    }
-
-    // Long wait: create DBus{} + wait(200) + destroy. If this passes
-    // and a3 crashes, the bug is a deferred-init race.
-    function test_a2_dbus_wait_long_destroy() {
-        console.warn("SPIKE a2: before create")
-        var p = Qt.createQmlObject('import DBus 1.0; DBus {}', this)
-        console.warn("SPIKE a2: created, wait(200) then destroy")
-        wait(200)
-        console.warn("SPIKE a2: past wait(200), calling destroy")
-        p.destroy()
-        console.warn("SPIKE a2: destroy() returned")
-        verify(true)
-    }
-
-    // Short wait: already known to crash in the prior round; kept for
-    // completeness of the log.
-    function test_a3_dbus_wait_short_destroy() {
-        console.warn("SPIKE a3: before create")
-        var p = Qt.createQmlObject('import DBus 1.0; DBus {}', this)
-        console.warn("SPIKE a3: created, wait(1) then destroy")
-        wait(1)
-        console.warn("SPIKE a3: past wait(1), calling destroy")
-        p.destroy()
-        console.warn("SPIKE a3: destroy() returned")
-        verify(true)
-    }
-
-    function test_aaa_spike_immediate_destroy() {
-        console.warn("SPIKE aaa: before create (no s/p/i, no introspection)")
-        var p = Qt.createQmlObject('import DBus 1.0; DBus {}', this)
-        console.warn("SPIKE aaa: created, calling destroy immediately")
-        p.destroy()
-        console.warn("SPIKE aaa: destroy() returned")
-        verify(true)
-    }
-
-    function test_aab_spike_destroy_after_introspection_no_call() {
-        console.warn("SPIKE aab: before create (full s/p/i, will introspect)")
-        var p = Qt.createQmlObject(
-            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/org/freedesktop/DBus"; iface: "org.freedesktop.DBus" }',
-            this
-        )
-        console.warn("SPIKE aab: created, waiting for introspection")
-        for (var i = 0; i < 10; ++i) {
-            if (typeof p.listNames === "function") break
-            wait(500)
-        }
-        console.warn("SPIKE aab: introspection done, typeof listNames=" + (typeof p.listNames))
-        // NO method call in this test — just destroy
-        p.destroy()
-        console.warn("SPIKE aab: destroy() returned")
-        verify(true)
-    }
-
-    function test_aac_spike_destroy_after_call() {
-        console.warn("SPIKE aac: before create (will call method then destroy)")
-        var p = Qt.createQmlObject(
-            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/org/freedesktop/DBus"; iface: "org.freedesktop.DBus" }',
-            this
-        )
-        for (var i = 0; i < 10; ++i) {
-            if (typeof p.listNames === "function") break
-            wait(500)
-        }
-        console.warn("SPIKE aac: about to call listNames")
-        var r = p.listNames()
-        console.warn("SPIKE aac: called, waiting for reply")
-        tryVerify(() => r.isFinished, 5000)
-        console.warn("SPIKE aac: reply finished, calling destroy")
-        p.destroy()
-        console.warn("SPIKE aac: destroy() returned")
-        verify(true)
+    DBus {
+        id: dbusProxy
+        service: "org.freedesktop.DBus"
+        path: "/org/freedesktop/DBus"
+        iface: "org.freedesktop.DBus"
     }
 
     // ── Enum ───────────────────────────────────────────────
@@ -234,23 +155,13 @@ TestCase {
     // ── DBus element (proxy) ───────────────────────────────
 
     function test_proxy_properties() {
-        var proxy = Qt.createQmlObject(
-            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/"; iface: "org.freedesktop.DBus" }',
-            this
-        )
-        compare(proxy.service, "org.freedesktop.DBus", "DBus service property")
-        compare(proxy.path, "/", "DBus path property")
-        compare(proxy.iface, "org.freedesktop.DBus", "DBus iface property")
-        proxy.destroy()
+        compare(rootProxy.service, "org.freedesktop.DBus", "DBus service property")
+        compare(rootProxy.path, "/", "DBus path property")
+        compare(rootProxy.iface, "org.freedesktop.DBus", "DBus iface property")
     }
 
     function test_proxy_call_exists() {
-        var proxy = Qt.createQmlObject(
-            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/"; iface: "org.freedesktop.DBus" }',
-            this
-        )
-        compare(typeof proxy.call, "function", "call should be a function")
-        proxy.destroy()
+        compare(typeof rootProxy.call, "function", "call should be a function")
     }
 
     // ── asyncCall (needs session bus) ──────────────────────
@@ -369,62 +280,41 @@ TestCase {
     // ── Proxy call ─────────────────────────────────────────
 
     function test_proxy_call_ping() {
-        var proxy = Qt.createQmlObject(
-            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/"; iface: "org.freedesktop.DBus" }',
-            this
-        )
-        proxy.call("ListNames")
+        rootProxy.call("ListNames")
         verify(true, "proxy.call(ListNames) completed without crash")
-        proxy.destroy()
     }
 
     function test_property_write() {
-        var proxy = Qt.createQmlObject(
-            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/org/freedesktop/DBus"; iface: "org.freedesktop.DBus" }',
-            this
-        )
-        // Writing to any property should call updateValue without crash
-        proxy.someProp = "test"
+        // Writing to any property should call updateValue without crash.
+        dbusProxy.someProp = "test"
         verify(true, "property write completed without crash")
-        proxy.destroy()
     }
 
     // ── Dynamic methods (introspection-based) ──────────────
 
     function test_dynamic_methods_exist() {
-        var proxy = Qt.createQmlObject(
-            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/org/freedesktop/DBus"; iface: "org.freedesktop.DBus" }',
-            this
-        )
-        // Wait for introspection to discover methods
+        // Wait for introspection to discover methods on the shared proxy.
         var found = false
         for (var i = 0; i < 10; ++i) {
-            if (typeof proxy.listNames === "function"
-                && typeof proxy.nameHasOwner === "function") {
+            if (typeof dbusProxy.listNames === "function"
+                && typeof dbusProxy.nameHasOwner === "function") {
                 found = true
                 break
             }
             wait(500)
         }
         verify(found, "dynamic methods should exist after introspection")
-        proxy.destroy()
     }
 
     function test_dynamic_method_call() {
-        var proxy = Qt.createQmlObject(
-            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/org/freedesktop/DBus"; iface: "org.freedesktop.DBus" }',
-            this
-        )
-        // Wait for introspection
         for (var i = 0; i < 10; ++i) {
-            if (typeof proxy.listNames === "function") break
+            if (typeof dbusProxy.listNames === "function") break
             wait(500)
         }
-        verify(typeof proxy.listNames === "function",
+        verify(typeof dbusProxy.listNames === "function",
                "ListNames should exist after introspection")
 
-        // Dynamic method should return a DBusPendingReply
-        var reply = proxy.listNames()
+        var reply = dbusProxy.listNames()
         verify(reply !== undefined, "dynamic method should return a value")
         verify(typeof reply.finished !== "undefined",
                "returned value should have a finished signal")
@@ -432,29 +322,21 @@ TestCase {
                   "ListNames should finish within timeout")
         verify(!reply.isError, "ListNames should not error")
         verify(reply.isValid, "reply should be valid")
-        proxy.destroy()
     }
 
     function test_dynamic_method_with_args() {
-        var proxy = Qt.createQmlObject(
-            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/org/freedesktop/DBus"; iface: "org.freedesktop.DBus" }',
-            this
-        )
-        // Wait for introspection
         for (var i = 0; i < 10; ++i) {
-            if (typeof proxy.nameHasOwner === "function") break
+            if (typeof dbusProxy.nameHasOwner === "function") break
             wait(500)
         }
-        verify(typeof proxy.nameHasOwner === "function",
+        verify(typeof dbusProxy.nameHasOwner === "function",
                "NameHasOwner should exist after introspection")
 
-        // Dynamic method with typed argument should return a DBusPendingReply
-        var reply = proxy.nameHasOwner(new DBusQML.string("org.freedesktop.DBus"))
+        var reply = dbusProxy.nameHasOwner(new DBusQML.string("org.freedesktop.DBus"))
         verify(reply !== undefined, "dynamic method should return a value")
         tryVerify(() => reply.isFinished, 5000)
         verify(!reply.isError, "NameHasOwner should not error")
         compare(reply.value, true, "DBus should have an owner")
-        proxy.destroy()
     }
 
     // ── Promise-style asyncCall ────────────────────────────

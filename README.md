@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/alexindigo/dbusqml/actions/workflows/ci.yml/badge.svg)](https://github.com/alexindigo/dbusqml/actions/workflows/ci.yml)
 
-**D-Bus in QML. No KDE.** Standalone Qt 6 QML plugin — `Qt6::DBus` is the only dependency.
+**D-Bus in QML. No KDE.** Standalone Qt 6 QML plugin — `Qt6::DBus` is the only dependency. Requires **Qt 6.8** or newer.
 
 The `DBus {}` element introspects a remote object and exposes its methods and
 properties as native QML — call methods directly, bind to properties, get
@@ -91,6 +91,7 @@ scripts/run-examples MprisPlayer   # or a category: `advanced`
 - [`API.md`](API.md) — full API reference
 - [`DESIGN.md`](DESIGN.md) — architecture and rationale
 - [`docs/TYPES.md`](docs/TYPES.md) — user-land type catalog
+- [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) — upstream Qt bugs and workarounds
 - [`FutureDevelopment.md`](FutureDevelopment.md) — roadmap
 
 ## License

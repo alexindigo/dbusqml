@@ -6,7 +6,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.0] — 2026-07-18
 
-Initial release.
+Initial release. Requires Qt 6.8 or newer. See
+[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) for two upstream Qt bugs users
+on older Qt should be aware of.
 
 ### Added
 
