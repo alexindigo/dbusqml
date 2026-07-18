@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
-project(dbusqml LANGUAGES CXX)
+project(dbusqml
+    VERSION 0.1.0
+    DESCRIPTION "Standalone D-Bus binding for QML"
+    LANGUAGES CXX
+)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,7 +64,11 @@ qt_add_resources(dbusqml "catalog"
 
 # ==================== INSTALLATION ====================
 install(TARGETS dbusqml
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    EXPORT dbusqmlTargets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
 install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/DBus/
@@ -80,6 +88,39 @@ install(FILES
 install(DIRECTORY types/
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/dbusqml/types/
         FILES_MATCHING PATTERN "*.xml")
+
+# ==================== CMAKE PACKAGE CONFIG ====================
+# Lets downstream projects do:
+#   find_package(dbusqml 0.1 REQUIRED)
+#   target_link_libraries(app PRIVATE dbusqml::dbusqml)
+
+include(CMakePackageConfigHelpers)
+
+set(DBUSQML_CMAKE_INSTALL_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/dbusqml)
+
+install(EXPORT dbusqmlTargets
+    FILE dbusqmlTargets.cmake
+    NAMESPACE dbusqml::
+    DESTINATION ${DBUSQML_CMAKE_INSTALL_DIR}
+)
+
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/dbusqmlConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/dbusqmlConfig.cmake
+    INSTALL_DESTINATION ${DBUSQML_CMAKE_INSTALL_DIR}
+)
+
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/dbusqmlConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMinorVersion
+)
+
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/dbusqmlConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/dbusqmlConfigVersion.cmake
+    DESTINATION ${DBUSQML_CMAKE_INSTALL_DIR}
+)
 
 # ==================== TESTS ====================
 option(BUILD_TEST_MODE "Build the C++ test executables" ON)
