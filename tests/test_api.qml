@@ -8,9 +8,52 @@ TestCase {
     property DBusQML.DBusPendingReply pendingReply
 
     // ── SPIKE tests: isolate the Qt.createQmlObject + destroy() crash ──
-    // Named test_aaa/aab/aac so they run first alphabetically. Each marker
-    // is a console.warn — the last one printed before SEGV tells us which
-    // step caused it.
+    // Named test_a<n> so they run first alphabetically. Each marker is
+    // a console.warn — the last one before SEGV pinpoints the step.
+
+    // Baseline — create without destroy should always be fine.
+    function test_a0_create_no_destroy() {
+        console.warn("SPIKE a0: before create")
+        Qt.createQmlObject('import DBus 1.0; DBus {}', this)
+        console.warn("SPIKE a0: created, no destroy called")
+        verify(true)
+    }
+
+    // Small event-loop yield between create and destroy.
+    function test_a1_wait_short_then_destroy() {
+        console.warn("SPIKE a1: before create")
+        var p = Qt.createQmlObject('import DBus 1.0; DBus {}', this)
+        console.warn("SPIKE a1: created, wait(1) then destroy")
+        wait(1)
+        console.warn("SPIKE a1: past wait(1), calling destroy")
+        p.destroy()
+        console.warn("SPIKE a1: destroy() returned")
+        verify(true)
+    }
+
+    // Longer wait — plenty of time for any deferred init.
+    function test_a2_wait_long_then_destroy() {
+        console.warn("SPIKE a2: before create")
+        var p = Qt.createQmlObject('import DBus 1.0; DBus {}', this)
+        console.warn("SPIKE a2: created, wait(200) then destroy")
+        wait(200)
+        console.warn("SPIKE a2: past wait(200), calling destroy")
+        p.destroy()
+        console.warn("SPIKE a2: destroy() returned")
+        verify(true)
+    }
+
+    // Control: same shape but plain QtObject (not our QQmlPropertyMap
+    // subclass). If this crashes too, it's a generic Qt.createQmlObject +
+    // destroy bug, not something about QQmlPropertyMap-derived types.
+    function test_a3_plain_qtobject_destroy() {
+        console.warn("SPIKE a3: before create (plain QtObject)")
+        var p = Qt.createQmlObject('import QtQml; QtObject {}', this)
+        console.warn("SPIKE a3: created, calling destroy immediately")
+        p.destroy()
+        console.warn("SPIKE a3: destroy() returned")
+        verify(true)
+    }
 
     function test_aaa_spike_immediate_destroy() {
         console.warn("SPIKE aaa: before create (no s/p/i, no introspection)")
