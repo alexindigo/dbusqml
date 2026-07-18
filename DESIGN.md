@@ -69,12 +69,13 @@ Properties auto-update via `PropertiesChanged` signal subscription.
 
 **Methods** — dynamically exposed as callable properties after introspection:
 ```qml
-proxy.Play()                     // → asyncCall(member: "Play")
-proxy.SetProfile("balanced")     // → asyncCall(member: "SetProfile", args: ["balanced"])
-proxy.EchoString("hello")        // → asyncCall(member: "EchoString", args: ["hello"])
+proxy.play()                     // → asyncCall(member: "Play")
+proxy.setProfile("balanced")     // → asyncCall(member: "SetProfile", args: ["balanced"])
+proxy.echoString("hello")        // → asyncCall(member: "EchoString", args: ["hello"])
 ```
 
-Methods retain their D-Bus casing (PascalCase). When D-Bus exposes `Play`, `EchoString`, etc., they become `proxy.Play()`, `proxy.EchoString()`.
+D-Bus method names are PascalCase; QML exposes them in camelCase. The
+original PascalCase name is what gets sent on the wire.
 
 Also available via generic `call(method, args)`:
 ```qml

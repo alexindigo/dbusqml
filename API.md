@@ -45,7 +45,7 @@ Item {
 
 The `DBus` element represents a D-Bus object. When `iface` is set, it introspects the remote object and discovers:
 
-**Dynamic methods** — D-Bus methods become callable directly on the element, using their original PascalCase names:
+**Dynamic methods** — D-Bus methods become callable directly on the element. D-Bus method names are PascalCase; the QML surface exposes them in camelCase:
 ```qml
 DBus {
     id: mpris
@@ -53,9 +53,9 @@ DBus {
     path: "/org/mpris/MediaPlayer2"
     iface: "org.mpris.MediaPlayer2.Player"
 }
-mpris.PlayPause()          // → calls "PlayPause" on the D-Bus object
-mpris.Seek(50000000)       // → calls "Seek" with argument
-mpris.SetVolume(0.8)       // → calls "SetVolume" with argument
+mpris.playPause()          // → calls "PlayPause" on the D-Bus object
+mpris.seek(50000000)       // → calls "Seek" with argument
+mpris.setVolume(0.8)       // → calls "SetVolume" with argument
 ```
 
 **Dynamic properties** — D-Bus properties are exposed as QML properties with the same name:
