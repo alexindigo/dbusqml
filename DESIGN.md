@@ -193,17 +193,58 @@ Multiple interfaces on the same path use multiple `DBusAdaptor` instances with t
 ```
 QML
   │
-  ├── DBus (rich proxy)
+  ├── DBus (rich proxy — subclass of QQmlPropertyMap)
   │     ├── Introspect on iface set → discover methods, signals, properties
-  │     ├── Properties → QQmlPropertyMap + PropertiesChanged subscription
-  │     ├── Methods   → dynamic QMetaMethod via qt_metacall override
-  │     └── Signals   → dynamic QMetaSignal + QDBusConnection::connect
+  │     ├── Method dispatch
+  │     │     ├── Introspection XML gives {name → [arg-signatures]}.
+  │     │     ├── Empty XML? The user-land catalog (types/*.xml + XDG
+  │     │     │   drop-ins) fills in the gap.
+  │     │     ├── For each method, an engine-side JS closure is created
+  │     │     │   and stored in the property map under a camelCased name.
+  │     │     │   The closure forwards to a per-proxy DbusMethodHelper
+  │     │     │   (Q_INVOKABLE callMethod), which coerces each argument
+  │     │     │   through toTypedDbusVariant and issues asyncCall.
+  │     │     └── On re-introspection, prior method keys are cleared from
+  │     │         the property map before the new set is installed, so an
+  │     │         iface switch doesn't leave stale callables behind.
+  │     ├── Properties → fetched via Properties.GetAll and inserted into
+  │     │                 the property map; PropertiesChanged updates in
+  │     │                 place. Nested a{sv}/a{ss} unwrapped to
+  │     │                 QVariantMap/QVariantList so JS can traverse them.
+  │     └── Signals   → QDBusConnection::connect on each discovered signal
+  │                       name → emitted through signalReceived(name, args).
+  │
+  ├── DBusAdaptor (server-side, subclass of QDBusVirtualObject)
+  │     ├── Builds introspection XML from Q_PROPERTY / method / signal
+  │     │   metadata of the enclosing QML component.
+  │     ├── handleMessage dispatches to matching QML method via
+  │     │   QJSValue::callWithInstance (arguments passed as native JS
+  │     │   values through engine->toScriptValue).
+  │     └── Properties.Get / Get / GetAll served from QMetaProperty.
   │
   ├── DBusConnection (raw wrapper)
   │     └── asyncCall(message) → QDBusPendingCallWatcher
+  │           Promise overload: resolve receives the native reply value
+  │           (containers unwrapped); reject receives { name, message }.
   │
-  └── TypedValues → Q_GADGET value types with QML_CONSTRUCTIBLE_VALUE
+  └── TypedValues → Q_GADGET value types with QML_CONSTRUCTIBLE_VALUE.
 ```
+
+### Why JS closures instead of runtime QMetaMethod?
+
+Attempting to synthesize new `Q_INVOKABLE` slots at runtime via
+`QMetaObjectBuilder` was tried and rejected: the property-map integration
+becomes fragile, and Qt's dynamic-meta machinery is private and unstable
+across point releases. JS closures stored in `QQmlPropertyMap` are
+callable from QML with no meta-object surgery and survive engine
+lifecycle events cleanly.
+
+### Why user-land catalog instead of introspection-only?
+
+Some services (Chromium-based MPRIS players, minimal system daemons)
+return an empty `<node></node>` from `Introspect()` but still implement
+their documented interface. The catalog lets dbusqml call those services
+by name without forcing the user to fall back to `proxy.call(...)`.
 
 ## Non-Goals (v1)
 
@@ -236,5 +277,6 @@ GPLv3
 3. `DBusPendingReply` (wraps `QDBusPendingCallWatcher`)
 4. Typed wrappers (`uint32`, `string`, `variant`, etc.)
 5. `DBusError`
-6. `DBus` — introspection + dynamic methods/signals/properties via `qt_metacall`
+6. `DBus` — introspection + dynamic methods (JS closures in
+   QQmlPropertyMap) + properties + signal forwarding
 7. Plugin registration + CMake build
