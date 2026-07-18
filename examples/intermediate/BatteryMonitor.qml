@@ -90,14 +90,14 @@ Window {
             model: ListModel { id: devicesModel }
 
             delegate: GroupBox {
-                width: parent.width
+                width: deviceList.width
                 title: {
                     var types = ["AC Adapter", "Battery", "UPS", "Monitor", "Mouse", "Keyboard", "PDA", "Phone"]
                     return (types[model.type - 1] || "Device") + (model.percentage !== undefined ? "  " + model.percentage.toFixed(0) + "%" : "")
                 }
 
                 ColumnLayout {
-                    width: parent.width
+                    width: deviceList.width
                     spacing: 4
 
                     ProgressBar {
@@ -125,7 +125,7 @@ Window {
 
                     GridLayout {
                         columns: 2
-                        width: parent.width
+                        width: deviceList.width
                         rowSpacing: 2
                         columnSpacing: 12
 
