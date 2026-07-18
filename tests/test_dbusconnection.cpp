@@ -926,6 +926,70 @@ private slots:
         QCOMPARE(reg.value(), true);
     }
 
+    // Round-trip an argument through a QML-defined adaptor method. The old
+    // dispatch path built a JS source string from arguments; complex types
+    // (arrays, dicts) went through toString() which broke them. The new path
+    // uses QJSValue::callWithInstance and passes arguments as native JS values.
+    void testDBusAdaptorMethodDispatchComplexArgs()
+    {
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        engine.addImportPath(binDir.filePath(QStringLiteral("../build-debug")));
+
+        QQmlComponent component(&engine);
+        component.setData(
+            "import DBus 1.0;\n"
+            "DBusAdaptor {\n"
+            "  service: 'org.dbusqml.AdaptorDispatchTest'\n"
+            "  path: '/Dispatch'\n"
+            "  iface: 'org.dbusqml.AdaptorDispatchTest'\n"
+            "  function joinStrings(list, sep) {\n"
+            "    if (!list || typeof list.length !== 'number') return 'NOT_ARRAY'\n"
+            "    return list.join(sep)\n"
+            "  }\n"
+            "  function echoTricky(s) { return s }\n"
+            "}", QUrl());
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        auto *adaptor = component.create();
+        QVERIFY(adaptor != nullptr);
+        QTest::qWait(500);
+
+        // 1. Array arg — old dispatch would stringify to "a,b,c" and break.
+        {
+            QDBusMessage msg = QDBusMessage::createMethodCall(
+                QStringLiteral("org.dbusqml.AdaptorDispatchTest"),
+                QStringLiteral("/Dispatch"),
+                QStringLiteral("org.dbusqml.AdaptorDispatchTest"),
+                QStringLiteral("joinStrings"));
+            msg.setArguments({ QVariant(QStringList{ "a", "b", "c" }),
+                               QVariant(QStringLiteral("-")) });
+            QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+            QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+            QVERIFY(!reply.arguments().isEmpty());
+            QCOMPARE(reply.arguments().at(0).toString(), QStringLiteral("a-b-c"));
+        }
+
+        // 2. String with quotes / backslashes — old code escaped strings but
+        //    a malformed JS-source path could still leak. callWithInstance is
+        //    type-native so no escaping is involved.
+        {
+            const QString tricky = QStringLiteral("hello \"world\" \\ backslash");
+            QDBusMessage msg = QDBusMessage::createMethodCall(
+                QStringLiteral("org.dbusqml.AdaptorDispatchTest"),
+                QStringLiteral("/Dispatch"),
+                QStringLiteral("org.dbusqml.AdaptorDispatchTest"),
+                QStringLiteral("echoTricky"));
+            msg.setArguments({ QVariant(tricky) });
+            QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+            QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+            QVERIFY(!reply.arguments().isEmpty());
+            QCOMPARE(reply.arguments().at(0).toString(), tricky);
+        }
+
+        delete adaptor;
+    }
+
     void testDBusAdaptorGetProperty()
     {
         DBusAdaptor adaptor;

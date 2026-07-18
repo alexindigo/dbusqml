@@ -339,29 +339,25 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         bool invoked = false;
         QQmlEngine *engine = qmlEngine(this);
         if (engine) {
-            // Build JavaScript to call the QML method
-            engine->globalObject().setProperty(QStringLiteral("__dbusAdaptor"),
-                                                engine->newQObject(this));
-            QString js = QStringLiteral("__dbusAdaptor.%1(").arg(member);
-            for (int i = 0; i < dbusArgs.size(); ++i) {
-                if (i > 0) js += QStringLiteral(",");
-                const QVariant &arg = dbusArgs.at(i);
-                if (arg.userType() == QMetaType::QString) {
-                    QString s = arg.toString();
-                    s.replace(QLatin1Char('\\'), QLatin1String("\\\\"));
-                    s.replace(QLatin1Char('"'), QLatin1String("\\\""));
-                    js += QStringLiteral("\"%1\"").arg(s);
-                } else {
-                    js += arg.toString();
+            // Wrap the adaptor as a QJSValue and invoke the method through
+            // callWithInstance. This avoids building a JS source string
+            // (which mishandles arrays/dicts and stringifies numeric args
+            // without escaping) and works cleanly for multiple adaptor
+            // instances sharing one engine.
+            QJSValue thisObj = engine->newQObject(this);
+            QQmlEngine::setObjectOwnership(this, QQmlEngine::CppOwnership);
+            QJSValue fn = thisObj.property(member);
+            if (fn.isCallable()) {
+                QJSValueList jsArgs;
+                jsArgs.reserve(dbusArgs.size());
+                for (const QVariant &arg : std::as_const(dbusArgs))
+                    jsArgs << engine->toScriptValue(arg);
+                QJSValue result = fn.callWithInstance(thisObj, jsArgs);
+                if (!result.isError()) {
+                    retVal = result.isUndefined() ? QVariant() : result.toVariant();
+                    invoked = true;
                 }
             }
-            js += QStringLiteral(")");
-            QJSValue result = engine->evaluate(js);
-            if (!result.isError()) {
-                retVal = result.isUndefined() ? QVariant() : result.toVariant();
-                invoked = true;
-            }
-            engine->globalObject().deleteProperty(QStringLiteral("__dbusAdaptor"));
         }
         if (!invoked) {
             QByteArray methodName = member.toLatin1();
