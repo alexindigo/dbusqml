@@ -1,5 +1,7 @@
 # dbusqml
 
+[![CI](https://github.com/alexindigo/dbusqml/actions/workflows/ci.yml/badge.svg)](https://github.com/alexindigo/dbusqml/actions/workflows/ci.yml)
+
 **D-Bus in QML. No KDE.** Standalone Qt 6 QML plugin — `Qt6::DBus` is the only dependency.
 
 The `DBus {}` element introspects a remote object and exposes its methods and

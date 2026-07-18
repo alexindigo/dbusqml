@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    name: Build & test (Ubuntu, Qt ${{ matrix.qt }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        qt: ["6.5.3", "6.8.2"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            dbus dbus-x11 \
+            libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
+
+      - name: Install Qt ${{ matrix.qt }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ matrix.qt }}
+          modules: 'qtdeclarative'
+          cache: true
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run C++ tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run QML tests
+        env:
+          QML_IMPORT_PATH: ${{ github.workspace }}/build
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          QMLTESTRUNNER=$(find "$Qt6_DIR" -name qmltestrunner -type f | head -n1)
+          test -n "$QMLTESTRUNNER" || { echo "qmltestrunner not found under $Qt6_DIR"; exit 1; }
+          dbus-run-session -- "$QMLTESTRUNNER" -input tests/test_api.qml
