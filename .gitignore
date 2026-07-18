@@ -72,3 +72,6 @@ mpv-shot*.*
 
 # scratch review notes
 REVIEW.md
+
+# direnv per-repo env (contains secrets)
+.envrc
