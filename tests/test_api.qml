@@ -10,29 +10,32 @@ TestCase {
     // ── SPIKE tests: isolate the Qt.createQmlObject + destroy() crash ──
     // Named test_a<n> so they run first alphabetically. Each marker is
     // a console.warn — the last one before SEGV pinpoints the step.
+    // Order matters: any crash terminates the process, so later cases
+    // don't run. Put likely-passing tests first, likely-crashing last.
 
-    // Baseline — create without destroy should always be fine.
-    function test_a0_create_no_destroy() {
+    // Baseline: create without destroy.
+    function test_a0_baseline_no_destroy() {
         console.warn("SPIKE a0: before create")
         Qt.createQmlObject('import DBus 1.0; DBus {}', this)
         console.warn("SPIKE a0: created, no destroy called")
         verify(true)
     }
 
-    // Small event-loop yield between create and destroy.
-    function test_a1_wait_short_then_destroy() {
-        console.warn("SPIKE a1: before create")
-        var p = Qt.createQmlObject('import DBus 1.0; DBus {}', this)
-        console.warn("SPIKE a1: created, wait(1) then destroy")
-        wait(1)
-        console.warn("SPIKE a1: past wait(1), calling destroy")
+    // Control: plain QtObject (not our QQmlPropertyMap subclass) +
+    // immediate destroy. If this crashes too, the bug is generic
+    // Qt.createQmlObject+destroy, not QQmlPropertyMap-specific.
+    function test_a1_control_plain_qtobject_destroy() {
+        console.warn("SPIKE a1: before create (plain QtObject)")
+        var p = Qt.createQmlObject('import QtQml; QtObject {}', this)
+        console.warn("SPIKE a1: created, calling destroy immediately")
         p.destroy()
         console.warn("SPIKE a1: destroy() returned")
         verify(true)
     }
 
-    // Longer wait — plenty of time for any deferred init.
-    function test_a2_wait_long_then_destroy() {
+    // Long wait: create DBus{} + wait(200) + destroy. If this passes
+    // and a3 crashes, the bug is a deferred-init race.
+    function test_a2_dbus_wait_long_destroy() {
         console.warn("SPIKE a2: before create")
         var p = Qt.createQmlObject('import DBus 1.0; DBus {}', this)
         console.warn("SPIKE a2: created, wait(200) then destroy")
@@ -43,13 +46,14 @@ TestCase {
         verify(true)
     }
 
-    // Control: same shape but plain QtObject (not our QQmlPropertyMap
-    // subclass). If this crashes too, it's a generic Qt.createQmlObject +
-    // destroy bug, not something about QQmlPropertyMap-derived types.
-    function test_a3_plain_qtobject_destroy() {
-        console.warn("SPIKE a3: before create (plain QtObject)")
-        var p = Qt.createQmlObject('import QtQml; QtObject {}', this)
-        console.warn("SPIKE a3: created, calling destroy immediately")
+    // Short wait: already known to crash in the prior round; kept for
+    // completeness of the log.
+    function test_a3_dbus_wait_short_destroy() {
+        console.warn("SPIKE a3: before create")
+        var p = Qt.createQmlObject('import DBus 1.0; DBus {}', this)
+        console.warn("SPIKE a3: created, wait(1) then destroy")
+        wait(1)
+        console.warn("SPIKE a3: past wait(1), calling destroy")
         p.destroy()
         console.warn("SPIKE a3: destroy() returned")
         verify(true)
