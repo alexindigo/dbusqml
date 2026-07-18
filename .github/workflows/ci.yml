@@ -30,7 +30,6 @@ jobs:
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ matrix.qt }}
-          modules: 'qtdeclarative'
           cache: true
 
       - name: Configure
