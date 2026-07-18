@@ -116,6 +116,7 @@ private:
     Status m_status = Null;
     QDBusPendingCallWatcher *m_introspectWatcher = nullptr;
     QList<QJSValue> m_cachedFunctions;
+    QStringList m_dynamicMethodKeys;   // qml-cased method names currently installed on the property map
     QHash<QString, QString> m_introspectCache;
     QHash<QString, QStringList> m_methodArgTypes;
 };

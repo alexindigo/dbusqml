@@ -485,17 +485,32 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg)
 
 void DBusProxy::setupDynamicMethods(const QStringList &methodNames)
 {
-    if (methodNames.isEmpty()) return;
-
     auto *engine = qmlEngine(this);
+
+    // Per-proxy helper key — kept stable across re-introspections so we can
+    // reliably remove the prior helper before installing a new one.
+    QString helperKey = QStringLiteral("__dbus_helper_%1").arg(reinterpret_cast<quintptr>(this));
+
+    // 1. Drop stale dynamic method keys from the property map.
+    //    Without this, switching iface leaves the old iface's methods
+    //    live and callable, dispatching D-Bus method-not-found errors.
+    for (const QString &key : std::as_const(m_dynamicMethodKeys))
+        clear(key);
+    m_dynamicMethodKeys.clear();
+
+    // 2. Release cached QJSValues held from prior introspection.
+    m_cachedFunctions.clear();
+
+    // 3. Remove the previous helper QObject from the engine global so it
+    //    becomes eligible for GC. Safe even if none exists.
+    if (engine)
+        engine->globalObject().deleteProperty(helperKey);
+
+    if (methodNames.isEmpty()) return;
     if (!engine) return;
 
     auto *helper = new DbusMethodHelper(this, &m_methodArgTypes, this);
     QJSValue helperObj = engine->newQObject(helper);
-
-    // Use a per-proxy key so multiple instances sharing the same engine
-    // don't overwrite each other's helper
-    QString helperKey = QStringLiteral("__dbus_helper_%1").arg(reinterpret_cast<quintptr>(this));
     engine->globalObject().setProperty(helperKey, helperObj);
 
     QString jsTemplate = QStringLiteral(
@@ -521,6 +536,7 @@ void DBusProxy::setupDynamicMethods(const QStringList &methodNames)
         m_cachedFunctions.append(fn);
         QString qmlName = dbusPropToQml(name);
         insert(qmlName, QVariant::fromValue(fn));
+        m_dynamicMethodKeys.append(qmlName);
     }
 }
 

@@ -933,6 +933,101 @@ private slots:
         QCOMPARE(reply->value().toString(), QStringLiteral("org.dbusqml.AdaptorGetTest"));
         delete reply;
     }
+
+    // Switching iface at runtime must remove the old iface's dynamic methods
+    // from the property map. Otherwise they stay callable and silently dispatch
+    // on the new iface, producing method-not-found errors.
+    void testIfaceSwitchClearsOldMethods()
+    {
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        engine.addImportPath(binDir.filePath(QStringLiteral("../build-debug")));
+
+        QQmlComponent component(&engine);
+        component.setData(
+            "import DBus 1.0;\n"
+            "DBus {\n"
+            "  service: 'org.freedesktop.DBus'\n"
+            "  path: '/org/freedesktop/DBus'\n"
+            "  iface: 'org.freedesktop.DBus'\n"
+            "}", QUrl());
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        auto *proxy = static_cast<DBusProxy *>(component.create());
+        QVERIFY(proxy != nullptr);
+
+        // Wait for first introspection to install listNames
+        for (int i = 0; i < 20; ++i) {
+            QTest::qWait(250);
+            if (proxy->value(QStringLiteral("listNames")).isValid())
+                break;
+        }
+        QVERIFY2(proxy->value(QStringLiteral("listNames")).isValid(),
+                 "listNames should be present after introspecting org.freedesktop.DBus");
+
+        // Switch to org.freedesktop.DBus.Peer (only ping + getMachineId)
+        proxy->setIface(QStringLiteral("org.freedesktop.DBus.Peer"));
+
+        // Wait for re-introspection to install ping
+        for (int i = 0; i < 20; ++i) {
+            QTest::qWait(250);
+            if (proxy->value(QStringLiteral("ping")).isValid())
+                break;
+        }
+        QVERIFY2(proxy->value(QStringLiteral("ping")).isValid(),
+                 "ping should be present after switching to Peer iface");
+
+        // Old iface's method must be gone
+        QVERIFY2(!proxy->value(QStringLiteral("listNames")).isValid(),
+                 "listNames must be cleared after iface switch");
+
+        delete proxy;
+    }
+
+    // Repeated iface switches must not accumulate dynamic method entries in
+    // the property map. Each round the key set should equal the current
+    // iface's method set, not the union of all iface method sets ever seen.
+    void testReintrospectionDoesNotLeak()
+    {
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        engine.addImportPath(binDir.filePath(QStringLiteral("../build-debug")));
+
+        QQmlComponent component(&engine);
+        component.setData(
+            "import DBus 1.0;\n"
+            "DBus {\n"
+            "  service: 'org.freedesktop.DBus'\n"
+            "  path: '/org/freedesktop/DBus'\n"
+            "  iface: 'org.freedesktop.DBus'\n"
+            "}", QUrl());
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        auto *proxy = static_cast<DBusProxy *>(component.create());
+        QVERIFY(proxy != nullptr);
+
+        auto waitFor = [&](const QString &key) {
+            for (int i = 0; i < 20; ++i) {
+                QTest::qWait(250);
+                if (proxy->value(key).isValid()) return true;
+            }
+            return false;
+        };
+        QVERIFY(waitFor(QStringLiteral("listNames")));
+
+        // Cycle iface between the two interfaces exposed at /org/freedesktop/DBus
+        for (int round = 0; round < 4; ++round) {
+            proxy->setIface(QStringLiteral("org.freedesktop.DBus.Peer"));
+            QVERIFY(waitFor(QStringLiteral("ping")));
+            QVERIFY(!proxy->value(QStringLiteral("listNames")).isValid());
+
+            proxy->setIface(QStringLiteral("org.freedesktop.DBus"));
+            QVERIFY(waitFor(QStringLiteral("listNames")));
+            QVERIFY(!proxy->value(QStringLiteral("ping")).isValid());
+        }
+
+        delete proxy;
+    }
 };
 
 int main(int argc, char *argv[])
