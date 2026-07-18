@@ -23,8 +23,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
-            dbus dbus-x11 \
+            dbus dbus-x11 gdb \
             libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
+
+      - name: Enable core dumps
+        run: |
+          # Route core dumps to a predictable location so we can pick them
+          # up after a fault. Runner's default core_pattern often pipes to
+          # apport or systemd, which we don't want here.
+          mkdir -p "${{ github.workspace }}/cores"
+          sudo bash -c "echo '${{ github.workspace }}/cores/core.%e.%p' > /proc/sys/kernel/core_pattern"
+          sudo bash -c "echo 0 > /proc/sys/kernel/core_uses_pid"
+          ulimit -c unlimited
+          cat /proc/sys/kernel/core_pattern
 
       - name: Install Qt ${{ matrix.qt }}
         uses: jurplel/install-qt-action@v4
@@ -45,9 +56,41 @@ jobs:
         env:
           QML_IMPORT_PATH: ${{ github.workspace }}/build
           QT_QPA_PLATFORM: offscreen
+          QT_FORCE_STDERR_LOGGING: "1"
         run: |
+          ulimit -c unlimited
           # install-qt-action exports QT_ROOT_DIR pointing at the Qt install
           # root; qmltestrunner lives under $QT_ROOT_DIR/bin or /libexec.
           QMLTESTRUNNER=$(find "$QT_ROOT_DIR" -name qmltestrunner -type f | head -n1)
           test -n "$QMLTESTRUNNER" || { echo "qmltestrunner not found under $QT_ROOT_DIR"; exit 1; }
+          echo "$QMLTESTRUNNER" > /tmp/qmltestrunner-path
           dbus-run-session -- "$QMLTESTRUNNER" -input tests/test_api.qml
+
+      - name: Dump backtrace on crash
+        if: failure()
+        run: |
+          shopt -s nullglob
+          QMLTESTRUNNER=$(cat /tmp/qmltestrunner-path 2>/dev/null || true)
+          for core in "${{ github.workspace }}"/cores/core.*; do
+            echo "=== Core: $core ==="
+            file "$core"
+            if [ -n "$QMLTESTRUNNER" ] && [ -x "$QMLTESTRUNNER" ]; then
+              gdb --batch \
+                -ex 'set pagination off' \
+                -ex 'thread apply all bt full' \
+                "$QMLTESTRUNNER" "$core" 2>&1 | tail -200
+            else
+              echo "(no qmltestrunner path recorded; running gdb without executable)"
+              gdb --batch -ex 'bt full' --core "$core" 2>&1 | tail -100
+            fi
+          done
+          echo "=== end of cores ==="
+          ls -la "${{ github.workspace }}/cores/" || true
+
+      - name: Upload cores on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cores-qt-${{ matrix.qt }}
+          path: ${{ github.workspace }}/cores/
+          if-no-files-found: ignore
