@@ -837,6 +837,29 @@ private slots:
         }
     }
 
+    // Two DBusConnection::connectToBus calls must produce distinct QDBusConnection
+    // handles. A fixed connection name would make QtDBus silently reuse the first
+    // connection for every subsequent call, ignoring the address argument.
+    void testConnectToBusDistinctConnections()
+    {
+        if (s_privateBusAddress.isEmpty())
+            QSKIP("no private bus address available");
+
+        auto *a = DBusConnection::connectToBus(s_privateBusAddress);
+        auto *b = DBusConnection::connectToBus(s_privateBusAddress);
+        QVERIFY(a != nullptr);
+        QVERIFY(b != nullptr);
+
+        QDBusConnection ca = *a;
+        QDBusConnection cb = *b;
+        QVERIFY2(ca.name() != cb.name(),
+                 qPrintable(QStringLiteral("connections must have distinct names, got '%1' twice")
+                            .arg(ca.name())));
+
+        delete a;
+        delete b;
+    }
+
     void testEmitSignalStatic()
     {
         DBusProxy::emitSignal(

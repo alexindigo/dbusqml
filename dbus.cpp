@@ -335,12 +335,9 @@ void DBusProxy::setConnection(DBusConnection *v)
 
 DBusConnection *DBusProxy::connectToBus(const QString &address)
 {
-    static int counter = 0;
-    auto conn = QDBusConnection::connectToBus(address,
-        QStringLiteral("dbusqml-custom-%1").arg(++counter));
-    if (!conn.isConnected())
-        return nullptr;
-    return new DBusConnection(conn, QString());
+    // Delegate to DBusConnection so both entry points share one counter
+    // and can never collide on connection names.
+    return DBusConnection::connectToBus(address);
 }
 
 void DBusProxy::emitSignal(const QString &name, const QVariantList &args)

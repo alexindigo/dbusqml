@@ -1,6 +1,7 @@
 #include "dbusconnection.h"
 #include "dbustypes.h"
 
+#include <QAtomicInt>
 #include <QDBusArgument>
 #include <QDBusMessage>
 #include <QDBusMetaType>
@@ -125,10 +126,15 @@ DBusConnection::~DBusConnection()
 
 DBusConnection *DBusConnection::connectToBus(const QString &address)
 {
-    auto conn = QDBusConnection::connectToBus(address, QStringLiteral("dbusqml-custom"));
+    // A fixed connection name causes QtDBus to return the FIRST connection
+    // for every subsequent call, silently reusing it regardless of address.
+    // Use a per-call counter so callers get distinct connections.
+    static QAtomicInt counter{0};
+    QString name = QStringLiteral("dbusqml-custom-%1").arg(counter.fetchAndAddOrdered(1) + 1);
+    auto conn = QDBusConnection::connectToBus(address, name);
     if (!conn.isConnected())
         return nullptr;
-    return new DBusConnection(conn, QString());
+    return new DBusConnection(conn, name);
 }
 
 DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message)
