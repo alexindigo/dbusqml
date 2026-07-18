@@ -97,15 +97,23 @@ onSignalReceived: function(name, args) {
 
 ### D-Bus Type Wrappers
 
+The module is imported once for the `DBus` element and again with an alias
+for the value-type constructors, because the plain module name is shadowed
+by the element:
+
 ```qml
-DBus.uint32(42)
-DBus.uint64(18446744073)
-DBus.string("hello")
-DBus.boolean(true)
-DBus.double(3.14)
-DBus.objectPath("/org/freedesktop/UPower")
-DBus.variant("any value")
-DBus.dict({ key: "value" })
+import DBus 1.0
+import DBus 1.0 as DBusQML
+
+// ...
+DBusQML.uint32(42)
+DBusQML.uint64(18446744073)
+DBusQML.string("hello")
+DBusQML.boolean(true)
+DBusQML.double(3.14)
+DBusQML.objectPath("/org/freedesktop/UPower")
+DBusQML.variant("any value")
+DBusQML.dict({ key: "value" })
 ```
 
 Used when Qt's auto-conversion doesn't produce the correct D-Bus type signature.
@@ -145,9 +153,9 @@ The sender's unique name is included in every D-Bus message. A receiver can iden
 
 ## Registration (server-side)
 
-### `DBusAdaptor` (proposed)
+### `DBusAdaptor`
 
-Inverse of the `DBus` proxy element. Registers a D-Bus object on the bus and maps QML properties/functions/signals to D-Bus properties/methods/signals.
+Inverse of the `DBus` proxy element. Registers a D-Bus object on the bus and maps QML properties/functions/signals to D-Bus properties/methods/signals. Shipped and covered by tests.
 
 ```qml
 DBusAdaptor {
@@ -198,7 +206,6 @@ QML
 
 ## Non-Goals (v1)
 
-- Exposing QML objects on D-Bus (no adaptor — would need `QDBusVirtualObject`)
 - Qt5 / Qt7 support (single source, forkable)
 - Service activation (caller uses existing D-Bus activation)
 

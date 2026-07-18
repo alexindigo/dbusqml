@@ -373,3 +373,50 @@ Most examples don't need value types — plain JS strings/numbers/booleans work 
 | `DBus::Signature` | `signature` | D-Bus signature. |
 | `DBus::Dict` | `dict` | D-Bus dictionary (map). |
 | `DBus::Variant` | `variant` | D-Bus variant. |
+
+---
+
+## Known Limitations
+
+### Signal handlers on `DBus` elements run in C++-object context
+
+Inline signal handlers declared on a `DBus` element (`onIntrospectionCompleted: ...`, `onSignalReceived: ...`, `onStatusChanged: ...`) evaluate in the C++ object's context, not in the enclosing QML scope. Consequences:
+
+- `id` references and `Q_PROPERTY` values are accessible.
+- JavaScript functions defined in the QML scope are **not** callable from these handlers.
+
+Workarounds:
+
+```qml
+// Won't work — refreshPlayers() is not visible in the C++ context
+DBus {
+    id: proxy
+    onIntrospectionCompleted: refreshPlayers()
+}
+
+// Works — Connections re-binds the target in the QML scope
+DBus { id: proxy }
+Connections {
+    target: proxy
+    function onIntrospectionCompleted() { refreshPlayers() }
+}
+```
+
+This is inherent to Qt 6; there is no library-side fix.
+
+### Runtime-configured proxies: dynamic methods are async
+
+For a `DBus { }` element declared with all of `service`, `path`, and `iface` set inline in QML, introspection completes before user interaction is possible, and `proxy.methodName()` works immediately.
+
+For a proxy whose properties are assigned at runtime (typically via `onActivePlayerChanged`, a selector, etc.), introspection is asynchronous — dynamic method callbacks are **not** yet installed in the same event-loop tick as the assignment.
+
+Wait for `introspectionCompleted` (or check `status === DBus.Ready`) before calling dynamic methods on a runtime-configured proxy:
+
+```qml
+Connections {
+    target: playerProxy
+    function onIntrospectionCompleted() {
+        playerProxy.playPause()   // safe here
+    }
+}
+```
