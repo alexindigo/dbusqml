@@ -10,6 +10,31 @@
 #include <QDBusVariant>
 #include <QJSValue>
 #include <QJSValueList>
+#include <QQmlEngine>
+
+// Convert a QVariant into a native JS value, recursively unwrapping lists
+// and maps so the JS side receives real Array / Object instances (with a
+// working Array.isArray and iterable/spread semantics), not the array-like
+// QVariantList wrappers QQmlEngine::toScriptValue produces by default.
+static QJSValue variantToJs(QQmlEngine *engine, const QVariant &v)
+{
+    const int t = v.userType();
+    if (t == qMetaTypeId<QVariantList>() || t == qMetaTypeId<QStringList>()) {
+        const QVariantList list = v.toList();
+        QJSValue arr = engine->newArray(static_cast<quint32>(list.size()));
+        for (int i = 0; i < list.size(); ++i)
+            arr.setProperty(static_cast<quint32>(i), variantToJs(engine, list.at(i)));
+        return arr;
+    }
+    if (t == qMetaTypeId<QVariantMap>()) {
+        const QVariantMap map = v.toMap();
+        QJSValue obj = engine->newObject();
+        for (auto it = map.begin(); it != map.end(); ++it)
+            obj.setProperty(it.key(), variantToJs(engine, it.value()));
+        return obj;
+    }
+    return engine->toScriptValue(v);
+}
 
 // Recursively unwrap QDBusVariant / QDBusArgument values into plain QVariant
 // containers so QML can traverse them as JavaScript objects. Handles nested
@@ -151,27 +176,40 @@ void DBusConnection::asyncCall(const DBusMessage &message,
                                 const QJSValue &resolve,
                                 const QJSValue &reject)
 {
-    // Promise-style overload — simplified for v1, takes (result, error) callbacks
+    // Promise-style overload: (resolve, reject) callbacks.
+    //   resolve is called with the reply value converted natively to a JS
+    //     value (numbers, booleans, arrays, and dicts survive; nested D-Bus
+    //     containers are unwrapped via unwrapDbus).
+    //   reject is called with a single error object { name, message }.
     auto reply = asyncCall(message);
-    if (resolve.isCallable()) {
-        connect(reply, &DBusPendingReply::finished, this,
-                [reply, resolve = QJSValue(resolve), reject = QJSValue(reject)]() {
-                    if (reply->isError()) {
-                        if (reject.isCallable()) {
-                            const_cast<QJSValue&>(reject).call({
-                                QJSValue(reply->error().name()),
-                                QJSValue(reply->error().message())
-                            });
+    if (!resolve.isCallable() && !reject.isCallable())
+        return;
+
+    QQmlEngine *engine = qmlEngine(this);
+    connect(reply, &DBusPendingReply::finished, this,
+            [reply, resolve = QJSValue(resolve), reject = QJSValue(reject), engine]() mutable {
+                if (reply->isError()) {
+                    if (reject.isCallable()) {
+                        QJSValue errObj;
+                        if (engine) {
+                            errObj = engine->newObject();
+                            errObj.setProperty(QStringLiteral("name"),
+                                               QJSValue(reply->error().name()));
+                            errObj.setProperty(QStringLiteral("message"),
+                                               QJSValue(reply->error().message()));
+                        } else {
+                            errObj = QJSValue(reply->error().message());
                         }
-                    } else {
-                        if (resolve.isCallable()) {
-                            const_cast<QJSValue&>(resolve).call({
-                                QJSValue(reply->value().toString())
-                            });
-                        }
+                        reject.call({ errObj });
                     }
-                });
-    }
+                } else if (resolve.isCallable()) {
+                    QVariant unwrapped = unwrapDbus(reply->value());
+                    QJSValue val = engine
+                        ? variantToJs(engine, unwrapped)
+                        : QJSValue(reply->value().toString());
+                    resolve.call({ val });
+                }
+            });
 }
 
 SessionBusConnection::SessionBusConnection(QObject *parent)

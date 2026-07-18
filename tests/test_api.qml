@@ -357,4 +357,62 @@ TestCase {
         compare(reply.value, true, "DBus should have an owner")
         proxy.destroy()
     }
+
+    // ── Promise-style asyncCall ────────────────────────────
+    //
+    // resolve callback must receive the reply's native value (bool, array,
+    // etc.) rather than a stringified version. reject callback must receive
+    // a single { name, message } object rather than two positional args.
+
+    function test_promise_resolve_native_bool() {
+        var resolved = null
+        DBusQML.SessionBus.asyncCall({
+            service: "org.freedesktop.DBus",
+            path: "/org/freedesktop/DBus",
+            iface: "org.freedesktop.DBus",
+            member: "NameHasOwner",
+            arguments: ["org.freedesktop.DBus"],
+        },
+        function(v) { resolved = v },
+        function(e) { resolved = "REJECTED" })
+        tryVerify(() => resolved !== null, 5000)
+        compare(typeof resolved, "boolean",
+                "resolve must receive native bool, not stringified value")
+        compare(resolved, true, "DBus itself should always have an owner")
+    }
+
+    function test_promise_resolve_native_array() {
+        var resolved = null
+        DBusQML.SessionBus.asyncCall({
+            service: "org.freedesktop.DBus",
+            path: "/org/freedesktop/DBus",
+            iface: "org.freedesktop.DBus",
+            member: "ListNames",
+        },
+        function(v) { resolved = v },
+        function(e) { resolved = "REJECTED" })
+        tryVerify(() => resolved !== null, 5000)
+        verify(Array.isArray(resolved),
+               "resolve must receive a native array, not a stringified value")
+        verify(resolved.length > 0, "ListNames should return at least one name")
+    }
+
+    function test_promise_reject_error_object() {
+        var rejected = null
+        DBusQML.SessionBus.asyncCall({
+            service: "org.freedesktop.DBus",
+            path: "/",
+            iface: "org.freedesktop.DBus",
+            member: "NonExistentMethod",
+        },
+        function(v) { rejected = "RESOLVED" },
+        function(e) { rejected = e })
+        tryVerify(() => rejected !== null, 5000)
+        compare(typeof rejected, "object",
+                "reject must receive a single error object")
+        verify(typeof rejected.name === "string",
+               "error object must have a name property")
+        verify(typeof rejected.message === "string",
+               "error object must have a message property")
+    }
 }
