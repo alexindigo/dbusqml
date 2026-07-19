@@ -5,8 +5,8 @@ contribution loop is short.
 
 ## Build
 
-Requires **CMake ≥ 3.16** and **Qt ≥ 6.5** with `qtdeclarative`
-(brings `QtQml` + `QtTest`).
+Requires **CMake ≥ 3.16** and **Qt ≥ 6.8**. A standard Qt install
+covers all needed components (`Core`, `Qml`, `DBus`, `Test`).
 
 ```sh
 scripts/build            # release build to build-release/

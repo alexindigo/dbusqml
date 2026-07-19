@@ -126,7 +126,7 @@ install(FILES
 option(BUILD_TEST_MODE "Build the C++ test executables" ON)
 
 if(BUILD_TEST_MODE)
-    find_package(Qt6 REQUIRED COMPONENTS Test)
+    find_package(Qt6 6.8 REQUIRED COMPONENTS Test)
 
     add_executable(test_types
         tests/test_dbustypes.cpp
