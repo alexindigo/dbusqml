@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+
+if ! command -v docker &>/dev/null; then
+  echo "docker not found — required for pre-commit checks." >&2
+  echo "Install docker, or bypass with 'git commit --no-verify'." >&2
+  exit 1
+fi
+
+IMAGE="dbusqml-dev:local"
+if ! docker image inspect "$IMAGE" &>/dev/null; then
+  echo "Building $IMAGE (first run only)..." >&2
+  docker build -t "$IMAGE" .devcontainer >&2
+fi
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$REPO_ROOT:$REPO_ROOT" \
+  -w "$REPO_ROOT" \
+  "$IMAGE" \
+  .devcontainer/precommit-check.sh
