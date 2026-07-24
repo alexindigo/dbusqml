@@ -1,0 +1,31 @@
+{
+  "name": "dbusqml Dev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "bierner.qml",
+        "ms-vscode.cpptools",
+        "twxs.cmake",
+        "timonwong.shellcheck",
+        "editorconfig.editorconfig"
+      ],
+      "settings": {
+        "files.associations": {
+          "*.qml": "qml"
+        }
+      }
+    }
+  },
+  "mounts": [
+    "source=/run/dbus,target=/run/dbus,type=bind"
+  ],
+  "runArgs": ["--network=host"],
+  "containerEnv": {
+    "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=/run/dbus/system_bus_socket"
+  },
+  "remoteUser": "dev"
+}
