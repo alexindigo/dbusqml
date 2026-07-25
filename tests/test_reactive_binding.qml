@@ -10,13 +10,12 @@ Window {
     height: 220
     title: "DBus — Reactive Binding Test (NM WirelessEnabled)"
 
-    // Intermediate readonly property — this is the pattern that should
-    // be reactive but isn't (QQmlPropertyMap::insert() uses keyed
-    // valueChanged signals, not per-property NOTIFY, so QML bindings
-    // through an intermediate readonly property see 'undefined' at startup
-    // and never re-evaluate when the D-Bus property later arrives).
-    //
-    // See TODO.md and dbus.cpp:fetchProperties() for the fix plan.
+    // Intermediate readonly property — the pattern that historically
+    // broke with QQmlPropertyMap (auto-created properties resolved to
+    // undefined and never re-evaluated when the real DBus value arrived).
+    // Fixed by catalog pre-population when DBUSQML_REACTIVE_BINDINGS=ON:
+    // null placeholders inserted before QML bindings evaluate, so
+    // QQmlPropertyMap's built-in reactivity handles subsequent updates.
     readonly property bool wifiEnabled: nm.wirelessEnabled === true
 
     ColumnLayout {
@@ -78,5 +77,22 @@ Window {
         path: "/org/freedesktop/NetworkManager"
         iface: "org.freedesktop.NetworkManager"
         connection: SystemBus
+    }
+
+    Timer {
+        interval: 2000; running: true
+        onTriggered: {
+            var direct = nm.wirelessEnabled
+            var wrapper = wifiEnabled
+            var ok = (direct === true && wrapper === true)
+            console.warn("reactive-binding test: direct=" + direct +
+                         " wrapper=" + wrapper +
+                         " " + (ok ? "PASS" : "FAIL"))
+            console.warn("  DBusProxy.reactiveBindingsSupported = " +
+                         nm.reactiveBindingsSupported)
+            if (!ok)
+                console.error("Expected both direct and wrapper to be true")
+            Qt.quit()
+        }
     }
 }
