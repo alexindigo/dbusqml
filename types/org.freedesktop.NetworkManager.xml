@@ -1,0 +1,32 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="org.freedesktop.NetworkManager">
+    <property name="Devices" type="ao" access="read"/>
+    <property name="AllDevices" type="ao" access="read"/>
+    <property name="Checkpoints" type="ao" access="read"/>
+    <property name="NetworkingEnabled" type="b" access="read"/>
+    <property name="WirelessEnabled" type="b" access="readwrite"/>
+    <property name="WirelessHardwareEnabled" type="b" access="read"/>
+    <property name="WwanEnabled" type="b" access="readwrite"/>
+    <property name="WwanHardwareEnabled" type="b" access="read"/>
+    <property name="WimaxEnabled" type="b" access="readwrite"/>
+    <property name="WimaxHardwareEnabled" type="b" access="read"/>
+    <property name="RadioFlags" type="u" access="read"/>
+    <property name="ActiveConnections" type="ao" access="read"/>
+    <property name="PrimaryConnection" type="o" access="read"/>
+    <property name="PrimaryConnectionType" type="s" access="read"/>
+    <property name="Metered" type="u" access="read"/>
+    <property name="ActivatingConnection" type="o" access="read"/>
+    <property name="Startup" type="b" access="read"/>
+    <property name="Version" type="s" access="read"/>
+    <property name="VersionInfo" type="au" access="read"/>
+    <property name="Capabilities" type="au" access="read"/>
+    <property name="State" type="u" access="read"/>
+    <property name="Connectivity" type="u" access="read"/>
+    <property name="ConnectivityCheckAvailable" type="b" access="read"/>
+    <property name="ConnectivityCheckEnabled" type="b" access="readwrite"/>
+    <property name="ConnectivityCheckUri" type="s" access="read"/>
+    <property name="GlobalDnsConfiguration" type="a{sv}" access="readwrite"/>
+  </interface>
+</node>

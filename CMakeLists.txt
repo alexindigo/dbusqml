@@ -16,6 +16,11 @@ qt_policy(SET QTP0001 NEW)
 
 include(GNUInstallDirs)
 
+option(DBUSQML_REACTIVE_BINDINGS
+       "Enable reactive property bindings via QQmlOpenMetaObject subclass. \
+Requires Qt6::QmlPrivate. Currently tested against Qt 6.8–6.11."
+       OFF)
+
 # Production sources
 set(DBUSQML_SOURCES
     dbusadaptor.cpp
@@ -49,9 +54,14 @@ target_link_libraries(dbusqml PRIVATE
     Qt6::Core Qt6::Qml Qt6::DBus
 )
 
+if(DBUSQML_REACTIVE_BINDINGS)
+    target_compile_definitions(dbusqml PRIVATE DBUSQML_REACTIVE_BINDINGS)
+endif()
+
 qt_add_resources(dbusqml "catalog"
     PREFIX "/dbusqml"
     FILES
+        types/org.freedesktop.NetworkManager.xml
         types/org.mpris.MediaPlayer2.xml
         types/org.mpris.MediaPlayer2.Player.xml
         types/org.freedesktop.Notifications.xml
