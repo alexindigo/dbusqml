@@ -119,3 +119,52 @@ property DBusQML.dbusMessage msg: ({
 Both bugs have minimal reproducers (above). Filing on
 https://bugreports.qt.io would help other Qt/QML users. If you file
 one, please link it here.
+
+---
+
+## Reactive Property Bindings with `readonly property` Layers
+
+**Affects:** builds without `-DDBUSQML_REACTIVE_BINDINGS=ON`.
+
+When a QML binding wraps a DBusProxy property through an intermediate
+`readonly property`:
+
+```qml
+DBus { id: nm; ... }
+readonly property bool wifiEnabled: nm.wirelessEnabled === true
+```
+
+the binding evaluates before the D-Bus `GetAll` reply arrives. At that
+point the key doesn't exist on `QQmlPropertyMap`, so the engine
+auto-creates it with an invalid `QVariant` (JS `undefined`). The binding
+resolves to `false` and never re-evaluates when the real property later
+arrives.
+
+### Fix
+
+Build with `-DDBUSQML_REACTIVE_BINDINGS=ON`. This pre-populates `null`
+placeholders for every property declared in the interface's catalog XML
+BEFORE QML bindings evaluate. When the real D-Bus value arrives,
+`QQmlPropertyMap`'s built-in reactivity re-evaluates all dependent
+bindings — including intermediate `readonly property` layers.
+
+For the fix to cover a given interface, a catalog XML file must ship
+with `<property>` declarations.  Currently 9 interfaces are bundled
+(see `types/*.xml`), including NetworkManager.  User-provided XMLs in
+`$XDG_CONFIG_HOME/dbusqml/types/` participate automatically.
+
+The runtime property `reactiveBindingsSupported` (`bool`, on every
+`DBus` element) tells whether the local build includes the fix.
+
+### Workaround (without the flag)
+
+Use direct property reads in bindings instead of intermediate
+`readonly property` layers:
+
+```qml
+// Works but loses the abstraction:
+Label { text: "WiFi: " + (nm.wirelessEnabled ? "on" : "off") }
+```
+
+Or write reactive wrapper objects in JavaScript that pull values
+on signal/update events.

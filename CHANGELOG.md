@@ -4,6 +4,29 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `DBUSQML_REACTIVE_BINDINGS` CMake option (default `OFF`). When enabled,
+  DBusProxy pre-populates `null` placeholders for catalog-declared
+  properties BEFORE QML bindings evaluate, so `QQmlPropertyMap`'s
+  built-in reactivity handles subsequent D-Bus value updates. Fixes the
+  long-standing bug where intermediate `readonly property` layers
+  wrapping DBusProxy properties resolved to `false` forever.
+- `reactiveBindingsSupported` QML property on every `DBus` element
+  (`bool`, read-only, constant). Returns `true` when the build includes
+  the reactive-bindings fix.
+- `types/org.freedesktop.NetworkManager.xml` catalog descriptor with 26
+  property declarations.
+
+### Changed
+
+- `DBusCatalog::InterfaceSpec` gains `properties` (`QStringList`) field.
+  Catalog XML parser now extracts `<property name="..."/>` elements.
+- `dbusqmlConfig.cmake.in` exposes `dbusqml_REACTIVE_BINDINGS` variable
+  to downstream CMake consumers.
+
 ## [0.1.0] — 2026-07-18
 
 Initial release. Requires Qt 6.8 or newer. See
