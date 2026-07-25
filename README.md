@@ -57,6 +57,19 @@ Button {
 
 ## Build & install
 
+For **reactive property bindings** through intermediate `readonly property`
+layers (e.g. `readonly property bool wifiEnabled: nm.wirelessEnabled === true`),
+enable `-DDBUSQML_REACTIVE_BINDINGS=ON` (default `OFF`):
+
+```sh
+cmake -B build-release -DCMAKE_BUILD_TYPE=Release -DDBUSQML_REACTIVE_BINDINGS=ON
+```
+
+See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#reactive-property-bindings-with-readonly-property-layers)
+for the background on this issue.
+
+### Quick build (no reactive bindings)
+
 ```sh
 cmake -B build-release -DCMAKE_BUILD_TYPE=Release
 cmake --build build-release
