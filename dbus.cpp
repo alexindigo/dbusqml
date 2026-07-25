@@ -166,6 +166,9 @@ void DBusProxy::setService(const QString &v)
     if (m_service == v) return;
     m_service = v;
     emit serviceChanged();
+#ifdef DBUSQML_REACTIVE_BINDINGS
+    prepopulateFromCatalog();
+#endif
     if (!m_iface.isEmpty() && !m_path.isEmpty())
         QTimer::singleShot(0, this, &DBusProxy::doIntrospect);
 }
@@ -175,6 +178,9 @@ void DBusProxy::setPath(const QString &v)
     if (m_path == v) return;
     m_path = v;
     emit pathChanged();
+#ifdef DBUSQML_REACTIVE_BINDINGS
+    prepopulateFromCatalog();
+#endif
     if (!m_iface.isEmpty() && !m_service.isEmpty())
         QTimer::singleShot(0, this, &DBusProxy::doIntrospect);
 }
@@ -185,6 +191,9 @@ void DBusProxy::setIface(const QString &v)
     QString oldIface = m_iface;
     m_iface = v;
     emit ifaceChanged();
+#ifdef DBUSQML_REACTIVE_BINDINGS
+    prepopulateFromCatalog();
+#endif
 
     if (m_signalsConnected) {
         m_bus.disconnect(QString(), m_path, QString(), QString(),
@@ -543,6 +552,9 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
     QStringList signalNames;
     QStringList methodNames;
     m_methodArgTypes.clear();
+#ifdef DBUSQML_REACTIVE_BINDINGS
+    QStringList propertyNames;
+#endif
 
     while (!reader.atEnd()) {
         reader.readNext();
@@ -567,6 +579,11 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
                         } else if (reader.name() == u"arg" && !currentMethod.isEmpty()) {
                             currentArgs << reader.attributes().value("type").toString();
                         }
+#ifdef DBUSQML_REACTIVE_BINDINGS
+                        else if (reader.name() == u"property") {
+                            propertyNames << reader.attributes().value("name").toString();
+                        }
+#endif
                     }
                 }
                 if (!currentMethod.isEmpty()) {
@@ -626,6 +643,20 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
         m_signalsConnected = true;
     }
 
+#ifdef DBUSQML_REACTIVE_BINDINGS
+    // Pre-populate null placeholders for every property declared in the
+    // introspection XML. This makes keys exist at QML binding-evaluation
+    // time, so QQmlPropertyMap's built-in reactivity can update them
+    // when GetAll/PropertiesChanged arrive. Without this, properties
+    // auto-created by the engine resolve to invalid QVariant (undefined)
+    // and never re-evaluate when the real value is later inserted.
+    for (const QString &propName : std::as_const(propertyNames)) {
+        QString qmlName = dbusPropToQml(propName);
+        if (!contains(qmlName))
+            insert(qmlName, QVariant::fromValue(nullptr));
+    }
+#endif
+
     setupDynamicMethods(methodNames);
 
     if (m_propertiesEnabled)
@@ -636,5 +667,31 @@ void DBusProxy::reloadTypes()
 {
     DBusCatalog::instance().reload();
 }
+
+bool DBusProxy::reactiveBindingsSupported()
+{
+#ifdef DBUSQML_REACTIVE_BINDINGS
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool DBusProxy::hasReactiveBindings() const
+{
+    return reactiveBindingsSupported();
+}
+
+#ifdef DBUSQML_REACTIVE_BINDINGS
+void DBusProxy::prepopulateFromCatalog()
+{
+    if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
+        return;
+    if (const auto *spec = DBusCatalog::instance().lookup(m_iface)) {
+        for (const QString &propName : spec->properties)
+            insert(dbusPropToQml(propName), QVariant::fromValue(nullptr));
+    }
+}
+#endif
 
 #include "dbus.moc"

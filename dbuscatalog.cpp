@@ -121,6 +121,8 @@ void DBusCatalog::loadFile(const QString &filePath)
             } else if (name == QLatin1String("arg") &&
                        (!currentMethod.isEmpty() || !currentSignal.isEmpty())) {
                 currentArgs << reader.attributes().value("type").toString();
+            } else if (name == QLatin1String("property") && !currentIface.isEmpty()) {
+                spec.properties << reader.attributes().value("name").toString();
             }
         } else if (reader.isEndElement()) {
             const auto name = reader.name();

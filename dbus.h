@@ -28,6 +28,7 @@ class DBusProxy : public QQmlPropertyMap, public QQmlParserStatus {
     Q_PROPERTY(bool watchServiceStatus READ watchServiceStatus WRITE setWatchServiceStatus NOTIFY watchServiceStatusChanged)
     Q_PROPERTY(bool serviceAvailable READ serviceAvailable NOTIFY serviceAvailableChanged)
     Q_PROPERTY(bool propertiesEnabled READ propertiesEnabled WRITE setPropertiesEnabled NOTIFY propertiesEnabledChanged)
+    Q_PROPERTY(bool reactiveBindingsSupported READ hasReactiveBindings CONSTANT)
 
 public:
     enum Status { Null, Loading, Ready, Error };
@@ -75,6 +76,12 @@ public:
     bool propertiesEnabled() const { return m_propertiesEnabled; }
     void setPropertiesEnabled(bool v);
 
+    static bool reactiveBindingsSupported();
+    bool hasReactiveBindings() const;
+
+protected:
+    QVariant updateValue(const QString &key, const QVariant &input) override;
+
 Q_SIGNALS:
     void serviceChanged();
     void pathChanged();
@@ -88,9 +95,6 @@ Q_SIGNALS:
     void serviceAvailableChanged();
     void propertiesEnabledChanged();
 
-protected:
-    QVariant updateValue(const QString &key, const QVariant &input) override;
-
 private Q_SLOTS:
     void onPropertiesChanged(const QDBusMessage &msg);
 
@@ -99,6 +103,9 @@ private:
     void doIntrospect();
     void onIntrospectionReady(const QString &xml);
     void setupDynamicMethods(const QStringList &methodNames);
+#ifdef DBUSQML_REACTIVE_BINDINGS
+    void prepopulateFromCatalog();
+#endif
 
     QString m_service;
     QString m_path;

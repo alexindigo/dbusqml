@@ -19,6 +19,7 @@ public:
         QString source;
         QHash<QString, MethodSpec> methods;
         QHash<QString, SignalSpec> signals_;
+        QStringList properties;
     };
 
     static DBusCatalog &instance();
