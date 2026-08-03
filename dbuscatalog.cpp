@@ -17,11 +17,13 @@ DBusCatalog::DBusCatalog()
     loadPaths();
 }
 
-const DBusCatalog::InterfaceSpec *DBusCatalog::lookup(const QString &iface) const
+std::optional<DBusCatalog::InterfaceSpec> DBusCatalog::lookup(const QString &iface) const
 {
     QReadLocker lock(&m_lock);
     auto it = m_ifaces.find(iface);
-    return it == m_ifaces.end() ? nullptr : &it.value();
+    if (it == m_ifaces.end())
+        return std::nullopt;
+    return *it;
 }
 
 void DBusCatalog::reload()

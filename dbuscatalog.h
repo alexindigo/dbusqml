@@ -4,6 +4,7 @@
 #include <QReadWriteLock>
 #include <QString>
 #include <QStringList>
+#include <optional>
 
 class DBusCatalog {
 public:
@@ -24,7 +25,7 @@ public:
 
     static DBusCatalog &instance();
 
-    const InterfaceSpec *lookup(const QString &ifaceName) const;
+    std::optional<InterfaceSpec> lookup(const QString &ifaceName) const;
     void reload();
 
 private:

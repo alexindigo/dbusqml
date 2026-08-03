@@ -165,6 +165,8 @@ void DBusProxy::setService(const QString &v)
 {
     if (m_service == v) return;
     m_service = v;
+    if (m_serviceWatcher)
+        m_serviceWatcher->setWatchedServices({m_service});
     emit serviceChanged();
 #ifdef DBUSQML_REACTIVE_BINDINGS
     prepopulateFromCatalog();
@@ -477,7 +479,10 @@ void DBusProxy::fetchProperties()
 void DBusProxy::onPropertiesChanged(const QDBusMessage &msg)
 {
     if (msg.type() == QDBusMessage::SignalMessage) {
-        emit signalReceived(msg.member(), msg.arguments());
+        QVariantList unwrapped;
+        for (const QVariant &arg : msg.arguments())
+            unwrapped.append(unwrapDbus(arg));
+        emit signalReceived(msg.member(), unwrapped);
 
         if (msg.member() == "PropertiesChanged" && msg.arguments().size() >= 2) {
             QVariantMap changed = qdbus_cast<QVariantMap>(msg.arguments()[1]);
@@ -603,7 +608,7 @@ void DBusProxy::onIntrospectionReady(const QString &xml)
     // Merge with user-land catalog (interface descriptors from XDG paths and
     // bundled resources). Live introspection wins on arg types; catalog fills
     // in missing methods / signals.
-    if (const auto *spec = DBusCatalog::instance().lookup(m_iface)) {
+    if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
         for (auto it = spec->methods.constBegin(); it != spec->methods.constEnd(); ++it) {
             const QString &methodName = it.key();
             if (!methodNames.contains(methodName)) {
@@ -687,7 +692,7 @@ void DBusProxy::prepopulateFromCatalog()
 {
     if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
         return;
-    if (const auto *spec = DBusCatalog::instance().lookup(m_iface)) {
+    if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
         for (const QString &propName : spec->properties)
             insert(dbusPropToQml(propName), QVariant::fromValue(nullptr));
     }
