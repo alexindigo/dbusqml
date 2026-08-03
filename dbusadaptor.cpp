@@ -1,4 +1,5 @@
 #include "dbusadaptor.h"
+#include "dbusconnection.h"
 
 #include <QDBusArgument>
 #include <QDBusConnection>
@@ -23,34 +24,32 @@ public:
 
 public slots:
     void forward() {
-        QDBusConnection conn = m_adaptor->connection()
-            ? static_cast<QDBusConnection>(*m_adaptor->connection())
-            : QDBusConnection::sessionBus();
-        conn.send(QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name));
+        QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
+        busConn().send(msg);
     }
     void forward(QVariant a0) {
         QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        msg.setArguments({a0});
+        msg.setArguments({toDbusVariant(a0)});
         busConn().send(msg);
     }
     void forward(QVariant a0, QVariant a1) {
         QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        msg.setArguments({a0, a1});
+        msg.setArguments({toDbusVariant(a0), toDbusVariant(a1)});
         busConn().send(msg);
     }
     void forward(QVariant a0, QVariant a1, QVariant a2) {
         QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        msg.setArguments({a0, a1, a2});
+        msg.setArguments({toDbusVariant(a0), toDbusVariant(a1), toDbusVariant(a2)});
         busConn().send(msg);
     }
     void forward(QVariant a0, QVariant a1, QVariant a2, QVariant a3) {
         QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        msg.setArguments({a0, a1, a2, a3});
+        msg.setArguments({toDbusVariant(a0), toDbusVariant(a1), toDbusVariant(a2), toDbusVariant(a3)});
         busConn().send(msg);
     }
     void forward(QVariant a0, QVariant a1, QVariant a2, QVariant a3, QVariant a4) {
         QDBusMessage msg = QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        msg.setArguments({a0, a1, a2, a3, a4});
+        msg.setArguments({toDbusVariant(a0), toDbusVariant(a1), toDbusVariant(a2), toDbusVariant(a3), toDbusVariant(a4)});
         busConn().send(msg);
     }
 
@@ -150,11 +149,11 @@ void DBusAdaptor::componentComplete()
         }
 
         auto *relay = new SignalRelay(this, name, this);
-        // Connect signal to the matching forward slot
-        // The slot indices are: 1=forward(), 2=forward(QVariant), 3=forward(QVariant,QVariant)...
         int slotIdx = relay->metaObject()->methodOffset() + paramCount;
         QMetaMethod slot = relay->metaObject()->method(slotIdx);
-        QObject::connect(this, sig, relay, slot);
+        QByteArray signalSig = "2" + sig.methodSignature();
+        QByteArray slotSig = "1" + QByteArray(slot.methodSignature());
+        QObject::connect(this, signalSig.constData(), relay, slotSig.constData());
     }
 }
 
