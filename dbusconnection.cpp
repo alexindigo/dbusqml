@@ -36,6 +36,18 @@ static QJSValue variantToJs(QQmlEngine *engine, const QVariant &v)
     return engine->toScriptValue(v);
 }
 
+// Convert a QList<T> of any demarshalable type to QVariantList.
+// Each element is recursively unwrapped via unwrapDbus.
+template<typename T>
+QVariantList toVariantList(const QList<T> &list)
+{
+    QVariantList out;
+    out.reserve(list.size());
+    for (const T &elem : list)
+        out.append(unwrapDbus(QVariant::fromValue(elem)));
+    return out;
+}
+
 // Recursively unwrap QDBusVariant / QDBusArgument values into plain QVariant
 // containers so QML can traverse them as JavaScript objects. Handles nested
 // a{sv}, a{ss}, av, as, ao, etc.
@@ -144,6 +156,30 @@ QVariant unwrapDbus(const QVariant &v)
             }
             arg.endMap();
             return result;
+        }
+
+        // Generic arrays of basic types — au, ai, ad, ab, an, aq, at, ax,
+        // ag, av. Uses beginArray + specific C++ type read per element.
+        // Concrete-typed arrays cannot be read with an untyped QVariant
+        // target (crashes inside libdbus), so we dispatch to the correct
+        // C++ type via the signature character.
+        if (sig.startsWith("a") && sig.length() == 2) {
+            switch (sig[1].toLatin1()) {
+            case 'y': { QList<uchar> l; arg >> l; return toVariantList(l); }
+            case 'b': { QList<bool> l; arg >> l; return toVariantList(l); }
+            case 'n': { QList<short> l; arg >> l; return toVariantList(l); }
+            case 'q': { QList<ushort> l; arg >> l; return toVariantList(l); }
+            case 'i': { QList<int> l; arg >> l; return toVariantList(l); }
+            case 'u': { QList<uint> l; arg >> l; return toVariantList(l); }
+            case 'x': { QList<qint64> l; arg >> l; return toVariantList(l); }
+            case 't': { QList<quint64> l; arg >> l; return toVariantList(l); }
+            case 'd': { QList<double> l; arg >> l; return toVariantList(l); }
+            case 's': { QStringList l; arg >> l; return toVariantList(l); }
+            case 'o': { QList<QDBusObjectPath> l; arg >> l; return toVariantList(l); }
+            case 'g': { QList<QDBusSignature> l; arg >> l; return toVariantList(l); }
+            case 'v': { QVariantList l; arg >> l; return toVariantList(l); }
+            default: break;
+            }
         }
 
         // Unrecognized signature — make the gap visible in logs.
