@@ -55,7 +55,24 @@ Button {
 - **Value types** — `dbusVariant`, `dbusMessage`, `dbusError`, etc., via
   `import DBus 1.0 as DBusQML`.
 
-## Build & install
+## Install
+
+### Arch Linux (AUR)
+
+```bash
+yay -S qt6-dbusqml           # release
+yay -S qt6-dbusqml-git       # git master
+yay -S qt6-dbusqml-reactive  # release, reactive bindings enabled
+```
+
+If AUR is unavailable, install directly from the GitHub mirrors:
+
+```bash
+git clone https://github.com/alexindigo/aur-qt6-dbusqml.git
+cd aur-qt6-dbusqml && makepkg -si
+```
+
+### Build from source
 
 For **reactive property bindings** through intermediate `readonly property`
 layers (e.g. `readonly property bool wifiEnabled: nm.wirelessEnabled === true`),
@@ -67,8 +84,6 @@ cmake -B build-release -DCMAKE_BUILD_TYPE=Release -DDBUSQML_REACTIVE_BINDINGS=ON
 
 See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#reactive-property-bindings-with-readonly-property-layers)
 for the background on this issue.
-
-### Quick build (no reactive bindings)
 
 ```sh
 cmake -B build-release -DCMAKE_BUILD_TYPE=Release
