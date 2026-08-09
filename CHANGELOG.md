@@ -4,6 +4,20 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-08-09
+
+### Fixed
+
+- **Recursive `unwrapDbus`** for struct arrays (`a(...)`), mixed tuples
+  (`(...)`), and generic dicts (`a{...}`). Covers fcitx5's `a(ssssssb)`
+  and `sssssssbsa{sv}` patterns. Replaces silent fallthrough with
+  `qWarning()` naming the unsupported signature.
+- **Watcher cleanup** — `QDBusPendingCallWatcher` auto-deleted on
+  `finished()` via `deleteLater()`. Eliminates per-call memory leaks.
+- **Reply self-containment** — `DBusPendingReply` caches reply data in
+  `onFinished()` and clears the watcher pointer, preventing SIGSEGV when
+  QML accesses the reply after the watcher is deleted.
+
 ## [0.2.0] — 2026-07-25
 
 ### Added
