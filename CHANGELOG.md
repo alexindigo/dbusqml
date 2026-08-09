@@ -4,6 +4,20 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-08-09
+
+### Fixed
+
+- **SIGSEGV at client teardown** — `QPointer<QDBusPendingCallWatcher>`
+  auto-nulls when the watcher is deleted, preventing use-after-free
+  when the parent proxy is destroyed while a pending call is in flight.
+- **Flaky `finished` delivery** — watcher stays alive until the parent
+  destroys it, no premature deletion.
+- **Generic array demarshaling** — all basic D-Bus array types
+  (`ay`, `ab`, `an`, `aq`, `ai`, `au`, `ax`, `at`, `ad`, `as`, `ao`,
+  `ag`, `av`) now handled via template dispatch. Removes
+  "unsupported signature au" warnings from NetworkManager properties.
+
 ## [0.2.1] — 2026-08-09
 
 ### Fixed
