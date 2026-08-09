@@ -96,5 +96,9 @@ void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher)
     }
 
     m_finished = true;
-    emit finished();
+    // Queue the emission: a synchronous emit here can outrun a caller's
+    // `reply.finished.connect(...)` on fast local-bus round trips (the reply
+    // arrives before the QML connect line runs). Posting it guarantees the
+    // synchronous connect-after-call pattern always lands first.
+    QMetaObject::invokeMethod(this, "finished", Qt::QueuedConnection);
 }

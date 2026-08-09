@@ -147,7 +147,12 @@ QVariant unwrapDbus(const QVariant &v)
                     members.append(readBySignature(arg));
                 }
                 arg.endStructure();
-                result.append(members);
+                // NOTE: QVariant::fromValue wraps the member list as ONE
+                // element — plain result.append(members) would call the
+                // QList::append(const QList&) overload and CONCATENATE the
+                // members, flattening the struct array (754 structs became
+                // 5278 flat members). Caught on the arch-niri VM.
+                result.append(QVariant::fromValue(members));
             }
             arg.endArray();
             return result;
