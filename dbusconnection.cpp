@@ -36,6 +36,35 @@ static QJSValue variantToJs(QQmlEngine *engine, const QVariant &v)
     return engine->toScriptValue(v);
 }
 
+// Read a single element from a QDBusArgument using the correct type
+// based on the current signature. Avoids operator>>(QDBusArgument,
+// QVariant) which crashes inside libdbus for struct members.
+static QVariant readBySignature(const QDBusArgument &arg)
+{
+    const QString sig = arg.currentSignature();
+
+    // Basic types — single char signatures
+    if (sig == "y") { uchar v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "b") { bool v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "n") { short v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "q") { ushort v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "i") { int v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "u") { uint v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "x") { qint64 v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "t") { quint64 v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "d") { double v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "s") { QString v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "o") { QDBusObjectPath v; arg >> v; return QVariant::fromValue(v.path()); }
+    if (sig == "g") { QDBusSignature v; arg >> v; return QVariant::fromValue(v.signature()); }
+    if (sig == "v") { QDBusVariant v; arg >> v; return unwrapDbus(v.variant()); }
+    if (sig == "ay") { QByteArray v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "as") { QStringList v; arg >> v; return QVariant::fromValue(v); }
+
+    // Complex types — read as variant, unwrapDbus handles the recursion
+    QVariant v = arg.asVariant();
+    return unwrapDbus(v);
+}
+
 // Convert a QList<T> of any demarshalable type to QVariantList.
 // Each element is recursively unwrapped via unwrapDbus.
 template<typename T>
@@ -115,9 +144,7 @@ QVariant unwrapDbus(const QVariant &v)
                 arg.beginStructure();
                 QVariantList members;
                 while (!arg.atEnd()) {
-                    QVariant elem;
-                    arg >> elem;
-                    members.append(unwrapDbus(elem));
+                    members.append(readBySignature(arg));
                 }
                 arg.endStructure();
                 result.append(members);
@@ -132,9 +159,7 @@ QVariant unwrapDbus(const QVariant &v)
             QVariantList members;
             arg.beginStructure();
             while (!arg.atEnd()) {
-                QVariant elem;
-                arg >> elem;
-                members.append(unwrapDbus(elem));
+                members.append(readBySignature(arg));
             }
             arg.endStructure();
             return members;
