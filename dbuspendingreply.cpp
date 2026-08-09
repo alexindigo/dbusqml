@@ -20,21 +20,26 @@ void DBusPendingReply::setWatcher(QDBusPendingCallWatcher *watcher)
     m_watcher = watcher;
     connect(watcher, &QDBusPendingCallWatcher::finished, this, &DBusPendingReply::onFinished);
     connect(watcher, &QDBusPendingCallWatcher::finished, watcher, &QObject::deleteLater);
-    connect(this, &DBusPendingReply::finished, this, &QObject::deleteLater);
 }
 
 bool DBusPendingReply::isError() const
 {
+    if (m_cached)
+        return m_isError;
     return m_watcher ? m_watcher->isError() : true;
 }
 
 bool DBusPendingReply::isValid() const
 {
+    if (m_cached)
+        return m_isValid;
     return m_watcher && m_watcher->isValid() && !m_watcher->isError();
 }
 
 DBusError DBusPendingReply::error() const
 {
+    if (m_cached)
+        return m_error;
     if (m_watcher)
         return DBusError(m_watcher->error());
     return DBusError(QDBusError(QDBusError::InternalError, "No pending call"));
@@ -42,6 +47,8 @@ DBusError DBusPendingReply::error() const
 
 QVariant DBusPendingReply::value() const
 {
+    if (m_cached)
+        return m_value;
     if (!m_watcher || m_watcher->isError())
         return {};
 
@@ -55,6 +62,8 @@ QVariant DBusPendingReply::value() const
 
 QVariantList DBusPendingReply::values() const
 {
+    if (m_cached)
+        return m_values;
     if (!m_watcher || m_watcher->isError())
         return {};
 
@@ -66,6 +75,27 @@ QVariantList DBusPendingReply::values() const
 
 void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher)
 {
+    Q_UNUSED(watcher);
+
+    if (m_watcher && !m_cached) {
+        m_isError = m_watcher->isError();
+        m_isValid = m_watcher->isValid() && !m_watcher->isError();
+
+        if (m_isError) {
+            m_error = DBusError(m_watcher->error());
+        } else {
+            QDBusMessage reply = m_watcher->reply();
+            QVariantList args = reply.arguments();
+            for (int i = 0; i < args.size(); ++i)
+                args[i] = unwrapDbus(args[i]);
+            m_values = args;
+            m_value = args.isEmpty() ? QVariant() : args.first();
+        }
+
+        m_cached = true;
+        m_watcher = nullptr;
+    }
+
     m_finished = true;
     emit finished();
 }

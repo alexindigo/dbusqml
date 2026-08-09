@@ -40,4 +40,13 @@ private:
 
     QDBusPendingCallWatcher *m_watcher = nullptr;
     bool m_finished = false;
+
+    // Cached after watcher finishes — makes the reply self-contained
+    // so it can be safely accessed after the watcher is deleted.
+    bool m_isError = false;
+    bool m_isValid = false;
+    DBusError m_error;
+    QVariant m_value;
+    QVariantList m_values;
+    bool m_cached = false;
 };

@@ -93,9 +93,61 @@ QVariant unwrapDbus(const QVariant &v)
             arg >> bytes;
             return bytes;
         }
-        // Anything else — struct-array, typed-numeric-array, etc. — is
-        // left as the raw QDBusArgument. Callers that need those can
-        // demarshal explicitly with qdbus_cast<T>.
+
+        // Struct arrays — a(...) where ... is any member types.
+        // e.g. a(ssssssb) from fcitx5 → QVariantList of QVariantList.
+        if (sig.startsWith("a(")) {
+            QVariantList result;
+            arg.beginArray();
+            while (!arg.atEnd()) {
+                arg.beginStructure();
+                QVariantList members;
+                while (!arg.atEnd()) {
+                    QVariant elem;
+                    arg >> elem;
+                    members.append(unwrapDbus(elem));
+                }
+                arg.endStructure();
+                result.append(members);
+            }
+            arg.endArray();
+            return result;
+        }
+
+        // Mixed tuples — bare (...) without array wrapper.
+        // e.g. sssssssbsa{sv} from fcitx5 → QVariantList.
+        if (sig.startsWith("(")) {
+            QVariantList members;
+            arg.beginStructure();
+            while (!arg.atEnd()) {
+                QVariant elem;
+                arg >> elem;
+                members.append(unwrapDbus(elem));
+            }
+            arg.endStructure();
+            return members;
+        }
+
+        // Generic dicts — a{...} with any key type.
+        // The a{s*} handler above already covers string keys; this is the
+        // fallback for dicts with other key types.
+        if (sig.startsWith("a{")) {
+            QVariantMap result;
+            arg.beginMap();
+            while (!arg.atEnd()) {
+                arg.beginMapEntry();
+                QVariant key, value;
+                arg >> key;
+                arg >> value;
+                result.insert(key.toString(), unwrapDbus(value));
+                arg.endMapEntry();
+            }
+            arg.endMap();
+            return result;
+        }
+
+        // Unrecognized signature — make the gap visible in logs.
+        qWarning("DBus: unwrapDbus: unsupported signature %s", qPrintable(sig));
         return v;
     }
     return v;
