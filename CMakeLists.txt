@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(dbusqml
-    VERSION 0.2.2
+    VERSION 0.2.3
     DESCRIPTION "Standalone D-Bus binding for QML"
     LANGUAGES CXX
 )

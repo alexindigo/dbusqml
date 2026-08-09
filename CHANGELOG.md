@@ -4,6 +4,17 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] — 2026-08-09
+
+### Fixed
+
+- **SIGSEGV on struct/tuple D-Bus calls** — `operator>>(QDBusArgument,
+  QVariant)` crashes inside libdbus when reading struct members. Replaced
+  with `currentSignature()` dispatch to the correct C++ `operator>>`
+  overload per member type. Complex types use `asVariant()` + recursion.
+  Fixes fcitx5 `AvailableInputMethods` (`a(ssssssb)`) and
+  `CurrentInputMethodInfo` (`sssssssbsa{sv}`) crashes.
+
 ## [0.2.2] — 2026-08-09
 
 ### Fixed
