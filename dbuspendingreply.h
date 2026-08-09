@@ -2,6 +2,7 @@
 
 #include <QDBusPendingCallWatcher>
 #include <QObject>
+#include <QPointer>
 #include <QVariant>
 #include <qqmlregistration.h>
 
@@ -38,7 +39,7 @@ signals:
 private:
     void onFinished(QDBusPendingCallWatcher *watcher);
 
-    QDBusPendingCallWatcher *m_watcher = nullptr;
+    QPointer<QDBusPendingCallWatcher> m_watcher;
     bool m_finished = false;
 
     // Cached after watcher finishes — makes the reply self-contained

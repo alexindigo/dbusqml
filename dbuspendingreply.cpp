@@ -19,7 +19,6 @@ void DBusPendingReply::setWatcher(QDBusPendingCallWatcher *watcher)
 {
     m_watcher = watcher;
     connect(watcher, &QDBusPendingCallWatcher::finished, this, &DBusPendingReply::onFinished);
-    connect(watcher, &QDBusPendingCallWatcher::finished, watcher, &QObject::deleteLater);
 }
 
 bool DBusPendingReply::isError() const
