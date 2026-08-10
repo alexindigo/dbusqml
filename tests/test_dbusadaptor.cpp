@@ -28,6 +28,10 @@ public:
         emit testStringChanged();
     }
 
+public slots:
+    int echoInt(int v) { return v; }
+    QString echoString(const QString &v) { return v; }
+
 signals:
     void testIntChanged();
     void testStringChanged();
@@ -89,6 +93,7 @@ private slots:
     void testGetAllExcludesInternal();
     void testWrongIfaceErrors();
     void testUnknownPropertyGetErrors();
+    void testGenerateXmlAccurateTypes();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -194,6 +199,22 @@ void TestDBusAdaptor::testUnknownPropertyGetErrors() {
 
     QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
     QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+}
+
+void TestDBusAdaptor::testGenerateXmlAccurateTypes() {
+    TestAdaptor adaptor;
+    adaptor.setIface(QStringLiteral("org.dbusqml.TestAdaptor"));
+    QString xml = adaptor.introspect(QString());
+
+    // Property types must be accurate
+    QVERIFY(xml.contains(QStringLiteral("type=\"i\""))); // testInt is int
+    QVERIFY(xml.contains(QStringLiteral("type=\"s\""))); // testString is QString
+
+    // Method args must all be advertised
+    QVERIFY(xml.contains(QStringLiteral("direction=\"in\"")));
+
+    // No empty interface name
+    QVERIFY(xml.contains(QStringLiteral("org.dbusqml.TestAdaptor")));
 }
 
 QTEST_GUILESS_MAIN(TestDBusAdaptor)

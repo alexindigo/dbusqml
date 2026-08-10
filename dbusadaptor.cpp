@@ -117,6 +117,10 @@ QDBusConnection DBusAdaptor::bus() const {
 }
 
 void DBusAdaptor::componentComplete() {
+    if (m_iface.isEmpty())
+        qmlInfo(this)
+            << "DBusAdaptor: iface is empty — introspection XML will have an empty interface name";
+
     QDBusConnection conn = bus();
     if (!conn.registerVirtualObject(m_path, this)) {
         qmlInfo(this) << "Failed to register object at" << m_path;
@@ -180,6 +184,41 @@ void DBusAdaptor::emitSignal(const QString &name, const QJSValue &arguments) {
     if (!conn.send(msg))
         qmlInfo(this) << conn.lastError();
 }
+// Map a QMetaType to its D-Bus type signature.
+static QString metaTypeToDbusSignature(int typeId) {
+    switch (typeId) {
+    case QMetaType::Bool:
+        return QStringLiteral("b");
+    case QMetaType::Int:
+        return QStringLiteral("i");
+    case QMetaType::UInt:
+        return QStringLiteral("u");
+    case QMetaType::Short:
+        return QStringLiteral("n");
+    case QMetaType::UShort:
+        return QStringLiteral("q");
+    case QMetaType::LongLong:
+        return QStringLiteral("x");
+    case QMetaType::ULongLong:
+        return QStringLiteral("t");
+    case QMetaType::Double:
+        return QStringLiteral("d");
+    case QMetaType::QString:
+        return QStringLiteral("s");
+    case QMetaType::QByteArray:
+        return QStringLiteral("ay");
+    case QMetaType::QStringList:
+        return QStringLiteral("as");
+    case QMetaType::QVariantList:
+        return QStringLiteral("av");
+    case QMetaType::QVariantMap:
+        return QStringLiteral("a{sv}");
+    case QMetaType::QVariant:
+        return QStringLiteral("v");
+    default:
+        return QStringLiteral("v");
+    }
+}
 
 QString DBusAdaptor::generateXml() const {
     const QMetaObject *meta = metaObject();
@@ -195,30 +234,7 @@ QString DBusAdaptor::generateXml() const {
             name == QStringLiteral("objectName"))
             continue;
 
-        QString dbusType = QStringLiteral("s"); // default string
-        switch (static_cast<int>(prop.typeId())) {
-        case QMetaType::Bool:
-            dbusType = QStringLiteral("b");
-            break;
-        case QMetaType::Int:
-        case QMetaType::UInt:
-            dbusType = QStringLiteral("i");
-            break;
-        case QMetaType::Double:
-            dbusType = QStringLiteral("d");
-            break;
-        case QMetaType::QString:
-            dbusType = QStringLiteral("s");
-            break;
-        case QMetaType::QVariantList:
-            dbusType = QStringLiteral("as");
-            break;
-        case QMetaType::QVariantMap:
-            dbusType = QStringLiteral("a{sv}");
-            break;
-        default:
-            break;
-        }
+        QString dbusType = metaTypeToDbusSignature(static_cast<int>(prop.typeId()));
 
         QString access = prop.isWritable() ? QStringLiteral("readwrite") : QStringLiteral("read");
         xml += QStringLiteral("    <property name=\"%1\" type=\"%2\" access=\"%3\"/>\n")
@@ -239,15 +255,21 @@ QString DBusAdaptor::generateXml() const {
 
         xml += QStringLiteral("    <method name=\"%1\">\n").arg(name);
 
+        // Emit an <arg> for EVERY parameter — typed params must be advertised
+        // so callers know the arity and types.
         const int inCount = method.parameterCount();
+        const auto paramTypes = method.parameterTypes();
         for (int j = 0; j < inCount; ++j) {
-            if (method.parameterTypes().at(j) == "QVariant") {
-                xml += QStringLiteral("      <arg name=\"arg%1\" type=\"v\" direction=\"in\"/>\n")
-                           .arg(j);
-            }
+            int typeId = QMetaType::fromName(paramTypes.at(j)).id();
+            QString dbusType = metaTypeToDbusSignature(typeId);
+            xml += QStringLiteral("      <arg name=\"arg%1\" type=\"%2\" direction=\"in\"/>\n")
+                       .arg(j)
+                       .arg(dbusType);
         }
         if (method.returnType() != QMetaType::Void) {
-            xml += QStringLiteral("      <arg name=\"result\" type=\"v\" direction=\"out\"/>\n");
+            QString retType = metaTypeToDbusSignature(method.returnType());
+            xml += QStringLiteral("      <arg name=\"result\" type=\"%1\" direction=\"out\"/>\n")
+                       .arg(retType);
         }
         xml += QStringLiteral("    </method>\n");
     }
