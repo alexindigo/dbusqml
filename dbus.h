@@ -105,6 +105,7 @@ private Q_SLOTS:
 private:
     void fetchProperties();
     void doIntrospect();
+    void scheduleIntrospect();
     void onIntrospectionReady(const QString &xml);
     void setupDynamicMethods(const QStringList &methodNames);
     void disconnectSignals();
@@ -123,6 +124,7 @@ private:
     bool m_serviceAvailable = false;
     bool m_propertiesEnabled = true;
     bool m_componentComplete = false;
+    bool m_introspectQueued = false;
     QDBusServiceWatcher *m_serviceWatcher = nullptr;
     Status m_status = Null;
     QDBusPendingCallWatcher *m_introspectWatcher = nullptr;

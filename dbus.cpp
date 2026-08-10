@@ -169,7 +169,7 @@ void DBusProxy::setService(const QString &v) {
     prepopulateFromCatalog();
 #endif
     if (!m_iface.isEmpty() && !m_path.isEmpty())
-        QTimer::singleShot(0, this, &DBusProxy::doIntrospect);
+        scheduleIntrospect();
 }
 
 void DBusProxy::setPath(const QString &v) {
@@ -181,7 +181,7 @@ void DBusProxy::setPath(const QString &v) {
     prepopulateFromCatalog();
 #endif
     if (!m_iface.isEmpty() && !m_service.isEmpty())
-        QTimer::singleShot(0, this, &DBusProxy::doIntrospect);
+        scheduleIntrospect();
 }
 
 void DBusProxy::setIface(const QString &v) {
@@ -196,16 +196,36 @@ void DBusProxy::setIface(const QString &v) {
 
     disconnectSignals();
 
-    if (m_introspectWatcher)
-        m_introspectWatcher->deleteLater();
-
     if (!m_service.isEmpty() && !m_path.isEmpty())
-        QTimer::singleShot(0, this, &DBusProxy::doIntrospect);
+        scheduleIntrospect();
+}
+
+void DBusProxy::scheduleIntrospect() {
+    if (!m_componentComplete) {
+        // C++-created proxy — no QML lifecycle, introspect directly.
+        doIntrospect();
+        return;
+    }
+    if (m_introspectQueued)
+        return;
+    m_introspectQueued = true;
+    QTimer::singleShot(0, this, [this] {
+        m_introspectQueued = false;
+        doIntrospect();
+    });
 }
 
 void DBusProxy::doIntrospect() {
     if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
         return;
+
+    // Cancel any in-flight watcher — a newer introspection request
+    // supersedes the old one.
+    if (m_introspectWatcher) {
+        m_introspectWatcher->disconnect(this);
+        m_introspectWatcher->deleteLater();
+        m_introspectWatcher = nullptr;
+    }
 
     QString cacheKey = m_service + QLatin1Char('|') + m_path;
     auto it = m_introspectCache.find(cacheKey);
@@ -224,6 +244,11 @@ void DBusProxy::doIntrospect() {
 
     connect(m_introspectWatcher, &QDBusPendingCallWatcher::finished, this,
             [this, cacheKey](QDBusPendingCallWatcher *w) {
+                // Ignore stale watchers — a newer introspection was started
+                if (w != m_introspectWatcher) {
+                    w->deleteLater();
+                    return;
+                }
                 m_introspectWatcher = nullptr;
                 QDBusPendingReply<QString> reply = *w;
                 if (!reply.isError()) {
@@ -243,7 +268,7 @@ void DBusProxy::setSignalsEnabled(bool v) {
     m_signalsEnabled = v;
     disconnectSignals();
     if (v && !m_service.isEmpty() && !m_path.isEmpty() && !m_iface.isEmpty())
-        QTimer::singleShot(0, this, &DBusProxy::doIntrospect);
+        scheduleIntrospect();
     emit signalsEnabledChanged();
 }
 
@@ -320,7 +345,7 @@ void DBusProxy::setConnection(DBusConnection *v) {
 
     // Re-introspect on the new bus to re-establish signal subscriptions
     if (!m_service.isEmpty() && !m_path.isEmpty() && !m_iface.isEmpty())
-        QTimer::singleShot(0, this, &DBusProxy::doIntrospect);
+        scheduleIntrospect();
 }
 
 DBusConnection *DBusProxy::connectToBus(const QString &address) {
