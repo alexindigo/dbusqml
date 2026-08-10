@@ -334,6 +334,7 @@ void DBusProxy::setConnection(DBusConnection *v) {
         return;
 
     disconnectSignals();
+    m_introspectCache.clear();
 
     m_conn = v;
     if (v) {

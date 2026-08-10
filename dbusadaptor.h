@@ -3,6 +3,7 @@
 #include <QDBusVirtualObject>
 #include <QJSValue>
 #include <QObject>
+#include <QPointer>
 #include <QQmlParserStatus>
 #include <qqmlregistration.h>
 
@@ -32,7 +33,7 @@ public:
     QString iface() const { return m_iface; }
     void setIface(const QString &v);
 
-    DBusConnection *connection() const { return m_conn; }
+    DBusConnection *connection() const { return m_conn.data(); }
     void setConnection(DBusConnection *v);
 
     // QQmlParserStatus
@@ -59,5 +60,5 @@ private:
     QString m_service;
     QString m_path;
     QString m_iface;
-    DBusConnection *m_conn = nullptr;
+    QPointer<DBusConnection> m_conn;
 };
