@@ -4,6 +4,22 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] — 2026-08-10
+
+### Fixed
+
+- **Nested containers as real JS Arrays** — `DBusPendingReply`'s
+  `value`/`values` Q_PROPERTYs now return `QJSValue` with nested
+  containers converted via `variantToJs()`. QML receives real JS
+  `Array`/`Object` instances with working `Array.isArray`, `.map`,
+  `.filter`, etc. C++ consumers use new `valueVariant()`/`valuesVariant()`
+  accessors for raw QVariant data.
+- **Struct array grouping** — per-struct member lists wrapped with
+  `QVariant::fromValue()` to prevent `QList::append` concatenation.
+- **Late-subscriber race on `finished`** — emitted via
+  `Qt::QueuedConnection` so synchronous `reply.finished.connect()` after
+  `call()` always lands before the signal fires.
+
 ## [0.2.3] — 2026-08-09
 
 ### Fixed
