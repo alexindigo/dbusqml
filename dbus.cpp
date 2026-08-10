@@ -14,6 +14,7 @@
 #include <QDBusReply>
 #include <QDBusVariant>
 #include <QQmlEngine>
+#include <QRegularExpression>
 #include <QSet>
 #include <QStandardPaths>
 #include <QTimer>
@@ -490,10 +491,6 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
 void DBusProxy::setupDynamicMethods(const QStringList &methodNames) {
     auto *engine = qmlEngine(this);
 
-    // Per-proxy helper key — kept stable across re-introspections so we can
-    // reliably remove the prior helper before installing a new one.
-    QString helperKey = QStringLiteral("__dbus_helper_%1").arg(reinterpret_cast<quintptr>(this));
-
     // 1. Drop stale dynamic method keys from the property map.
     //    Without this, switching iface leaves the old iface's methods
     //    live and callable, dispatching D-Bus method-not-found errors.
@@ -504,34 +501,39 @@ void DBusProxy::setupDynamicMethods(const QStringList &methodNames) {
     // 2. Release cached QJSValues held from prior introspection.
     m_cachedFunctions.clear();
 
-    // 3. Remove the previous helper QObject from the engine global so it
-    //    becomes eligible for GC. Safe even if none exists.
-    if (engine)
-        engine->globalObject().deleteProperty(helperKey);
-
     if (methodNames.isEmpty())
         return;
     if (!engine)
         return;
 
+    // Shared factory — evaluated once per proxy, method names passed as
+    // VALUES (not interpolated into JS source). Eliminates JS injection
+    // via remote-provided method names.
+    static const char kFactorySrc[] =
+        "(function(helper, name) {"
+        "  return function(...args) { return helper.callMethod(name, args); };"
+        "})";
+    QJSValue factory = engine->evaluate(QString::fromLatin1(kFactorySrc));
+    if (factory.isError()) {
+        qWarning("DBusProxy: failed to evaluate method factory: %s",
+                 qPrintable(factory.toString()));
+        return;
+    }
+
     auto *helper = new DbusMethodHelper(this, &m_methodArgTypes, this);
     QJSValue helperObj = engine->newQObject(helper);
-    engine->globalObject().setProperty(helperKey, helperObj);
-
-    QString jsTemplate = QStringLiteral("(function() {"
-                                        "  var $g = Function('return this')();"
-                                        "  var helperKey = '%1';"
-                                        "  var methodName = '%2';"
-                                        "  return function(...args) {"
-                                        "    return $g[helperKey].callMethod(methodName, args);"
-                                        "  };"
-                                        "})()");
 
     for (const QString &name : methodNames) {
         if (name.isEmpty())
             continue;
 
-        QJSValue fn = engine->evaluate(jsTemplate.arg(helperKey, name));
+        // Validate: D-Bus member names must be valid identifiers
+        if (!name.contains(QRegularExpression(QStringLiteral("^[A-Za-z_][A-Za-z0-9_]*$")))) {
+            qWarning("DBusProxy: skipping invalid method name '%s'", qPrintable(name));
+            continue;
+        }
+
+        QJSValue fn = factory.call({helperObj, QJSValue(name)});
         if (fn.isError()) {
             qWarning("DBusProxy: failed to create method '%s': %s", qPrintable(name),
                      qPrintable(fn.toString()));
