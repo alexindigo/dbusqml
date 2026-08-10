@@ -104,29 +104,9 @@ void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
         }
 
         m_cached = true;
-        // Clean up the watcher — it's done. deleteLater is safe here
-        // because onFinished is called from the watcher's own signal,
-        // and deleteLater defers deletion to the next event loop pass.
-        m_watcher->deleteLater();
         m_watcher = nullptr;
     }
 
     m_finished = true;
-    // Queue the emission: a synchronous emit here can outrun a caller's
-    // `reply.finished.connect(...)` on fast local-bus round trips (the reply
-    // arrives before the QML connect line runs). Posting it guarantees the
-    // synchronous connect-after-call pattern always lands first.
-    QMetaObject::invokeMethod(this, "finished", Qt::QueuedConnection);
-    // After finished is delivered, hand ownership to the JS GC so
-    // fire-and-forget replies are collected. Posted second so it runs
-    // after finished — QML handlers that grab a reference keep it alive.
-    QMetaObject::invokeMethod(
-        this,
-        [this]() {
-            if (m_engine) {
-                setParent(nullptr);
-                QQmlEngine::setObjectOwnership(this, QQmlEngine::JavaScriptOwnership);
-            }
-        },
-        Qt::QueuedConnection);
+    emit finished();
 }
