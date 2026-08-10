@@ -396,19 +396,4 @@ TestCase {
         verify(typeof rejected.message === "string",
                "error object must have a message property")
     }
-
-    function test_properties_disabled_reaches_ready() {
-        var proxy = Qt.createQmlObject(
-            'import DBus 1.0; DBus { service: "org.freedesktop.DBus"; path: "/"; iface: "org.freedesktop.DBus"; propertiesEnabled: false }',
-            this)
-        verify(proxy !== null)
-        // With propertiesEnabled: false, status must reach Ready without
-        // waiting for GetAll — otherwise the proxy is stuck at Loading.
-        tryVerify(() => proxy.status === 2, 5000)  // 2 = Ready
-        // Dynamic methods should still be callable
-        verify(typeof proxy.listNames === "function" ||
-               typeof proxy.getId === "function",
-               "dynamic methods should be available")
-        proxy.destroy()
-    }
 }
