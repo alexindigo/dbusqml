@@ -5,6 +5,7 @@
 #include <QDBusPendingReply>
 #include <QDBusReply>
 #include <QDBusVariant>
+#include <QQmlEngine>
 
 DBusPendingReply::DBusPendingReply(QObject *parent)
     : QObject(parent)
@@ -44,7 +45,21 @@ DBusError DBusPendingReply::error() const
     return DBusError(QDBusError(QDBusError::InternalError, "No pending call"));
 }
 
-QVariant DBusPendingReply::value() const
+QJSValue DBusPendingReply::value() const
+{
+    if (m_jsCached)
+        return m_jsValue;
+    return {};
+}
+
+QJSValue DBusPendingReply::values() const
+{
+    if (m_jsCached)
+        return m_jsValues;
+    return {};
+}
+
+QVariant DBusPendingReply::valueVariant() const
 {
     if (m_cached)
         return m_value;
@@ -59,7 +74,7 @@ QVariant DBusPendingReply::value() const
     return unwrapDbus(val);
 }
 
-QVariantList DBusPendingReply::values() const
+QVariantList DBusPendingReply::valuesVariant() const
 {
     if (m_cached)
         return m_values;
@@ -89,6 +104,17 @@ void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher)
                 args[i] = unwrapDbus(args[i]);
             m_values = args;
             m_value = args.isEmpty() ? QVariant() : args.first();
+
+            // Convert to real JS Array/Object instances so QML gets
+            // working Array.isArray, .map, .filter, etc. — not the
+            // array-like QVariantList wrappers the engine produces
+            // by default.
+            QQmlEngine *engine = m_engine;
+            if (engine) {
+                m_jsValue = variantToJs(engine, m_value);
+                m_jsValues = variantToJs(engine, QVariant::fromValue(m_values));
+                m_jsCached = true;
+            }
         }
 
         m_cached = true;

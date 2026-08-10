@@ -16,7 +16,7 @@
 // and maps so the JS side receives real Array / Object instances (with a
 // working Array.isArray and iterable/spread semantics), not the array-like
 // QVariantList wrappers QQmlEngine::toScriptValue produces by default.
-static QJSValue variantToJs(QQmlEngine *engine, const QVariant &v)
+QJSValue variantToJs(QQmlEngine *engine, const QVariant &v)
 {
     const int t = v.userType();
     if (t == qMetaTypeId<QVariantList>() || t == qMetaTypeId<QStringList>()) {
@@ -306,6 +306,7 @@ DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message)
     auto pending = m_connection.asyncCall(qmsg);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
+        reply->setEngine(qmlEngine(this));
     reply->setWatcher(watcher);
     return reply;
 }
@@ -341,10 +342,10 @@ void DBusConnection::asyncCall(const DBusMessage &message,
                         reject.call({ errObj });
                     }
                 } else if (resolve.isCallable()) {
-                    QVariant unwrapped = unwrapDbus(reply->value());
+                    QVariant unwrapped = unwrapDbus(reply->valueVariant());
                     QJSValue val = engine
                         ? variantToJs(engine, unwrapped)
-                        : QJSValue(reply->value().toString());
+                        : QJSValue(reply->valueVariant().toString());
                     resolve.call({ val });
                 }
             });

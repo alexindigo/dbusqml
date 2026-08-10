@@ -3,6 +3,7 @@
 #include <QDBusConnection>
 #include <QJSValue>
 #include <QObject>
+#include <QQmlEngine>
 #include <QVariantList>
 #include <qqmlregistration.h>
 
@@ -15,6 +16,12 @@ QVariant toDbusVariant(const QVariant &v);
 // containers (QVariantMap, QVariantList) so QML can traverse them as
 // JavaScript objects. Handles nested a{sv}, a{ss}, av, as, ao, etc.
 QVariant unwrapDbus(const QVariant &v);
+
+// Convert a QVariant into a native JS value, recursively unwrapping lists
+// and maps so the JS side receives real Array / Object instances (with a
+// working Array.isArray and iterable/spread semantics), not the array-like
+// QVariantList wrappers QQmlEngine::toScriptValue produces by default.
+QJSValue variantToJs(QQmlEngine *engine, const QVariant &v);
 
 class busType {
     Q_GADGET
