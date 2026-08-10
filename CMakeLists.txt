@@ -34,6 +34,8 @@ set(DBUSQML_SOURCES
     dbusmessage.h
     dbus.cpp
     dbus.h
+    dbusintrospection.cpp
+    dbusintrospection.h
     dbuspendingreply.cpp
     dbuspendingreply.h
     dbustypes.h
@@ -158,8 +160,16 @@ if(BUILD_TEST_MODE)
     target_include_directories(test_dbus PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_dbus PRIVATE Qt6::Core Qt6::Qml Qt6::Test Qt6::DBus dbusqml)
 
+    add_executable(test_introspect
+        tests/test_introspection.cpp
+        dbusintrospection.cpp
+    )
+    target_include_directories(test_introspect PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_introspect PRIVATE Qt6::Core Qt6::Test)
+
     enable_testing()
     add_test(NAME test_types COMMAND test_types)
+    add_test(NAME test_introspect COMMAND test_introspect)
     add_test(NAME test_dbus COMMAND dbus-run-session -- $<TARGET_FILE:test_dbus>)
     set_tests_properties(test_dbus PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
