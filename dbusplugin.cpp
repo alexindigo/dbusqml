@@ -7,10 +7,10 @@ void qml_register_types_DBus();
 
 // Type converter registrations that must run when the library is loaded.
 // Called both from the static initializer below and from the plugin constructor.
-static void registerTypeConverters()
-{
+static void registerTypeConverters() {
     static bool registered = false;
-    if (registered) return;
+    if (registered)
+        return;
     registered = true;
 
     qDBusRegisterMetaType<QStringList>();
@@ -51,7 +51,11 @@ static void registerTypeConverters()
 }
 
 // Static initializer — runs when the shared library is loaded
-namespace { struct Init { Init() { registerTypeConverters(); } } _init; }
+namespace {
+struct Init {
+    Init() { registerTypeConverters(); }
+} _init;
+} // namespace
 
 class DBusPlugin : public QQmlEngineExtensionPlugin {
     Q_OBJECT
@@ -59,9 +63,7 @@ class DBusPlugin : public QQmlEngineExtensionPlugin {
     Q_DISABLE_COPY_MOVE(DBusPlugin)
 
 public:
-    DBusPlugin(QObject *parent = nullptr)
-        : QQmlEngineExtensionPlugin(parent)
-    {
+    DBusPlugin(QObject *parent = nullptr) : QQmlEngineExtensionPlugin(parent) {
         registerTypeConverters();
         volatile auto registration = &qml_register_types_DBus;
         Q_UNUSED(registration);

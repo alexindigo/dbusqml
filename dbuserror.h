@@ -15,9 +15,7 @@ class DBusError {
 public:
     explicit DBusError() = default;
     explicit DBusError(const QDBusError &err)
-        : m_isValid(err.isValid())
-        , m_name(err.name())
-        , m_message(err.message()) {}
+        : m_isValid(err.isValid()), m_name(err.name()), m_message(err.message()) {}
 
     bool isValid() const { return m_isValid; }
     QString name() const { return m_name; }

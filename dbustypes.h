@@ -9,36 +9,32 @@
 
 class QDBusArgument;
 
-#define DBUS_QML_TYPE(TYPE, NAME, CTOR, STORE, SIG)                  \
-    class TYPE {                                                      \
-        Q_GADGET                                                      \
-        QML_VALUE_TYPE(NAME)                                          \
-        QML_CONSTRUCTIBLE_VALUE                                       \
-        Q_PROPERTY(STORE value MEMBER value)                          \
-    public:                                                           \
-        explicit TYPE() {}                                            \
-        Q_INVOKABLE explicit TYPE(CTOR v) : value(v) {}               \
-        operator STORE() const { return value; }                      \
-        Q_INVOKABLE QString toString() const {                        \
-            return QVariant::fromValue(value).toString();             \
-        }                                                             \
-        operator QVariant() const {                                   \
-            return QVariant::fromValue(*this);                        \
-        }                                                             \
-        STORE value;                                                  \
+#define DBUS_QML_TYPE(TYPE, NAME, CTOR, STORE, SIG)                                                \
+    class TYPE {                                                                                   \
+        Q_GADGET                                                                                   \
+        QML_VALUE_TYPE(NAME)                                                                       \
+        QML_CONSTRUCTIBLE_VALUE                                                                    \
+        Q_PROPERTY(STORE value MEMBER value)                                                       \
+    public:                                                                                        \
+        explicit TYPE() {}                                                                         \
+        Q_INVOKABLE explicit TYPE(CTOR v) : value(v) {}                                            \
+        operator STORE() const { return value; }                                                   \
+        Q_INVOKABLE QString toString() const { return QVariant::fromValue(value).toString(); }     \
+        operator QVariant() const { return QVariant::fromValue(*this); }                           \
+        STORE value;                                                                               \
     };
 
 namespace DBus {
 
 DBUS_QML_TYPE(Uint32, uint32, uint, uint, "u")
-DBUS_QML_TYPE(Int32,  int32,  int,   int,  "i")
+DBUS_QML_TYPE(Int32, int32, int, int, "i")
 DBUS_QML_TYPE(Uint16, uint16, uint, ushort, "q")
-DBUS_QML_TYPE(Int16,  int16,  int,   short, "n")
+DBUS_QML_TYPE(Int16, int16, int, short, "n")
 DBUS_QML_TYPE(Uint64, uint64, quint64, quint64, "t")
-DBUS_QML_TYPE(Int64,  int64,  qint64, qint64,  "x")
+DBUS_QML_TYPE(Int64, int64, qint64, qint64, "x")
 DBUS_QML_TYPE(Bool, boolean, bool, bool, "b")
-DBUS_QML_TYPE(Double, double, double, double,  "d")
-DBUS_QML_TYPE(Byte,   byte,   uint,   uchar,   "y")
+DBUS_QML_TYPE(Double, double, double, double, "d")
+DBUS_QML_TYPE(Byte, byte, uint, uchar, "y")
 DBUS_QML_TYPE(String, string, QString, QString, "s")
 
 class ObjectPath {

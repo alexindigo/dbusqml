@@ -9,8 +9,7 @@ class TestDBusTypes : public QObject {
     Q_OBJECT
 
 private slots:
-    void testUint32()
-    {
+    void testUint32() {
         DBus::Uint32 v(42);
         QCOMPARE(v.value, 42u);
         QCOMPARE(v.toString(), QStringLiteral("42"));
@@ -25,39 +24,33 @@ private slots:
         QVERIFY(asVar.canConvert<DBus::Uint32>());
     }
 
-    void testInt32()
-    {
+    void testInt32() {
         DBus::Int32 v(-42);
         QCOMPARE(v.value, -42);
         QCOMPARE(v.toString(), QStringLiteral("-42"));
     }
 
-    void testUint16()
-    {
+    void testUint16() {
         DBus::Uint16 v(42);
         QCOMPARE(v.value, static_cast<ushort>(42));
     }
 
-    void testInt16()
-    {
+    void testInt16() {
         DBus::Int16 v(-42);
         QCOMPARE(v.value, static_cast<short>(-42));
     }
 
-    void testUint64()
-    {
+    void testUint64() {
         DBus::Uint64 v(Q_UINT64_C(18446744073));
         QCOMPARE(v.value, Q_UINT64_C(18446744073));
     }
 
-    void testInt64()
-    {
+    void testInt64() {
         DBus::Int64 v(Q_INT64_C(-42));
         QCOMPARE(v.value, Q_INT64_C(-42));
     }
 
-    void testBool()
-    {
+    void testBool() {
         DBus::Bool vTrue(true);
         DBus::Bool vFalse(false);
         QCOMPARE(vTrue.value, true);
@@ -71,8 +64,7 @@ private slots:
         QVERIFY(asVar.canConvert<DBus::Bool>());
     }
 
-    void testDouble()
-    {
+    void testDouble() {
         DBus::Double v(3.14);
         QCOMPARE(v.value, 3.14);
         QCOMPARE(v.toString(), QStringLiteral("3.14"));
@@ -81,15 +73,13 @@ private slots:
         QCOMPARE(d, 3.14);
     }
 
-    void testByte()
-    {
+    void testByte() {
         DBus::Byte v(255);
         QCOMPARE(v.value, static_cast<uchar>(255));
         QVERIFY(!v.toString().isEmpty());
     }
 
-    void testString()
-    {
+    void testString() {
         DBus::String v("hello");
         QCOMPARE(v.value, QStringLiteral("hello"));
         QCOMPARE(v.toString(), QStringLiteral("hello"));
@@ -101,8 +91,7 @@ private slots:
         QVERIFY(vEmpty.value.isEmpty());
     }
 
-    void testObjectPath()
-    {
+    void testObjectPath() {
         DBus::ObjectPath v("/org/freedesktop/UPower");
         QCOMPARE(v.value.path(), QStringLiteral("/org/freedesktop/UPower"));
         QCOMPARE(v.toString(), QStringLiteral("/org/freedesktop/UPower"));
@@ -114,8 +103,7 @@ private slots:
         QCOMPARE(qpath.path(), QStringLiteral("/org/freedesktop/UPower"));
     }
 
-    void testSignature()
-    {
+    void testSignature() {
         DBus::Signature v("ssss");
         QCOMPARE(v.value.signature(), QStringLiteral("ssss"));
         QCOMPARE(v.toString(), QStringLiteral("ssss"));
@@ -124,8 +112,7 @@ private slots:
         QVERIFY(vDefault.value.signature().isEmpty());
     }
 
-    void testVariant()
-    {
+    void testVariant() {
         DBus::Variant v(QStringLiteral("test"));
         QCOMPARE(v.value.variant().toString(), QStringLiteral("test"));
         QCOMPARE(v.toString(), QStringLiteral("test"));
@@ -140,8 +127,7 @@ private slots:
         QVERIFY(!vDefault.value.variant().isValid());
     }
 
-    void testDict()
-    {
+    void testDict() {
         QVariantMap map;
         map["key1"] = "value1";
         map["key2"] = 42;
@@ -156,8 +142,7 @@ private slots:
         QVERIFY(dEmpty.value.isEmpty());
     }
 
-    void testDBusMessageDefaults()
-    {
+    void testDBusMessageDefaults() {
         DBusMessage msg;
         QVERIFY(msg.service().isEmpty());
         QVERIFY(msg.path().isEmpty());
@@ -167,8 +152,7 @@ private slots:
         QVERIFY(msg.signature().isEmpty());
     }
 
-    void testDBusMessageSetters()
-    {
+    void testDBusMessageSetters() {
         DBusMessage msg;
         msg.setService("org.freedesktop.DBus");
         msg.setPath("/org/freedesktop/DBus");
@@ -189,8 +173,7 @@ private slots:
         QCOMPARE(msg.arguments()[0].toString(), QStringLiteral("test"));
     }
 
-    void testDBusMessageFromMap()
-    {
+    void testDBusMessageFromMap() {
         QVariantMap map;
         map["service"] = "org.freedesktop.login1";
         map["path"] = "/org/freedesktop/login1";
@@ -207,16 +190,14 @@ private slots:
         QCOMPARE(msg.arguments().size(), 4);
     }
 
-    void testDBusMessageFromEmptyMap()
-    {
+    void testDBusMessageFromEmptyMap() {
         QVariantMap empty;
         DBusMessage msg(empty);
         QVERIFY(msg.service().isEmpty());
         QVERIFY(msg.arguments().isEmpty());
     }
 
-    void testDBusError()
-    {
+    void testDBusError() {
         DBusError err;
         QCOMPARE(err.isValid(), false);
         QVERIFY(err.name().isEmpty());

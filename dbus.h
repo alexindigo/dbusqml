@@ -22,12 +22,16 @@ class DBusProxy : public QQmlPropertyMap, public QQmlParserStatus {
     Q_PROPERTY(QString service READ service WRITE setService NOTIFY serviceChanged)
     Q_PROPERTY(QString path READ path WRITE setPath NOTIFY pathChanged)
     Q_PROPERTY(QString iface READ iface WRITE setIface NOTIFY ifaceChanged)
-    Q_PROPERTY(DBusConnection *connection READ connection WRITE setConnection NOTIFY connectionChanged)
+    Q_PROPERTY(
+        DBusConnection *connection READ connection WRITE setConnection NOTIFY connectionChanged)
     Q_PROPERTY(Status status READ status NOTIFY statusChanged)
-    Q_PROPERTY(bool signalsEnabled READ signalsEnabled WRITE setSignalsEnabled NOTIFY signalsEnabledChanged)
-    Q_PROPERTY(bool watchServiceStatus READ watchServiceStatus WRITE setWatchServiceStatus NOTIFY watchServiceStatusChanged)
+    Q_PROPERTY(bool signalsEnabled READ signalsEnabled WRITE setSignalsEnabled NOTIFY
+                   signalsEnabledChanged)
+    Q_PROPERTY(bool watchServiceStatus READ watchServiceStatus WRITE setWatchServiceStatus NOTIFY
+                   watchServiceStatusChanged)
     Q_PROPERTY(bool serviceAvailable READ serviceAvailable NOTIFY serviceAvailableChanged)
-    Q_PROPERTY(bool propertiesEnabled READ propertiesEnabled WRITE setPropertiesEnabled NOTIFY propertiesEnabledChanged)
+    Q_PROPERTY(bool propertiesEnabled READ propertiesEnabled WRITE setPropertiesEnabled NOTIFY
+                   propertiesEnabledChanged)
     Q_PROPERTY(bool reactiveBindingsSupported READ hasReactiveBindings CONSTANT)
 
 public:
@@ -62,8 +66,8 @@ public:
     Q_INVOKABLE static DBusConnection *connectToBus(const QString &address);
     Q_INVOKABLE static void reloadTypes();
     Q_INVOKABLE static void emitSignal(const QString &service, const QString &path,
-                                        const QString &iface, const QString &name,
-                                        const QVariantList &args = {});
+                                       const QString &iface, const QString &name,
+                                       const QVariantList &args = {});
 
     bool signalsEnabled() const { return m_signalsEnabled; }
     void setSignalsEnabled(bool v);
@@ -122,7 +126,8 @@ private:
     Status m_status = Null;
     QDBusPendingCallWatcher *m_introspectWatcher = nullptr;
     QList<QJSValue> m_cachedFunctions;
-    QStringList m_dynamicMethodKeys;   // qml-cased method names currently installed on the property map
+    QStringList
+        m_dynamicMethodKeys; // qml-cased method names currently installed on the property map
     QHash<QString, QString> m_introspectCache;
     QHash<QString, QStringList> m_methodArgTypes;
 };

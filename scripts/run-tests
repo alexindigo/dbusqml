@@ -4,7 +4,6 @@ set -euo pipefail
 BUILD_DIR="${1:-build-debug}"
 COVERAGE_DIR="coverage"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 LCOV_OPTS="--ignore-errors inconsistent,empty"
 REMOVE_OPTS="--ignore-errors unused,inconsistent,empty"
@@ -21,17 +20,17 @@ run_pipeline() {
     echo ""
     echo "=== ${label} ==="
 
-    lcov --directory "${BUILD_DIR}" -z ${LCOV_OPTS} > /dev/null 2>&1
+    lcov --directory "${BUILD_DIR}" -z "${LCOV_OPTS}" >/dev/null 2>&1
 
     eval "${test_command}" || exit_code=$?
 
     if lcov --capture --directory "${BUILD_DIR}" \
-            -o "${COVERAGE_DIR}/${prefix}_raw.info" ${LCOV_OPTS} > /dev/null 2>&1 \
-            && [ -s "${COVERAGE_DIR}/${prefix}_raw.info" ]; then
+        -o "${COVERAGE_DIR}/${prefix}_raw.info" "${LCOV_OPTS}" >/dev/null 2>&1 &&
+        [ -s "${COVERAGE_DIR}/${prefix}_raw.info" ]; then
         lcov --remove "${COVERAGE_DIR}/${prefix}_raw.info" "${EXCLUDE_PATTERNS[@]}" \
-             -o "${COVERAGE_DIR}/${prefix}_clean.info" ${REMOVE_OPTS} > /dev/null 2>&1
+            -o "${COVERAGE_DIR}/${prefix}_clean.info" "${REMOVE_OPTS}" >/dev/null 2>&1
         genhtml "${COVERAGE_DIR}/${prefix}_clean.info" \
-                --output-directory "${COVERAGE_DIR}/html_${prefix}" > /dev/null 2>&1
+            --output-directory "${COVERAGE_DIR}/html_${prefix}" >/dev/null 2>&1
         echo "  Coverage: ${COVERAGE_DIR}/html_${prefix}/index.html"
     else
         echo "  (no coverage data)"
@@ -67,9 +66,9 @@ for f in "${COVERAGE_DIR}"/cpp_clean.info "${COVERAGE_DIR}"/dbus_clean.info "${C
     [ -f "$f" ] && COMBINE_FILES+=(-a "$f")
 done
 if [ ${#COMBINE_FILES[@]} -ge 2 ]; then
-    lcov "${COMBINE_FILES[@]}" -o "${COVERAGE_DIR}/combined.info" ${LCOV_OPTS} > /dev/null 2>&1
+    lcov "${COMBINE_FILES[@]}" -o "${COVERAGE_DIR}/combined.info" "${LCOV_OPTS}" >/dev/null 2>&1
     genhtml "${COVERAGE_DIR}/combined.info" \
-            --output-directory "${COVERAGE_DIR}/html_combined" > /dev/null 2>&1
+        --output-directory "${COVERAGE_DIR}/html_combined" >/dev/null 2>&1
     echo ""
     echo "Combined coverage: ${COVERAGE_DIR}/html_combined/index.html"
 fi

@@ -16,7 +16,8 @@ class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
     Q_PROPERTY(QString service READ service WRITE setService NOTIFY serviceChanged)
     Q_PROPERTY(QString path READ path WRITE setPath NOTIFY pathChanged)
     Q_PROPERTY(QString iface READ iface WRITE setIface NOTIFY ifaceChanged)
-    Q_PROPERTY(DBusConnection *connection READ connection WRITE setConnection NOTIFY connectionChanged)
+    Q_PROPERTY(
+        DBusConnection *connection READ connection WRITE setConnection NOTIFY connectionChanged)
 
 public:
     explicit DBusAdaptor(QObject *parent = nullptr);
@@ -42,7 +43,8 @@ public:
     QString introspect(const QString &path) const override;
     bool handleMessage(const QDBusMessage &message, const QDBusConnection &connection) override;
 
-    Q_INVOKABLE void emitSignal(const QString &name, const QJSValue &arguments = QJSValue::UndefinedValue);
+    Q_INVOKABLE void emitSignal(const QString &name,
+                                const QJSValue &arguments = QJSValue::UndefinedValue);
 
 Q_SIGNALS:
     void serviceChanged();

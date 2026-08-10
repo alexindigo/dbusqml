@@ -37,14 +37,14 @@ class DBusConnection : public QObject {
     Q_DISABLE_COPY_MOVE(DBusConnection)
 
 public:
-    explicit DBusConnection(const QDBusConnection &conn, const QString &name, QObject *parent = nullptr);
+    explicit DBusConnection(const QDBusConnection &conn, const QString &name,
+                            QObject *parent = nullptr);
     ~DBusConnection() override;
 
     Q_INVOKABLE static DBusConnection *connectToBus(const QString &address);
 
     Q_INVOKABLE DBusPendingReply *asyncCall(const DBusMessage &message);
-    Q_INVOKABLE void asyncCall(const DBusMessage &message,
-                               const QJSValue &resolve,
+    Q_INVOKABLE void asyncCall(const DBusMessage &message, const QJSValue &resolve,
                                const QJSValue &reject);
 
     operator QDBusConnection() const { return m_connection; }

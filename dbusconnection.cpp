@@ -16,8 +16,7 @@
 // and maps so the JS side receives real Array / Object instances (with a
 // working Array.isArray and iterable/spread semantics), not the array-like
 // QVariantList wrappers QQmlEngine::toScriptValue produces by default.
-QJSValue variantToJs(QQmlEngine *engine, const QVariant &v)
-{
+QJSValue variantToJs(QQmlEngine *engine, const QVariant &v) {
     const int t = v.userType();
     if (t == qMetaTypeId<QVariantList>() || t == qMetaTypeId<QStringList>()) {
         const QVariantList list = v.toList();
@@ -39,26 +38,85 @@ QJSValue variantToJs(QQmlEngine *engine, const QVariant &v)
 // Read a single element from a QDBusArgument using the correct type
 // based on the current signature. Avoids operator>>(QDBusArgument,
 // QVariant) which crashes inside libdbus for struct members.
-static QVariant readBySignature(const QDBusArgument &arg)
-{
+static QVariant readBySignature(const QDBusArgument &arg) {
     const QString sig = arg.currentSignature();
 
     // Basic types — single char signatures
-    if (sig == "y") { uchar v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "b") { bool v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "n") { short v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "q") { ushort v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "i") { int v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "u") { uint v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "x") { qint64 v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "t") { quint64 v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "d") { double v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "s") { QString v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "o") { QDBusObjectPath v; arg >> v; return QVariant::fromValue(v.path()); }
-    if (sig == "g") { QDBusSignature v; arg >> v; return QVariant::fromValue(v.signature()); }
-    if (sig == "v") { QDBusVariant v; arg >> v; return unwrapDbus(v.variant()); }
-    if (sig == "ay") { QByteArray v; arg >> v; return QVariant::fromValue(v); }
-    if (sig == "as") { QStringList v; arg >> v; return QVariant::fromValue(v); }
+    if (sig == "y") {
+        uchar v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "b") {
+        bool v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "n") {
+        short v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "q") {
+        ushort v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "i") {
+        int v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "u") {
+        uint v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "x") {
+        qint64 v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "t") {
+        quint64 v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "d") {
+        double v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "s") {
+        QString v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "o") {
+        QDBusObjectPath v;
+        arg >> v;
+        return QVariant::fromValue(v.path());
+    }
+    if (sig == "g") {
+        QDBusSignature v;
+        arg >> v;
+        return QVariant::fromValue(v.signature());
+    }
+    if (sig == "v") {
+        QDBusVariant v;
+        arg >> v;
+        return unwrapDbus(v.variant());
+    }
+    if (sig == "ay") {
+        QByteArray v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
+    if (sig == "as") {
+        QStringList v;
+        arg >> v;
+        return QVariant::fromValue(v);
+    }
 
     // Complex types — read as variant, unwrapDbus handles the recursion
     QVariant v = arg.asVariant();
@@ -67,9 +125,7 @@ static QVariant readBySignature(const QDBusArgument &arg)
 
 // Convert a QList<T> of any demarshalable type to QVariantList.
 // Each element is recursively unwrapped via unwrapDbus.
-template<typename T>
-QVariantList toVariantList(const QList<T> &list)
-{
+template <typename T> QVariantList toVariantList(const QList<T> &list) {
     QVariantList out;
     out.reserve(list.size());
     for (const T &elem : list)
@@ -80,8 +136,7 @@ QVariantList toVariantList(const QList<T> &list)
 // Recursively unwrap QDBusVariant / QDBusArgument values into plain QVariant
 // containers so QML can traverse them as JavaScript objects. Handles nested
 // a{sv}, a{ss}, av, as, ao, etc.
-QVariant unwrapDbus(const QVariant &v)
-{
+QVariant unwrapDbus(const QVariant &v) {
     if (v.userType() == qMetaTypeId<QDBusVariant>())
         return unwrapDbus(v.value<QDBusVariant>().variant());
 
@@ -118,7 +173,8 @@ QVariant unwrapDbus(const QVariant &v)
             arg >> paths;
             QVariantList out;
             out.reserve(paths.size());
-            for (const auto &p : paths) out.append(p.path());
+            for (const auto &p : paths)
+                out.append(p.path());
             return out;
         }
         if (sig == "as") {
@@ -126,7 +182,8 @@ QVariant unwrapDbus(const QVariant &v)
             arg >> list;
             QVariantList out;
             out.reserve(list.size());
-            for (const auto &s : list) out.append(s);
+            for (const auto &s : list)
+                out.append(s);
             return out;
         }
         if (sig == "ay") {
@@ -195,20 +252,73 @@ QVariant unwrapDbus(const QVariant &v)
         // C++ type via the signature character.
         if (sig.startsWith("a") && sig.length() == 2) {
             switch (sig[1].toLatin1()) {
-            case 'y': { QList<uchar> l; arg >> l; return toVariantList(l); }
-            case 'b': { QList<bool> l; arg >> l; return toVariantList(l); }
-            case 'n': { QList<short> l; arg >> l; return toVariantList(l); }
-            case 'q': { QList<ushort> l; arg >> l; return toVariantList(l); }
-            case 'i': { QList<int> l; arg >> l; return toVariantList(l); }
-            case 'u': { QList<uint> l; arg >> l; return toVariantList(l); }
-            case 'x': { QList<qint64> l; arg >> l; return toVariantList(l); }
-            case 't': { QList<quint64> l; arg >> l; return toVariantList(l); }
-            case 'd': { QList<double> l; arg >> l; return toVariantList(l); }
-            case 's': { QStringList l; arg >> l; return toVariantList(l); }
-            case 'o': { QList<QDBusObjectPath> l; arg >> l; return toVariantList(l); }
-            case 'g': { QList<QDBusSignature> l; arg >> l; return toVariantList(l); }
-            case 'v': { QVariantList l; arg >> l; return toVariantList(l); }
-            default: break;
+            case 'y': {
+                QList<uchar> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 'b': {
+                QList<bool> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 'n': {
+                QList<short> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 'q': {
+                QList<ushort> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 'i': {
+                QList<int> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 'u': {
+                QList<uint> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 'x': {
+                QList<qint64> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 't': {
+                QList<quint64> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 'd': {
+                QList<double> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 's': {
+                QStringList l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 'o': {
+                QList<QDBusObjectPath> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 'g': {
+                QList<QDBusSignature> l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            case 'v': {
+                QVariantList l;
+                arg >> l;
+                return toVariantList(l);
+            }
+            default:
+                break;
             }
         }
 
@@ -219,8 +329,7 @@ QVariant unwrapDbus(const QVariant &v)
     return v;
 }
 
-QVariant toDbusVariant(const QVariant &v)
-{
+QVariant toDbusVariant(const QVariant &v) {
     int type = v.userType();
 
     auto convert = [&](auto id, const auto &fn) -> QVariant {
@@ -261,10 +370,9 @@ QVariant toDbusVariant(const QVariant &v)
     return v;
 }
 
-static QDBusMessage toQDBusMessage(const DBusMessage &msg)
-{
-    auto qmsg = QDBusMessage::createMethodCall(
-        msg.service(), msg.path(), msg.iface(), msg.member());
+static QDBusMessage toQDBusMessage(const DBusMessage &msg) {
+    auto qmsg =
+        QDBusMessage::createMethodCall(msg.service(), msg.path(), msg.iface(), msg.member());
 
     if (!msg.arguments().isEmpty()) {
         QVariantList args = msg.arguments();
@@ -277,18 +385,11 @@ static QDBusMessage toQDBusMessage(const DBusMessage &msg)
 }
 
 DBusConnection::DBusConnection(const QDBusConnection &conn, const QString &name, QObject *parent)
-    : QObject(parent)
-    , m_connection(conn)
-    , m_connectionName(name)
-{
-}
+    : QObject(parent), m_connection(conn), m_connectionName(name) {}
 
-DBusConnection::~DBusConnection()
-{
-}
+DBusConnection::~DBusConnection() {}
 
-DBusConnection *DBusConnection::connectToBus(const QString &address)
-{
+DBusConnection *DBusConnection::connectToBus(const QString &address) {
     // A fixed connection name causes QtDBus to return the FIRST connection
     // for every subsequent call, silently reusing it regardless of address.
     // Use a per-call counter so callers get distinct connections.
@@ -300,21 +401,18 @@ DBusConnection *DBusConnection::connectToBus(const QString &address)
     return new DBusConnection(conn, name);
 }
 
-DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message)
-{
+DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message) {
     auto qmsg = toQDBusMessage(message);
     auto pending = m_connection.asyncCall(qmsg);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
-        reply->setEngine(qmlEngine(this));
+    reply->setEngine(qmlEngine(this));
     reply->setWatcher(watcher);
     return reply;
 }
 
-void DBusConnection::asyncCall(const DBusMessage &message,
-                                const QJSValue &resolve,
-                                const QJSValue &reject)
-{
+void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resolve,
+                               const QJSValue &reject) {
     // Promise-style overload: (resolve, reject) callbacks.
     //   resolve is called with the reply value converted natively to a JS
     //     value (numbers, booleans, arrays, and dicts survive; nested D-Bus
@@ -339,24 +437,19 @@ void DBusConnection::asyncCall(const DBusMessage &message,
                         } else {
                             errObj = QJSValue(reply->error().message());
                         }
-                        reject.call({ errObj });
+                        reject.call({errObj});
                     }
                 } else if (resolve.isCallable()) {
                     QVariant unwrapped = unwrapDbus(reply->valueVariant());
-                    QJSValue val = engine
-                        ? variantToJs(engine, unwrapped)
-                        : QJSValue(reply->valueVariant().toString());
-                    resolve.call({ val });
+                    QJSValue val = engine ? variantToJs(engine, unwrapped)
+                                          : QJSValue(reply->valueVariant().toString());
+                    resolve.call({val});
                 }
             });
 }
 
 SessionBusConnection::SessionBusConnection(QObject *parent)
-    : DBusConnection(QDBusConnection::sessionBus(), QString(), parent)
-{
-}
+    : DBusConnection(QDBusConnection::sessionBus(), QString(), parent) {}
 
 SystemBusConnection::SystemBusConnection(QObject *parent)
-    : DBusConnection(QDBusConnection::systemBus(), QString(), parent)
-{
-}
+    : DBusConnection(QDBusConnection::systemBus(), QString(), parent) {}

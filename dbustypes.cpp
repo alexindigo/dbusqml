@@ -2,14 +2,12 @@
 
 #include <QDBusArgument>
 
-QDBusArgument &operator<<(QDBusArgument &arg, const DBusAsArray &a)
-{
+QDBusArgument &operator<<(QDBusArgument &arg, const DBusAsArray &a) {
     arg << a.value;
     return arg;
 }
 
-const QDBusArgument &operator>>(const QDBusArgument &arg, DBusAsArray &a)
-{
+const QDBusArgument &operator>>(const QDBusArgument &arg, DBusAsArray &a) {
     arg >> a.value;
     return arg;
 }

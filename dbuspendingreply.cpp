@@ -7,37 +7,28 @@
 #include <QDBusVariant>
 #include <QQmlEngine>
 
-DBusPendingReply::DBusPendingReply(QObject *parent)
-    : QObject(parent)
-{
-}
+DBusPendingReply::DBusPendingReply(QObject *parent) : QObject(parent) {}
 
-DBusPendingReply::~DBusPendingReply()
-{
-}
+DBusPendingReply::~DBusPendingReply() {}
 
-void DBusPendingReply::setWatcher(QDBusPendingCallWatcher *watcher)
-{
+void DBusPendingReply::setWatcher(QDBusPendingCallWatcher *watcher) {
     m_watcher = watcher;
     connect(watcher, &QDBusPendingCallWatcher::finished, this, &DBusPendingReply::onFinished);
 }
 
-bool DBusPendingReply::isError() const
-{
+bool DBusPendingReply::isError() const {
     if (m_cached)
         return m_isError;
     return m_watcher ? m_watcher->isError() : true;
 }
 
-bool DBusPendingReply::isValid() const
-{
+bool DBusPendingReply::isValid() const {
     if (m_cached)
         return m_isValid;
     return m_watcher && m_watcher->isValid() && !m_watcher->isError();
 }
 
-DBusError DBusPendingReply::error() const
-{
+DBusError DBusPendingReply::error() const {
     if (m_cached)
         return m_error;
     if (m_watcher)
@@ -45,22 +36,19 @@ DBusError DBusPendingReply::error() const
     return DBusError(QDBusError(QDBusError::InternalError, "No pending call"));
 }
 
-QJSValue DBusPendingReply::value() const
-{
+QJSValue DBusPendingReply::value() const {
     if (m_jsCached)
         return m_jsValue;
     return {};
 }
 
-QJSValue DBusPendingReply::values() const
-{
+QJSValue DBusPendingReply::values() const {
     if (m_jsCached)
         return m_jsValues;
     return {};
 }
 
-QVariant DBusPendingReply::valueVariant() const
-{
+QVariant DBusPendingReply::valueVariant() const {
     if (m_cached)
         return m_value;
     if (!m_watcher || m_watcher->isError())
@@ -74,8 +62,7 @@ QVariant DBusPendingReply::valueVariant() const
     return unwrapDbus(val);
 }
 
-QVariantList DBusPendingReply::valuesVariant() const
-{
+QVariantList DBusPendingReply::valuesVariant() const {
     if (m_cached)
         return m_values;
     if (!m_watcher || m_watcher->isError())
@@ -87,8 +74,7 @@ QVariantList DBusPendingReply::valuesVariant() const
     return args;
 }
 
-void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher)
-{
+void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
     Q_UNUSED(watcher);
 
     if (m_watcher && !m_cached) {

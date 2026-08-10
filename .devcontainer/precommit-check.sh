@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Qt6 tools (qmllint, qmlformat) live under /usr/lib/qt6/bin in the
+# devcontainer image, not on the default PATH.
+export PATH="/usr/lib/qt6/bin:$PATH"
+
 # Runs inside devcontainer. Called by .githooks/pre-commit with no arguments.
 # Lints the entire repo (not just staged files) — dbusqml is small and
 # low-level enough that a full check per commit is warranted.
@@ -23,5 +27,5 @@ fi
 mapfile -t SH < <(find scripts -type f 2>/dev/null || true)
 if [ ${#SH[@]} -gt 0 ]; then
   shellcheck "${SH[@]}"
-  shfmt -d "${SH[@]}"
+  shfmt -i 4 -d "${SH[@]}"
 fi

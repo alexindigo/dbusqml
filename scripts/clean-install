@@ -12,7 +12,7 @@ while read -r file; do
     if [ -f "$file" ] || [ -d "$file" ]; then
         rm -rf "$file"
     fi
-done < "${BUILD_DIR}/install_manifest.txt"
+done <"${BUILD_DIR}/install_manifest.txt"
 
 rm -f "${BUILD_DIR}/install_manifest.txt"
 echo "Uninstall complete."

@@ -45,7 +45,7 @@ public slots:
     QVariantMap echoDict(const QVariantMap &v) { return v; }
     QDBusVariant echoVariant(const QDBusVariant &v) { return v; }
     QList<QDBusObjectPath> objectPathList() {
-        return { QDBusObjectPath("/a"), QDBusObjectPath("/b"), QDBusObjectPath("/c/d") };
+        return {QDBusObjectPath("/a"), QDBusObjectPath("/b"), QDBusObjectPath("/c/d")};
     }
 
     int methodWithArgs(int a, const QString &b) { return a + b.size(); }
@@ -61,8 +61,7 @@ static QProcess *s_daemon = nullptr;
 static QString s_originalAddress;
 static QString s_privateBusAddress;
 
-static bool startPrivateBus()
-{
+static bool startPrivateBus() {
     s_daemon = new QProcess();
     s_daemon->setProcessChannelMode(QProcess::ForwardedErrorChannel);
     s_daemon->start("dbus-daemon", {"--session", "--print-address", "--nofork"});
@@ -86,8 +85,7 @@ static bool startPrivateBus()
     return true;
 }
 
-static void stopPrivateBus()
-{
+static void stopPrivateBus() {
     if (s_daemon) {
         s_daemon->terminate();
         s_daemon->waitForFinished(3000);
@@ -102,8 +100,7 @@ static void stopPrivateBus()
         qputenv("DBUS_SESSION_BUS_ADDRESS", s_originalAddress.toLocal8Bit());
 }
 
-static bool registerTestService()
-{
+static bool registerTestService() {
     QDBusConnection bus = QDBusConnection::sessionBus();
     if (!bus.isConnected())
         return false;
@@ -123,27 +120,21 @@ class TestDBusConnection : public QObject {
     Q_OBJECT
 
 private slots:
-    void initTestCase()
-    {
+    void initTestCase() {
         QVERIFY2(startPrivateBus(), "Failed to start private D-Bus daemon");
         QVERIFY2(registerTestService(), "Failed to register mock service");
         // Let the connection stabilize
         QTest::qWait(200);
     }
 
-    void cleanupTestCase()
-    {
-        stopPrivateBus();
-    }
+    void cleanupTestCase() { stopPrivateBus(); }
 
-    void testBusTypeEnum()
-    {
+    void testBusTypeEnum() {
         QCOMPARE(static_cast<int>(busType::Session), 0);
         QCOMPARE(static_cast<int>(busType::System), 1);
     }
 
-    void testSessionBusSingleton()
-    {
+    void testSessionBusSingleton() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -169,14 +160,12 @@ private slots:
         delete reply;
     }
 
-    void testSystemBusSingleton()
-    {
+    void testSystemBusSingleton() {
         auto *bus = new SystemBusConnection(this);
         QVERIFY(bus != nullptr);
     }
 
-    void testAsyncCallPromiseStyle()
-    {
+    void testAsyncCallPromiseStyle() {
         auto *bus = new SessionBusConnection(this);
 
         DBusMessage msg;
@@ -192,8 +181,7 @@ private slots:
         bus->asyncCall(msg, QJSValue(), QJSValue());
     }
 
-    void testDBusPendingReplyNoWatcher()
-    {
+    void testDBusPendingReplyNoWatcher() {
         auto *reply = new DBusPendingReply(this);
         QCOMPARE(reply->isError(), true);
         QCOMPARE(reply->isValid(), false);
@@ -203,8 +191,7 @@ private slots:
         QCOMPARE(err.isValid(), true);
     }
 
-    void testDBusProperties()
-    {
+    void testDBusProperties() {
         DBusProxy obj;
         QVERIFY(obj.service().isEmpty());
         QVERIFY(obj.path().isEmpty());
@@ -234,8 +221,7 @@ private slots:
         QCOMPARE(serviceSpy.size(), 1);
     }
 
-    void testDBusConnection()
-    {
+    void testDBusConnection() {
         DBusProxy obj;
         QVERIFY(obj.connection() == nullptr);
 
@@ -244,8 +230,7 @@ private slots:
         QVERIFY(obj.connection() == nullptr);
     }
 
-    void testDBusIntrospect()
-    {
+    void testDBusIntrospect() {
         DBusProxy obj;
         obj.setService("org.dbusqml.TestService");
         obj.setPath("/TestService");
@@ -255,8 +240,7 @@ private slots:
         QVERIFY(true);
     }
 
-    void testDBusCall()
-    {
+    void testDBusCall() {
         DBusProxy obj;
         obj.setService("org.dbusqml.TestService");
         obj.setPath("/TestService");
@@ -268,8 +252,7 @@ private slots:
 
     // ---- Typed argument round-trip tests ----
 
-    void testTypedBool()
-    {
+    void testTypedBool() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -290,8 +273,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedInt32()
-    {
+    void testTypedInt32() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -312,8 +294,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedInt16()
-    {
+    void testTypedInt16() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -334,8 +315,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedInt64()
-    {
+    void testTypedInt64() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -356,8 +336,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedUint32()
-    {
+    void testTypedUint32() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -378,8 +357,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedUint16()
-    {
+    void testTypedUint16() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -400,8 +378,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedUint64()
-    {
+    void testTypedUint64() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -422,8 +399,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedDouble()
-    {
+    void testTypedDouble() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -444,8 +420,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedByte()
-    {
+    void testTypedByte() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -466,8 +441,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedString()
-    {
+    void testTypedString() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -488,8 +462,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedObjectPath()
-    {
+    void testTypedObjectPath() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -506,12 +479,12 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().value<QDBusObjectPath>().path(), QStringLiteral("/test/path"));
+        QCOMPARE(reply->valueVariant().value<QDBusObjectPath>().path(),
+                 QStringLiteral("/test/path"));
         delete reply;
     }
 
-    void testTypedSignature()
-    {
+    void testTypedSignature() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -532,8 +505,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedVariant()
-    {
+    void testTypedVariant() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -556,8 +528,7 @@ private slots:
         delete reply;
     }
 
-    void testValueUnwrapsQDBusVariant()
-    {
+    void testValueUnwrapsQDBusVariant() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -578,8 +549,7 @@ private slots:
         QVariant val = reply->valueVariant();
         // The value should NOT be a QDBusVariant — it should be unwrapped to QString
         QVERIFY(val.userType() != qMetaTypeId<QDBusVariant>());
-        QVERIFY(val.userType() == QMetaType::QString
-                || val.canConvert<QString>());
+        QVERIFY(val.userType() == QMetaType::QString || val.canConvert<QString>());
         QCOMPARE(val.toString(), QStringLiteral("test_val"));
 
         // Also verify values() unwraps properly
@@ -590,8 +560,7 @@ private slots:
         delete reply;
     }
 
-    void testTypedDict()
-    {
+    void testTypedDict() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -630,8 +599,7 @@ private slots:
         delete reply;
     }
 
-    void testDynamicMethodsExist()
-    {
+    void testDynamicMethodsExist() {
         QQmlEngine engine;
 
         // Add import paths relative to the test binary
@@ -643,13 +611,13 @@ private slots:
         engine.addImportPath(binDir.filePath(QStringLiteral("../build-debug")));
 
         QQmlComponent component(&engine);
-        component.setData(
-            "import DBus 1.0;\n"
-            "DBus {\n"
-            "  service: 'org.dbusqml.TestService'\n"
-            "  path: '/TestService'\n"
-            "  iface: 'org.dbusqml.TestService'\n"
-            "}", QUrl());
+        component.setData("import DBus 1.0;\n"
+                          "DBus {\n"
+                          "  service: 'org.dbusqml.TestService'\n"
+                          "  path: '/TestService'\n"
+                          "  iface: 'org.dbusqml.TestService'\n"
+                          "}",
+                          QUrl());
 
         qDebug() << "Component status:" << (component.isReady() ? "ready" : "not ready");
         if (!component.isReady()) {
@@ -677,8 +645,7 @@ private slots:
         delete proxy;
     }
 
-    void testPropertiesGetEchoString()
-    {
+    void testPropertiesGetEchoString() {
         // Test Properties.Get via the service's echo mechanism
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
@@ -703,8 +670,7 @@ private slots:
         delete reply;
     }
 
-    void testProxyCallWithArgs()
-    {
+    void testProxyCallWithArgs() {
         DBusProxy proxy;
         proxy.setService("org.dbusqml.TestService");
         proxy.setPath("/TestService");
@@ -716,8 +682,7 @@ private slots:
         QVERIFY(true); // no crash = pass
     }
 
-    void testProxyConnection()
-    {
+    void testProxyConnection() {
         DBusProxy proxy;
         QVERIFY(proxy.connection() == nullptr);
 
@@ -734,14 +699,12 @@ private slots:
         QVERIFY(proxy.connection() == nullptr);
     }
 
-    void testConnectToBusInvalid()
-    {
+    void testConnectToBusInvalid() {
         auto *conn = DBusProxy::connectToBus(QStringLiteral("unix:path=/nonexistent"));
         QVERIFY(conn == nullptr);
     }
 
-    void testDoIntrospectEarlyReturn()
-    {
+    void testDoIntrospectEarlyReturn() {
         // doIntrospect should return early if service is empty
         DBusProxy proxy;
         // This should not crash — doIntrospect checks for empty service/path/iface
@@ -749,8 +712,7 @@ private slots:
         QVERIFY(true);
     }
 
-    void testIntrospectionErrorStatus()
-    {
+    void testIntrospectionErrorStatus() {
         // Trigger introspection on an invalid service — should set Error status
         // and emit statusChanged/introspectionCompleted (or error path)
         DBusProxy proxy;
@@ -761,9 +723,7 @@ private slots:
         QTimer timer;
         timer.setSingleShot(true);
         int statusChanges = 0;
-        QObject::connect(&proxy, &DBusProxy::statusChanged, [&]() {
-            statusChanges++;
-        });
+        QObject::connect(&proxy, &DBusProxy::statusChanged, [&]() { statusChanges++; });
 
         QTest::qWait(3000);
 
@@ -772,8 +732,7 @@ private slots:
         QCOMPARE(proxy.status(), DBusProxy::Error);
     }
 
-    void testStatusSignal()
-    {
+    void testStatusSignal() {
         DBusProxy proxy;
         proxy.setService("org.dbusqml.TestService");
         proxy.setPath("/TestService");
@@ -787,8 +746,7 @@ private slots:
         QVERIFY(readySpy.size() > 0);
     }
 
-    void testRuntimeIfaceChange()
-    {
+    void testRuntimeIfaceChange() {
         DBusProxy proxy;
         proxy.setService("org.dbusqml.TestService");
         proxy.setPath("/TestService");
@@ -802,8 +760,7 @@ private slots:
         QVERIFY(statusSpy.size() > 0);
     }
 
-    void testSetPathTrigger()
-    {
+    void testSetPathTrigger() {
         DBusProxy proxy;
         proxy.setService("org.dbusqml.TestService");
         proxy.setIface("org.dbusqml.TestService");
@@ -812,8 +769,7 @@ private slots:
         QTest::qWait(2000);
     }
 
-    void testDoubleSetIface()
-    {
+    void testDoubleSetIface() {
         // Setting iface twice while first introspection is in flight
         // should trigger deleteLater on the old watcher (line 100)
         DBusProxy proxy;
@@ -831,8 +787,7 @@ private slots:
         QVERIFY(true);
     }
 
-    void testConnectToBusSuccess()
-    {
+    void testConnectToBusSuccess() {
         if (!s_privateBusAddress.isEmpty()) {
             auto *conn = DBusProxy::connectToBus(s_privateBusAddress);
             QVERIFY(conn != nullptr);
@@ -843,8 +798,7 @@ private slots:
     // Two DBusConnection::connectToBus calls must produce distinct QDBusConnection
     // handles. A fixed connection name would make QtDBus silently reuse the first
     // connection for every subsequent call, ignoring the address argument.
-    void testConnectToBusDistinctConnections()
-    {
+    void testConnectToBusDistinctConnections() {
         if (s_privateBusAddress.isEmpty())
             QSKIP("no private bus address available");
 
@@ -857,40 +811,33 @@ private slots:
         QDBusConnection cb = *b;
         QVERIFY2(ca.name() != cb.name(),
                  qPrintable(QStringLiteral("connections must have distinct names, got '%1' twice")
-                            .arg(ca.name())));
+                                .arg(ca.name())));
 
         delete a;
         delete b;
     }
 
-    void testEmitSignalStatic()
-    {
+    void testEmitSignalStatic() {
         DBusProxy::emitSignal(
             QStringLiteral("org.freedesktop.portal.Desktop"),
             QStringLiteral("/org/freedesktop/portal/desktop"),
-            QStringLiteral("org.freedesktop.portal.Settings"),
-            QStringLiteral("SettingChanged"),
-            { QVariant::fromValue(QStringLiteral("org.freedesktop.appearance")),
-              QVariant::fromValue(QStringLiteral("color-scheme")),
-              QVariant::fromValue(1) }
-        );
+            QStringLiteral("org.freedesktop.portal.Settings"), QStringLiteral("SettingChanged"),
+            {QVariant::fromValue(QStringLiteral("org.freedesktop.appearance")),
+             QVariant::fromValue(QStringLiteral("color-scheme")), QVariant::fromValue(1)});
         QVERIFY(true);
     }
 
-    void testEmitSignalInstance()
-    {
+    void testEmitSignalInstance() {
         DBusProxy proxy;
         proxy.setService("org.dbusqml.TestService");
         proxy.setPath("/TestService");
         proxy.setIface("org.dbusqml.TestService");
 
-        proxy.emitSignal(QStringLiteral("pong"),
-            { QVariant::fromValue(QStringLiteral("hello")) });
+        proxy.emitSignal(QStringLiteral("pong"), {QVariant::fromValue(QStringLiteral("hello"))});
         QVERIFY(true);
     }
 
-    void testEmitSignalRegistersName()
-    {
+    void testEmitSignalRegistersName() {
         // Verify that emitSignal tries to claim the service name
         DBusProxy proxy;
         proxy.setService("org.dbusqml.TestPortalName");
@@ -899,22 +846,21 @@ private slots:
 
         QDBusConnection bus = QDBusConnection::sessionBus();
 
-        QDBusReply<bool> before = bus.interface()->isServiceRegistered(
-            QStringLiteral("org.dbusqml.TestPortalName"));
+        QDBusReply<bool> before =
+            bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.TestPortalName"));
         QVERIFY(before.isValid());
         QCOMPARE(before.value(), false);
 
         proxy.emitSignal(QStringLiteral("test"), {});
         QTest::qWait(500);
 
-        QDBusReply<bool> after = bus.interface()->isServiceRegistered(
-            QStringLiteral("org.dbusqml.TestPortalName"));
+        QDBusReply<bool> after =
+            bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.TestPortalName"));
         QVERIFY(after.isValid());
         QCOMPARE(after.value(), true);
     }
 
-    void testDBusAdaptor()
-    {
+    void testDBusAdaptor() {
         DBusAdaptor adaptor;
         adaptor.setService("org.dbusqml.AdaptorTest");
         adaptor.setPath("/Test");
@@ -933,26 +879,25 @@ private slots:
     // dispatch path built a JS source string from arguments; complex types
     // (arrays, dicts) went through toString() which broke them. The new path
     // uses QJSValue::callWithInstance and passes arguments as native JS values.
-    void testDBusAdaptorMethodDispatchComplexArgs()
-    {
+    void testDBusAdaptorMethodDispatchComplexArgs() {
         QQmlEngine engine;
         QDir binDir(QCoreApplication::applicationDirPath());
         engine.addImportPath(binDir.path());
         engine.addImportPath(binDir.filePath(QStringLiteral("../build-debug")));
 
         QQmlComponent component(&engine);
-        component.setData(
-            "import DBus 1.0;\n"
-            "DBusAdaptor {\n"
-            "  service: 'org.dbusqml.AdaptorDispatchTest'\n"
-            "  path: '/Dispatch'\n"
-            "  iface: 'org.dbusqml.AdaptorDispatchTest'\n"
-            "  function joinStrings(list, sep) {\n"
-            "    if (!list || typeof list.length !== 'number') return 'NOT_ARRAY'\n"
-            "    return list.join(sep)\n"
-            "  }\n"
-            "  function echoTricky(s) { return s }\n"
-            "}", QUrl());
+        component.setData("import DBus 1.0;\n"
+                          "DBusAdaptor {\n"
+                          "  service: 'org.dbusqml.AdaptorDispatchTest'\n"
+                          "  path: '/Dispatch'\n"
+                          "  iface: 'org.dbusqml.AdaptorDispatchTest'\n"
+                          "  function joinStrings(list, sep) {\n"
+                          "    if (!list || typeof list.length !== 'number') return 'NOT_ARRAY'\n"
+                          "    return list.join(sep)\n"
+                          "  }\n"
+                          "  function echoTricky(s) { return s }\n"
+                          "}",
+                          QUrl());
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         auto *adaptor = component.create();
         QVERIFY(adaptor != nullptr);
@@ -961,12 +906,9 @@ private slots:
         // 1. Array arg — old dispatch would stringify to "a,b,c" and break.
         {
             QDBusMessage msg = QDBusMessage::createMethodCall(
-                QStringLiteral("org.dbusqml.AdaptorDispatchTest"),
-                QStringLiteral("/Dispatch"),
-                QStringLiteral("org.dbusqml.AdaptorDispatchTest"),
-                QStringLiteral("joinStrings"));
-            msg.setArguments({ QVariant(QStringList{ "a", "b", "c" }),
-                               QVariant(QStringLiteral("-")) });
+                QStringLiteral("org.dbusqml.AdaptorDispatchTest"), QStringLiteral("/Dispatch"),
+                QStringLiteral("org.dbusqml.AdaptorDispatchTest"), QStringLiteral("joinStrings"));
+            msg.setArguments({QVariant(QStringList{"a", "b", "c"}), QVariant(QStringLiteral("-"))});
             QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
             QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
             QVERIFY(!reply.arguments().isEmpty());
@@ -979,11 +921,9 @@ private slots:
         {
             const QString tricky = QStringLiteral("hello \"world\" \\ backslash");
             QDBusMessage msg = QDBusMessage::createMethodCall(
-                QStringLiteral("org.dbusqml.AdaptorDispatchTest"),
-                QStringLiteral("/Dispatch"),
-                QStringLiteral("org.dbusqml.AdaptorDispatchTest"),
-                QStringLiteral("echoTricky"));
-            msg.setArguments({ QVariant(tricky) });
+                QStringLiteral("org.dbusqml.AdaptorDispatchTest"), QStringLiteral("/Dispatch"),
+                QStringLiteral("org.dbusqml.AdaptorDispatchTest"), QStringLiteral("echoTricky"));
+            msg.setArguments({QVariant(tricky)});
             QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
             QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
             QVERIFY(!reply.arguments().isEmpty());
@@ -993,8 +933,7 @@ private slots:
         delete adaptor;
     }
 
-    void testDBusAdaptorGetProperty()
-    {
+    void testDBusAdaptorGetProperty() {
         DBusAdaptor adaptor;
         adaptor.setService("org.dbusqml.AdaptorGetTest");
         adaptor.setPath("/Test");
@@ -1028,8 +967,7 @@ private slots:
     // Qt hands the reply back as a QDBusArgument, the generic 'a*' branch
     // iterated with 'arg >> QVariant' — undefined for concrete-type arrays,
     // segfault inside libdbus. Regression guard for the fix.
-    void testUnwrapAoDoesNotCrash()
-    {
+    void testUnwrapAoDoesNotCrash() {
         DBusMessage msg;
         msg.setService("org.dbusqml.TestService");
         msg.setPath("/TestService");
@@ -1059,21 +997,20 @@ private slots:
     // Switching iface at runtime must remove the old iface's dynamic methods
     // from the property map. Otherwise they stay callable and silently dispatch
     // on the new iface, producing method-not-found errors.
-    void testIfaceSwitchClearsOldMethods()
-    {
+    void testIfaceSwitchClearsOldMethods() {
         QQmlEngine engine;
         QDir binDir(QCoreApplication::applicationDirPath());
         engine.addImportPath(binDir.path());
         engine.addImportPath(binDir.filePath(QStringLiteral("../build-debug")));
 
         QQmlComponent component(&engine);
-        component.setData(
-            "import DBus 1.0;\n"
-            "DBus {\n"
-            "  service: 'org.freedesktop.DBus'\n"
-            "  path: '/org/freedesktop/DBus'\n"
-            "  iface: 'org.freedesktop.DBus'\n"
-            "}", QUrl());
+        component.setData("import DBus 1.0;\n"
+                          "DBus {\n"
+                          "  service: 'org.freedesktop.DBus'\n"
+                          "  path: '/org/freedesktop/DBus'\n"
+                          "  iface: 'org.freedesktop.DBus'\n"
+                          "}",
+                          QUrl());
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         auto *proxy = static_cast<DBusProxy *>(component.create());
         QVERIFY(proxy != nullptr);
@@ -1109,21 +1046,20 @@ private slots:
     // Repeated iface switches must not accumulate dynamic method entries in
     // the property map. Each round the key set should equal the current
     // iface's method set, not the union of all iface method sets ever seen.
-    void testReintrospectionDoesNotLeak()
-    {
+    void testReintrospectionDoesNotLeak() {
         QQmlEngine engine;
         QDir binDir(QCoreApplication::applicationDirPath());
         engine.addImportPath(binDir.path());
         engine.addImportPath(binDir.filePath(QStringLiteral("../build-debug")));
 
         QQmlComponent component(&engine);
-        component.setData(
-            "import DBus 1.0;\n"
-            "DBus {\n"
-            "  service: 'org.freedesktop.DBus'\n"
-            "  path: '/org/freedesktop/DBus'\n"
-            "  iface: 'org.freedesktop.DBus'\n"
-            "}", QUrl());
+        component.setData("import DBus 1.0;\n"
+                          "DBus {\n"
+                          "  service: 'org.freedesktop.DBus'\n"
+                          "  path: '/org/freedesktop/DBus'\n"
+                          "  iface: 'org.freedesktop.DBus'\n"
+                          "}",
+                          QUrl());
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         auto *proxy = static_cast<DBusProxy *>(component.create());
         QVERIFY(proxy != nullptr);
@@ -1131,7 +1067,8 @@ private slots:
         auto waitFor = [&](const QString &key) {
             for (int i = 0; i < 20; ++i) {
                 QTest::qWait(250);
-                if (proxy->value(key).isValid()) return true;
+                if (proxy->value(key).isValid())
+                    return true;
             }
             return false;
         };
@@ -1152,8 +1089,7 @@ private slots:
     }
 };
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
 
     int rc = 0;

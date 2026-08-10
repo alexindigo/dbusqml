@@ -15,8 +15,8 @@ run_one() {
 
 list_examples() {
     for f in "${PROJECT_DIR}/examples/simple/"*.qml \
-             "${PROJECT_DIR}/examples/intermediate/"*.qml \
-             "${PROJECT_DIR}/examples/advanced/"*.qml; do
+        "${PROJECT_DIR}/examples/intermediate/"*.qml \
+        "${PROJECT_DIR}/examples/advanced/"*.qml; do
         basename "$f" .qml
     done
 }
@@ -27,8 +27,8 @@ if [ $# -eq 0 ]; then
     echo "Close each window to proceed to the next."
     echo ""
     for f in "${PROJECT_DIR}/examples/simple/"*.qml \
-             "${PROJECT_DIR}/examples/intermediate/"*.qml \
-             "${PROJECT_DIR}/examples/advanced/"*.qml; do
+        "${PROJECT_DIR}/examples/intermediate/"*.qml \
+        "${PROJECT_DIR}/examples/advanced/"*.qml; do
         run_one "$f"
     done
     echo "All examples finished."
@@ -58,8 +58,8 @@ fi
 # Otherwise, treat as an example filename
 FOUND=""
 for f in "${PROJECT_DIR}/examples/simple/"*.qml \
-         "${PROJECT_DIR}/examples/intermediate/"*.qml \
-         "${PROJECT_DIR}/examples/advanced/"*.qml; do
+    "${PROJECT_DIR}/examples/intermediate/"*.qml \
+    "${PROJECT_DIR}/examples/advanced/"*.qml; do
     basename=$(basename "$f" .qml)
     if [ "$basename" = "$ARG" ]; then
         FOUND="$f"
