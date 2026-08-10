@@ -626,8 +626,15 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
 
     setupDynamicMethods(methodNames);
 
-    if (m_propertiesEnabled)
+    if (m_propertiesEnabled) {
         fetchProperties();
+    } else {
+        // No property fetch — still need to signal Ready and
+        // introspectionCompleted so consumers don't wait forever.
+        m_status = Ready;
+        emit statusChanged();
+        emit introspectionCompleted();
+    }
 }
 
 void DBusProxy::reloadTypes() {
