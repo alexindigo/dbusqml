@@ -436,9 +436,16 @@ void DBusProxy::setProperty(const QString &name, const QVariant &value) {
 }
 
 QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
+    if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
+        return input;
+
+    // Map the QML camelCase name back to the D-Bus PascalCase name.
+    // Unknown keys fall back to the verbatim name (services with lowercase
+    // property names exist).
+    const QString dbusName = m_qmlToDbusName.value(key, key);
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
-    msg.setArguments({m_iface, key, input});
+    msg.setArguments({m_iface, dbusName, QVariant::fromValue(QDBusVariant(toDbusVariant(input)))});
     m_bus.asyncCall(msg);
     return input;
 }
@@ -458,8 +465,10 @@ void DBusProxy::fetchProperties() {
             for (auto it = props.begin(); it != props.end(); ++it) {
                 QString qmlName = dbusPropToQml(it.key());
                 // Don't overwrite dynamic method callbacks with property values
-                if (!m_methodArgTypes.contains(it.key()) && !m_methodArgTypes.contains(qmlName))
+                if (!m_methodArgTypes.contains(it.key()) && !m_methodArgTypes.contains(qmlName)) {
+                    m_qmlToDbusName.insert(qmlName, it.key());
                     insert(qmlName, unwrapDbus(it.value()));
+                }
             }
             m_status = Ready;
         } else {
@@ -482,6 +491,7 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
             QVariantMap changed = qdbus_cast<QVariantMap>(msg.arguments()[1]);
             for (auto it = changed.begin(); it != changed.end(); ++it) {
                 QString qmlName = dbusPropToQml(it.key());
+                m_qmlToDbusName.insert(qmlName, it.key());
                 insert(qmlName, unwrapDbus(it.value()));
             }
         }
@@ -641,8 +651,11 @@ void DBusProxy::prepopulateFromCatalog() {
     if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
         return;
     if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
-        for (const QString &propName : spec->properties)
-            insert(dbusPropToQml(propName), QVariant::fromValue(nullptr));
+        for (const QString &propName : spec->properties) {
+            QString qmlName = dbusPropToQml(propName);
+            m_qmlToDbusName.insert(qmlName, propName);
+            insert(qmlName, QVariant::fromValue(nullptr));
+        }
     }
 }
 #endif

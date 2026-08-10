@@ -130,4 +130,8 @@ private:
         m_dynamicMethodKeys; // qml-cased method names currently installed on the property map
     QHash<QString, QString> m_introspectCache;
     QHash<QString, QStringList> m_methodArgTypes;
+    // Maps QML camelCase property names → original D-Bus PascalCase names.
+    // Populated whenever a property is learned (fetchProperties,
+    // onPropertiesChanged, catalog/live pre-populate).
+    QHash<QString, QString> m_qmlToDbusName;
 };
