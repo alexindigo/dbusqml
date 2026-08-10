@@ -354,6 +354,12 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
     }
 
     // Method dispatch
+    QVariantList dbusArgs = msg.arguments();
+    // Unwrap D-Bus containers so QML/JS receives traversable data
+    // (arrays, dicts, structs) instead of opaque QDBusArgument objects.
+    for (QVariant &a : dbusArgs)
+        a = unwrapDbus(a);
+
     for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
         QMetaMethod method = meta->method(i);
         if (method.methodType() != QMetaMethod::Method && method.methodType() != QMetaMethod::Slot)
@@ -361,7 +367,6 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         if (QString::fromLatin1(method.name()) != member)
             continue;
 
-        QVariantList dbusArgs = msg.arguments();
         if (method.parameterCount() != dbusArgs.size()) {
             continue;
         }
