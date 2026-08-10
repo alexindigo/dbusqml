@@ -10,6 +10,7 @@
 #include <QDBusVariant>
 #include <QJSValue>
 #include <QJSValueList>
+#include <QPointer>
 #include <QQmlEngine>
 
 // Convert a QVariant into a native JS value, recursively unwrapping lists
@@ -422,7 +423,7 @@ void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resol
     if (!resolve.isCallable() && !reject.isCallable())
         return;
 
-    QQmlEngine *engine = qmlEngine(this);
+    QPointer<QQmlEngine> engine = qmlEngine(this);
     connect(reply, &DBusPendingReply::finished, this,
             [reply, resolve = QJSValue(resolve), reject = QJSValue(reject), engine]() mutable {
                 if (reply->isError()) {
@@ -441,7 +442,7 @@ void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resol
                     }
                 } else if (resolve.isCallable()) {
                     QVariant unwrapped = unwrapDbus(reply->valueVariant());
-                    QJSValue val = engine ? variantToJs(engine, unwrapped)
+                    QJSValue val = engine ? variantToJs(engine.data(), unwrapped)
                                           : QJSValue(reply->valueVariant().toString());
                     resolve.call({val});
                 }

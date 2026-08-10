@@ -63,5 +63,5 @@ private:
     QJSValue m_jsValue;
     QJSValue m_jsValues;
     bool m_jsCached = false;
-    QQmlEngine *m_engine = nullptr;
+    QPointer<QQmlEngine> m_engine;
 };
