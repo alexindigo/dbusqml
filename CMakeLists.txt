@@ -167,9 +167,22 @@ if(BUILD_TEST_MODE)
     target_include_directories(test_introspect PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_introspect PRIVATE Qt6::Core Qt6::Test)
 
+    add_executable(test_adaptor
+        tests/test_dbusadaptor.cpp
+        dbusadaptor.cpp
+        dbusmessage.cpp
+        dbusconnection.cpp
+        dbuspendingreply.cpp
+        dbustypes.cpp
+        dbusintrospection.cpp
+    )
+    target_include_directories(test_adaptor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_adaptor PRIVATE Qt6::Core Qt6::Qml Qt6::Test Qt6::DBus dbusqml)
+
     enable_testing()
     add_test(NAME test_types COMMAND test_types)
     add_test(NAME test_introspect COMMAND test_introspect)
+    add_test(NAME test_adaptor COMMAND dbus-run-session -- $<TARGET_FILE:test_adaptor>)
     add_test(NAME test_dbus COMMAND dbus-run-session -- $<TARGET_FILE:test_dbus>)
     set_tests_properties(test_dbus PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"

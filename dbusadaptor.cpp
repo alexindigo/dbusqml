@@ -287,8 +287,18 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         return false;
 
     if (interface == QStringLiteral("org.freedesktop.DBus.Properties")) {
+        // Validate the interface name if provided
+        if (!args.isEmpty()) {
+            QString reqIface = args[0].toString();
+            if (!reqIface.isEmpty() && reqIface != m_iface) {
+                conn.send(
+                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                                         QStringLiteral("No such interface: %1").arg(reqIface)));
+                return true;
+            }
+        }
+
         if (member == QStringLiteral("Get") && args.size() >= 2) {
-            QString iface = args[0].toString();
             QString propName = args[1].toString();
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
@@ -297,9 +307,14 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 QVariant val = prop.read(this);
                 if (val.userType() == qMetaTypeId<QJSValue>())
                     val = val.value<QJSValue>().toVariant();
-                conn.send(msg.createReply(QVariantList{val}));
+                // D-Bus spec: Get returns a variant (signature "v")
+                conn.send(msg.createReply(QVariantList{QVariant::fromValue(QDBusVariant(val))}));
                 return true;
             }
+            // Unknown property
+            conn.send(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                                           QStringLiteral("No such property: %1").arg(propName)));
+            return true;
         }
         if (member == QStringLiteral("GetAll") && args.size() >= 1) {
             QVariantMap props;
@@ -319,16 +334,21 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             return true;
         }
         if (member == QStringLiteral("Set") && args.size() >= 3) {
-            QString iface = args[0].toString();
             QString propName = args[1].toString();
-            QVariant value = args[2];
+            QVariant value = unwrapDbus(args[2]);
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
                 if (QString::fromLatin1(prop.name()) != propName || !prop.isWritable())
                     continue;
                 prop.write(this, value);
+                // D-Bus spec: Set must send an empty reply
+                conn.send(msg.createReply());
                 return true;
             }
+            // Unknown property
+            conn.send(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                                           QStringLiteral("No such property: %1").arg(propName)));
+            return true;
         }
         return false;
     }
