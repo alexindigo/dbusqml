@@ -83,7 +83,7 @@ class Variant {
     QML_CONSTRUCTIBLE_VALUE
     // Expose the payload as a plain QVariant. Using QDBusVariant here with
     // MEMBER makes moc emit an inequality comparison the type doesn't
-    // support on Qt < 6.7, breaking the build on the declared 6.5 minimum.
+    // support on Qt < 6.7, breaking the build on the declared 6.8 minimum.
     Q_PROPERTY(QVariant value READ propValue WRITE setPropValue)
 public:
     explicit Variant() {}

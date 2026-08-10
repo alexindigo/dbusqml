@@ -17,8 +17,10 @@ qt_policy(SET QTP0001 NEW)
 include(GNUInstallDirs)
 
 option(DBUSQML_REACTIVE_BINDINGS
-       "Enable reactive property bindings via QQmlOpenMetaObject subclass. \
-Requires Qt6::QmlPrivate. Currently tested against Qt 6.8–6.11."
+       "Enable reactive property bindings via catalog pre-population. \
+Pre-populates null placeholders for catalog-declared properties before \
+QML bindings evaluate, so QQmlPropertyMap's built-in reactivity handles \
+subsequent updates. Default OFF."
        OFF)
 
 # Production sources

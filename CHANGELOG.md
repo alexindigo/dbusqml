@@ -4,6 +4,46 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Adaptor D-Bus Properties compliance** — `Get` wraps reply in
+  `QDBusVariant` (spec requires `v`), `Set` unwraps value and sends empty
+  reply (was missing — clients hung ~25s), wrong-iface and unknown-property
+  calls return `InvalidArgs` errors. `GetAll` excludes internal properties.
+- **Adaptor method arg unwrapping** — complex D-Bus args (`a{sv}`, nested
+  structs) now arrive as traversable JS objects, not opaque QDBusArgument.
+- **Adaptor introspection XML accuracy** — property types correct
+  (`UInt` → `u`, `QVariantList` → `av`), every method parameter gets an
+  `<arg direction="in">`, return types mapped.
+- **Introspection parser robustness** — no infinite loop on truncated XML,
+  signal args don't pollute method arg lists, only `direction="in"` args
+  collected.
+- **Property writes** — `updateValue` maps camelCase QML names back to
+  D-Bus PascalCase names and wraps values in `QDBusVariant`. Writes via
+  `proxy.someProp = value` now actually reach the service.
+- **Reply/watcher leaks** — watchers auto-deleted on finished, replies
+  handed to JS GC after `finished` is delivered. No unbounded growth.
+- **Signal hook cleanup** — exact disconnect matches connect args;
+  stale hooks no longer fire after iface/connection changes.
+- **Introspection coalescing** — one call per config change instead of
+  up to 4 (one per setter + componentComplete).
+- **`propertiesEnabled: false`** — proxy now reaches Ready and emits
+  `introspectionCompleted` instead of staying at Loading forever.
+- **Custom bus connection safety** — `QPointer<DBusConnection>` prevents
+  dangling references when JS drops the connection.
+- **Catalog precedence** — user data dirs now correctly override system
+  dirs (was reversed).
+- **Method name injection** — dynamic methods installed via shared JS
+  factory, not string-interpolated evaluate.
+
+### Changed
+
+- `DBusPendingReply::value`/`values` return `QJSValue` with real JS
+  `Array`/`Object` instances (working `Array.isArray`, `.map`, `.filter`).
+  C++ consumers use `valueVariant()`/`valuesVariant()` for raw data.
+
 ## [0.2.4] — 2026-08-10
 
 ### Fixed

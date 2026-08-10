@@ -15,6 +15,10 @@ static void registerTypeConverters() {
 
     qDBusRegisterMetaType<QStringList>();
     qDBusRegisterMetaType<DBusAsArray>();
+    // NOTE: These registrations are process-global. The QStringList → "as"
+    // and DBusAsArray → "as" mappings affect the host app's QtDBus marshaling
+    // for ALL D-Bus traffic, not just dbusqml's. This is intentional — the
+    // library is a QML plugin loaded into a host process.
     {
         auto mt = QMetaType::fromType<QStringList>();
         if (mt.isValid())

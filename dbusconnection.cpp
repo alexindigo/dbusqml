@@ -333,12 +333,6 @@ QVariant unwrapDbus(const QVariant &v) {
 QVariant toDbusVariant(const QVariant &v) {
     int type = v.userType();
 
-    auto convert = [&](auto id, const auto &fn) -> QVariant {
-        if (type == id)
-            return QVariant::fromValue(fn(v.value<std::decay_t<decltype(fn(v))>>()));
-        return {};
-    };
-
     if (type == qMetaTypeId<DBus::Bool>())
         return QVariant::fromValue(v.value<DBus::Bool>().value);
     if (type == qMetaTypeId<DBus::Int16>())

@@ -239,8 +239,9 @@ When the adaptor is registered on the bus, other processes can call `Get`, `GetA
 
 **Limitations:**
 - Function names must follow QML camelCase convention (lowercase first letter)
-- Signal forwarding to D-Bus requires explicit `emitSignal()` calls — QML `signal` declarations are not automatically forwarded
-- Maximum 5 parameters for forwarded signals
+- QML `signal` declarations are automatically forwarded as D-Bus signals (maximum 5 parameters)
+- Static `DBus.emitSignal(service, path, iface, name, args)` always uses the session bus
+- Instance `emitSignal(name, args)` intentionally attempts `registerService(service)` so the signal appears to originate from that name (portal-style signals)
 
 #### Properties
 
