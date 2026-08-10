@@ -107,6 +107,7 @@ private:
     void doIntrospect();
     void onIntrospectionReady(const QString &xml);
     void setupDynamicMethods(const QStringList &methodNames);
+    void disconnectSignals();
 #ifdef DBUSQML_REACTIVE_BINDINGS
     void prepopulateFromCatalog();
 #endif
@@ -134,4 +135,11 @@ private:
     // Populated whenever a property is learned (fetchProperties,
     // onPropertiesChanged, catalog/live pre-populate).
     QHash<QString, QString> m_qmlToDbusName;
+
+    // Recorded signal connection parameters for exact disconnect.
+    // QtDBus disconnect requires exact-arg match with connect args.
+    QStringList m_connectedSignals;
+    QString m_connectedService;
+    QString m_connectedPath;
+    QString m_connectedIface;
 };

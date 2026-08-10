@@ -149,13 +149,7 @@ DBusProxy::DBusProxy(QObject *parent)
     : QQmlPropertyMap(this, parent), m_bus(QDBusConnection::sessionBus()) {}
 
 DBusProxy::~DBusProxy() {
-    if (m_signalsConnected) {
-        m_bus.disconnect(QString(), m_path, QString(), QString(), this,
-                         SLOT(onPropertiesChanged(QDBusMessage)));
-        m_bus.disconnect(m_service, m_path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                         this, SLOT(onPropertiesChanged(QDBusMessage)));
-        m_signalsConnected = false;
-    }
+    disconnectSignals();
 }
 
 void DBusProxy::componentComplete() {
@@ -200,13 +194,7 @@ void DBusProxy::setIface(const QString &v) {
     prepopulateFromCatalog();
 #endif
 
-    if (m_signalsConnected) {
-        m_bus.disconnect(QString(), m_path, QString(), QString(), this,
-                         SLOT(onPropertiesChanged(QDBusMessage)));
-        m_bus.disconnect(m_service, m_path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                         this, SLOT(onPropertiesChanged(QDBusMessage)));
-        m_signalsConnected = false;
-    }
+    disconnectSignals();
 
     if (m_introspectWatcher)
         m_introspectWatcher->deleteLater();
@@ -253,13 +241,7 @@ void DBusProxy::setSignalsEnabled(bool v) {
     if (m_signalsEnabled == v)
         return;
     m_signalsEnabled = v;
-    if (m_signalsConnected) {
-        m_bus.disconnect(QString(), m_path, QString(), QString(), this,
-                         SLOT(onPropertiesChanged(QDBusMessage)));
-        m_bus.disconnect(m_service, m_path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                         this, SLOT(onPropertiesChanged(QDBusMessage)));
-        m_signalsConnected = false;
-    }
+    disconnectSignals();
     if (v && !m_service.isEmpty() && !m_path.isEmpty() && !m_iface.isEmpty())
         QTimer::singleShot(0, this, &DBusProxy::doIntrospect);
     emit signalsEnabledChanged();
@@ -326,13 +308,7 @@ void DBusProxy::setConnection(DBusConnection *v) {
     if (m_conn == v)
         return;
 
-    if (m_signalsConnected) {
-        m_bus.disconnect(QString(), m_path, QString(), QString(), this,
-                         SLOT(onPropertiesChanged(QDBusMessage)));
-        m_bus.disconnect(m_service, m_path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                         this, SLOT(onPropertiesChanged(QDBusMessage)));
-        m_signalsConnected = false;
-    }
+    disconnectSignals();
 
     m_conn = v;
     if (v) {
@@ -448,6 +424,26 @@ QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
     msg.setArguments({m_iface, dbusName, QVariant::fromValue(QDBusVariant(toDbusVariant(input)))});
     m_bus.asyncCall(msg);
     return input;
+}
+
+void DBusProxy::disconnectSignals() {
+    if (!m_signalsConnected)
+        return;
+
+    // Disconnect each recorded per-signal hook with the exact arguments
+    // used at connect time. QtDBus disconnect requires exact-arg match.
+    for (const QString &sigName : std::as_const(m_connectedSignals)) {
+        m_bus.disconnect(QString(), m_connectedPath, m_connectedIface, sigName, this,
+                         SLOT(onPropertiesChanged(QDBusMessage)));
+    }
+    m_bus.disconnect(m_connectedService, m_connectedPath, "org.freedesktop.DBus.Properties",
+                     "PropertiesChanged", this, SLOT(onPropertiesChanged(QDBusMessage)));
+
+    m_connectedSignals.clear();
+    m_connectedService.clear();
+    m_connectedPath.clear();
+    m_connectedIface.clear();
+    m_signalsConnected = false;
 }
 
 void DBusProxy::fetchProperties() {
@@ -607,6 +603,11 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
         m_bus.connect(m_service, m_path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
                       this, SLOT(onPropertiesChanged(QDBusMessage)));
 
+        // Record exact connect args for exact disconnect later
+        m_connectedSignals = signalNames;
+        m_connectedService = m_service;
+        m_connectedPath = m_path;
+        m_connectedIface = m_iface;
         m_signalsConnected = true;
     }
 
