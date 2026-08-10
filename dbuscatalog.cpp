@@ -35,10 +35,13 @@ void DBusCatalog::loadPaths() {
     // 1. Bundled Qt resource
     paths << QStringLiteral(":/dbusqml/types");
 
-    // 2. System XDG data dirs
+    // 2. System XDG data dirs — reverse-iterate so user dirs are
+    //    processed LAST (and thus win, since later inserts overwrite).
+    //    standardLocations returns user-first, so reverse for
+    //    system-first-then-user precedence.
     const auto genericData = QStandardPaths::standardLocations(QStandardPaths::GenericDataLocation);
-    for (const QString &dir : genericData)
-        paths << (dir + QStringLiteral("/dbusqml/types"));
+    for (auto it = genericData.crbegin(); it != genericData.crend(); ++it)
+        paths << (*it + QStringLiteral("/dbusqml/types"));
 
     // 3. User XDG config
     const QString userDir = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);

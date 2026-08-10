@@ -60,6 +60,7 @@ dbusqml ships descriptors for these interfaces:
 - `org.freedesktop.portal.Settings`
 - `org.freedesktop.portal.NetworkMonitor`
 - `org.freedesktop.UPower`
+- `org.freedesktop.NetworkManager`
 
 ## Overriding a bundled interface
 
