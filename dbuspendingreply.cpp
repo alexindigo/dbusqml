@@ -5,7 +5,6 @@
 #include <QDBusPendingReply>
 #include <QDBusReply>
 #include <QDBusVariant>
-#include <QQmlEngine>
 
 DBusPendingReply::DBusPendingReply(QObject *parent) : QObject(parent) {}
 
@@ -36,19 +35,7 @@ DBusError DBusPendingReply::error() const {
     return DBusError(QDBusError(QDBusError::InternalError, "No pending call"));
 }
 
-QJSValue DBusPendingReply::value() const {
-    if (m_jsCached)
-        return m_jsValue;
-    return {};
-}
-
-QJSValue DBusPendingReply::values() const {
-    if (m_jsCached)
-        return m_jsValues;
-    return {};
-}
-
-QVariant DBusPendingReply::valueVariant() const {
+QVariant DBusPendingReply::value() const {
     if (m_cached)
         return m_value;
     if (!m_watcher || m_watcher->isError())
@@ -62,7 +49,7 @@ QVariant DBusPendingReply::valueVariant() const {
     return unwrapDbus(val);
 }
 
-QVariantList DBusPendingReply::valuesVariant() const {
+QVariantList DBusPendingReply::values() const {
     if (m_cached)
         return m_values;
     if (!m_watcher || m_watcher->isError())
@@ -90,17 +77,6 @@ void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
                 args[i] = unwrapDbus(args[i]);
             m_values = args;
             m_value = args.isEmpty() ? QVariant() : args.first();
-
-            // Convert to real JS Array/Object instances so QML gets
-            // working Array.isArray, .map, .filter, etc. — not the
-            // array-like QVariantList wrappers the engine produces
-            // by default.
-            QQmlEngine *engine = m_engine;
-            if (engine) {
-                m_jsValue = variantToJs(engine, m_value);
-                m_jsValues = variantToJs(engine, QVariant::fromValue(m_values));
-                m_jsCached = true;
-            }
         }
 
         m_cached = true;

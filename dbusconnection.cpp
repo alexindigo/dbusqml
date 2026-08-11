@@ -401,7 +401,6 @@ DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message) {
     auto pending = m_connection.asyncCall(qmsg);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
-    reply->setEngine(qmlEngine(this));
     reply->setWatcher(watcher);
     return reply;
 }
@@ -435,9 +434,9 @@ void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resol
                         reject.call({errObj});
                     }
                 } else if (resolve.isCallable()) {
-                    QVariant unwrapped = unwrapDbus(reply->valueVariant());
+                    QVariant unwrapped = unwrapDbus(reply->value());
                     QJSValue val = engine ? variantToJs(engine.data(), unwrapped)
-                                          : QJSValue(reply->valueVariant().toString());
+                                          : QJSValue(reply->value().toString());
                     resolve.call({val});
                 }
             });

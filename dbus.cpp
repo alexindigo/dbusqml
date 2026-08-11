@@ -122,7 +122,6 @@ public:
         auto pending = bus.asyncCall(msg);
         auto watcher = new QDBusPendingCallWatcher(pending, this);
         auto reply = new DBusPendingReply(this);
-        reply->setEngine(qmlEngine(m_proxy));
         reply->setWatcher(watcher);
         return reply;
     }
@@ -406,7 +405,6 @@ DBusPendingReply *DBusProxy::call(const QString &method, const QVariantList &arg
     auto pending = m_bus.asyncCall(msg);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
-    reply->setEngine(qmlEngine(this));
     reply->setWatcher(watcher);
     return reply;
 }
@@ -422,7 +420,6 @@ DBusPendingReply *DBusProxy::getProperty(const QString &name) {
     auto pending = m_bus.asyncCall(msg);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
-    reply->setEngine(qmlEngine(this));
     reply->setWatcher(watcher);
     return reply;
 }

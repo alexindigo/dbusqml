@@ -155,7 +155,7 @@ private slots:
         QVERIFY(reply->isFinished());
         QVERIFY(!reply->isError());
         QVERIFY(reply->isValid());
-        QCOMPARE(reply->valueVariant().toString(), QStringLiteral("hello"));
+        QCOMPARE(reply->value().toString(), QStringLiteral("hello"));
 
         delete reply;
     }
@@ -185,7 +185,7 @@ private slots:
         auto *reply = new DBusPendingReply(this);
         QCOMPARE(reply->isError(), true);
         QCOMPARE(reply->isValid(), false);
-        QVERIFY(!reply->valueVariant().isValid());
+        QVERIFY(!reply->value().isValid());
 
         DBusError err = reply->error();
         QCOMPARE(err.isValid(), true);
@@ -269,7 +269,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toBool(), true);
+        QCOMPARE(reply->value().toBool(), true);
         delete reply;
     }
 
@@ -290,7 +290,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toInt(), 42);
+        QCOMPARE(reply->value().toInt(), 42);
         delete reply;
     }
 
@@ -311,7 +311,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toInt(), 32767);
+        QCOMPARE(reply->value().toInt(), 32767);
         delete reply;
     }
 
@@ -332,7 +332,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toLongLong(), Q_INT64_C(21474836470));
+        QCOMPARE(reply->value().toLongLong(), Q_INT64_C(21474836470));
         delete reply;
     }
 
@@ -353,7 +353,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toUInt(), 4294967295U);
+        QCOMPARE(reply->value().toUInt(), 4294967295U);
         delete reply;
     }
 
@@ -374,7 +374,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toUInt(), 65535U);
+        QCOMPARE(reply->value().toUInt(), 65535U);
         delete reply;
     }
 
@@ -395,7 +395,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toULongLong(), Q_UINT64_C(18446744073709551615));
+        QCOMPARE(reply->value().toULongLong(), Q_UINT64_C(18446744073709551615));
         delete reply;
     }
 
@@ -416,7 +416,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toDouble(), 3.14);
+        QCOMPARE(reply->value().toDouble(), 3.14);
         delete reply;
     }
 
@@ -437,7 +437,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toUInt(), 255U);
+        QCOMPARE(reply->value().toUInt(), 255U);
         delete reply;
     }
 
@@ -458,7 +458,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toString(), QStringLiteral("hello"));
+        QCOMPARE(reply->value().toString(), QStringLiteral("hello"));
         delete reply;
     }
 
@@ -479,8 +479,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().value<QDBusObjectPath>().path(),
-                 QStringLiteral("/test/path"));
+        QCOMPARE(reply->value().value<QDBusObjectPath>().path(), QStringLiteral("/test/path"));
         delete reply;
     }
 
@@ -501,7 +500,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().value<QDBusSignature>().signature(), QStringLiteral("s"));
+        QCOMPARE(reply->value().value<QDBusSignature>().signature(), QStringLiteral("s"));
         delete reply;
     }
 
@@ -524,7 +523,7 @@ private slots:
         QVERIFY(!reply->isError());
 
         // value() now unwraps QDBusVariant automatically, so we get the inner string
-        QCOMPARE(reply->valueVariant().toString(), QStringLiteral("var_val"));
+        QCOMPARE(reply->value().toString(), QStringLiteral("var_val"));
         delete reply;
     }
 
@@ -546,14 +545,14 @@ private slots:
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
 
-        QVariant val = reply->valueVariant();
+        QVariant val = reply->value();
         // The value should NOT be a QDBusVariant — it should be unwrapped to QString
         QVERIFY(val.userType() != qMetaTypeId<QDBusVariant>());
         QVERIFY(val.userType() == QMetaType::QString || val.canConvert<QString>());
         QCOMPARE(val.toString(), QStringLiteral("test_val"));
 
         // Also verify values() unwraps properly
-        QVariantList all = reply->valuesVariant();
+        QVariantList all = reply->values();
         QVERIFY(all.size() > 0);
         QVERIFY(all[0].userType() != qMetaTypeId<QDBusVariant>());
 
@@ -582,7 +581,7 @@ private slots:
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
 
-        QVariantList all = reply->valuesVariant();
+        QVariantList all = reply->values();
         QVERIFY(all.size() > 0);
         QVERIFY(all[0].isValid());
 
@@ -664,7 +663,7 @@ private slots:
         QVERIFY(spy.wait(5000));
         QVERIFY(!reply->isError());
 
-        QVariant val = reply->valueVariant();
+        QVariant val = reply->value();
         QVERIFY(val.isValid());
         QCOMPARE(val.toString(), QStringLiteral("hello_prop"));
         delete reply;
@@ -959,7 +958,7 @@ private slots:
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(3000));
         QVERIFY(!reply->isError());
-        QCOMPARE(reply->valueVariant().toString(), QStringLiteral("org.dbusqml.AdaptorGetTest"));
+        QCOMPARE(reply->value().toString(), QStringLiteral("org.dbusqml.AdaptorGetTest"));
         delete reply;
     }
 
@@ -981,7 +980,7 @@ private slots:
         QVERIFY(spy.wait(3000));
         QVERIFY(!reply->isError());
 
-        QVariant v = reply->valueVariant();
+        QVariant v = reply->value();
         QVERIFY(v.isValid());
         // Should have been unwrapped into a QVariantList of path strings.
         QCOMPARE(v.userType(), qMetaTypeId<QVariantList>());
