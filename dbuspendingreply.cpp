@@ -86,7 +86,15 @@ void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
     }
 
     m_finished = true;
-    emit finished();
+    // Queue the emission so a synchronous reply.finished.connect() right
+    // after call() always lands first. QPointer guard: if the engine is
+    // destroyed before the queued call runs, m_engine is null and the
+    // emission is skipped — no crash.
+    if (m_engine) {
+        QMetaObject::invokeMethod(this, "finished", Qt::QueuedConnection);
+    } else {
+        emit finished();
+    }
 
     // Clean up the watcher after the signal is delivered. SingleShotConnection
     // means this is the only slot, so the signal emission completes before the

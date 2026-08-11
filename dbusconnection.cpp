@@ -401,6 +401,7 @@ DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message) {
     auto pending = m_connection.asyncCall(qmsg);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
+    reply->setEngine(qmlEngine(this));
     reply->setWatcher(watcher);
     return reply;
 }

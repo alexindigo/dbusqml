@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QVariant>
 
+class QQmlEngine;
 #include <qqmlregistration.h>
 
 #include "dbuserror.h"
@@ -26,6 +27,7 @@ public:
     ~DBusPendingReply() override;
 
     void setWatcher(QDBusPendingCallWatcher *watcher);
+    void setEngine(QQmlEngine *engine) { m_engine = engine; }
 
     bool isFinished() const { return m_finished; }
     bool isError() const;
@@ -51,4 +53,5 @@ private:
     QVariant m_value;
     QVariantList m_values;
     bool m_cached = false;
+    QPointer<QQmlEngine> m_engine;
 };
