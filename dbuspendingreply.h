@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDBusPendingCallWatcher>
+#include <QJSValue>
 #include <QObject>
 #include <QPointer>
 #include <QVariant>
@@ -19,8 +20,8 @@ class DBusPendingReply : public QObject {
     Q_PROPERTY(bool isError READ isError NOTIFY finished)
     Q_PROPERTY(bool isValid READ isValid NOTIFY finished)
     Q_PROPERTY(DBusError error READ error NOTIFY finished)
-    Q_PROPERTY(QVariant value READ value NOTIFY finished)
-    Q_PROPERTY(QVariantList values READ values NOTIFY finished)
+    Q_PROPERTY(QJSValue value READ valueJs NOTIFY finished)
+    Q_PROPERTY(QJSValue values READ valuesJs NOTIFY finished)
 
 public:
     explicit DBusPendingReply(QObject *parent = nullptr);
@@ -33,6 +34,10 @@ public:
     bool isError() const;
     bool isValid() const;
     DBusError error() const;
+    QJSValue valueJs();
+    QJSValue valuesJs();
+
+    // C++ accessors — raw QVariant data
     QVariant value() const;
     QVariantList values() const;
 

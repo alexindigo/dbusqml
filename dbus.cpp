@@ -122,7 +122,7 @@ public:
         auto pending = bus.asyncCall(msg);
         auto watcher = new QDBusPendingCallWatcher(pending, this);
         auto reply = new DBusPendingReply(this);
-        reply->setEngine(qmlEngine(this));
+        reply->setEngine(qmlEngine(m_proxy));
         reply->setWatcher(watcher);
         return reply;
     }

@@ -5,6 +5,7 @@
 #include <QDBusPendingReply>
 #include <QDBusReply>
 #include <QDBusVariant>
+#include <QQmlEngine>
 
 DBusPendingReply::DBusPendingReply(QObject *parent) : QObject(parent) {}
 
@@ -38,6 +39,27 @@ DBusError DBusPendingReply::error() const {
     if (m_watcher)
         return DBusError(m_watcher->error());
     return DBusError(QDBusError(QDBusError::InternalError, "No pending call"));
+}
+
+QJSValue DBusPendingReply::valueJs() {
+    // Convert on demand — no caching, no engine-lifetime coupling.
+    // The engine is alive when QML reads this property (QML evaluation
+    // context). If the engine is gone, return an invalid QJSValue.
+    QQmlEngine *engine = m_engine ? m_engine.data() : nullptr;
+    if (!engine)
+        engine = qmlEngine(parent());
+    if (!engine)
+        return {};
+    return variantToJs(engine, value());
+}
+
+QJSValue DBusPendingReply::valuesJs() {
+    QQmlEngine *engine = m_engine ? m_engine.data() : nullptr;
+    if (!engine)
+        engine = qmlEngine(parent());
+    if (!engine)
+        return {};
+    return variantToJs(engine, QVariant::fromValue(values()));
 }
 
 QVariant DBusPendingReply::value() const {
