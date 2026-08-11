@@ -12,7 +12,12 @@ DBusPendingReply::~DBusPendingReply() {}
 
 void DBusPendingReply::setWatcher(QDBusPendingCallWatcher *watcher) {
     m_watcher = watcher;
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, &DBusPendingReply::onFinished);
+    // SingleShotConnection: auto-disconnects after firing once, so the
+    // callback doesn't hold a reference that would prevent GC. The watcher
+    // is deleted immediately after the callback completes — safe because
+    // this is the only slot (SingleShotConnection).
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, &DBusPendingReply::onFinished,
+            Qt::SingleShotConnection);
 }
 
 bool DBusPendingReply::isError() const {
@@ -62,16 +67,14 @@ QVariantList DBusPendingReply::values() const {
 }
 
 void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
-    Q_UNUSED(watcher);
-
     if (m_watcher && !m_cached) {
-        m_isError = m_watcher->isError();
-        m_isValid = m_watcher->isValid() && !m_watcher->isError();
+        m_isError = watcher->isError();
+        m_isValid = watcher->isValid() && !watcher->isError();
 
         if (m_isError) {
-            m_error = DBusError(m_watcher->error());
+            m_error = DBusError(watcher->error());
         } else {
-            QDBusMessage reply = m_watcher->reply();
+            QDBusMessage reply = watcher->reply();
             QVariantList args = reply.arguments();
             for (int i = 0; i < args.size(); ++i)
                 args[i] = unwrapDbus(args[i]);
@@ -80,9 +83,14 @@ void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
         }
 
         m_cached = true;
-        m_watcher = nullptr;
     }
 
     m_finished = true;
     emit finished();
+
+    // Clean up the watcher after the signal is delivered. SingleShotConnection
+    // means this is the only slot, so the signal emission completes before the
+    // destructor runs. Immediate delete (not deleteLater) is safe here.
+    delete watcher;
+    m_watcher = nullptr;
 }
