@@ -38,7 +38,7 @@ QJSValue variantToJs(QQmlEngine *engine, const QVariant &v) {
 
 // Read a single element from a QDBusArgument using the correct type
 // based on the current signature. Avoids operator>>(QDBusArgument,
-// QVariant) which crashes inside libdbus for struct members.
+// QVariant) which crashes inside libdbus inside nested containers.
 static QVariant readBySignature(const QDBusArgument &arg) {
     const QString sig = arg.currentSignature();
 
@@ -119,19 +119,56 @@ static QVariant readBySignature(const QDBusArgument &arg) {
         return QVariant::fromValue(v);
     }
 
-    // Complex types — read as variant, unwrapDbus handles the recursion
-    QVariant v = arg.asVariant();
-    return unwrapDbus(v);
-}
+    // Containers — recursive, signature-driven. The caller has already
+    // opened the container (beginStructure / beginMap / beginMapEntry /
+    // beginArray) and we're positioned at one complete element. For a
+    // nested container we open it, recurse per member/element/entry, and
+    // close it. Never touches operator>>(QDBusArgument, QVariant&).
+    if (sig.startsWith(QStringLiteral("a{"))) {
+        // Array of dict entries — a{KV}. Read entries one by one.
+        QVariantMap map;
+        arg.beginMap();
+        while (!arg.atEnd()) {
+            arg.beginMapEntry();
+            QVariant key = readBySignature(arg);
+            QVariant value = readBySignature(arg);
+            map.insert(key.toString(), unwrapDbus(value));
+            arg.endMapEntry();
+        }
+        arg.endMap();
+        return map;
+    }
+    if (sig.startsWith(QStringLiteral("a(")) || sig.startsWith(QStringLiteral("a["))) {
+        // Array of structs — a(...). Elements are structs.
+        QVariantList out;
+        arg.beginArray();
+        while (!arg.atEnd())
+            out.append(readBySignature(arg));
+        arg.endArray();
+        return out;
+    }
+    if (sig.startsWith(QStringLiteral("aa"))) {
+        // Array of arrays — aa* (including aa{...}). Elements are arrays.
+        QVariantList out;
+        arg.beginArray();
+        while (!arg.atEnd())
+            out.append(readBySignature(arg));
+        arg.endArray();
+        return out;
+    }
+    if (sig.startsWith(QStringLiteral("("))) {
+        // Struct / tuple — (...). Members read per-signature.
+        QVariantList members;
+        arg.beginStructure();
+        while (!arg.atEnd())
+            members.append(readBySignature(arg));
+        arg.endStructure();
+        return members;
+    }
 
-// Convert a QList<T> of any demarshalable type to QVariantList.
-// Each element is recursively unwrapped via unwrapDbus.
-template <typename T> QVariantList toVariantList(const QList<T> &list) {
-    QVariantList out;
-    out.reserve(list.size());
-    for (const T &elem : list)
-        out.append(unwrapDbus(QVariant::fromValue(elem)));
-    return out;
+    // Unrecognized signature — make the gap visible in logs.
+    qWarning("DBus: readBySignature: unsupported signature %s", qPrintable(sig));
+    return {};
 }
 
 // Recursively unwrap QDBusVariant / QDBusArgument values into plain QVariant
@@ -145,8 +182,10 @@ QVariant unwrapDbus(const QVariant &v) {
         const QDBusArgument arg = v.value<QDBusArgument>();
         const QString sig = arg.currentSignature();
 
-        // Dicts with string keys — a{s*}
-        if (sig.startsWith("a{s")) {
+        // Top-level dict with string keys — fast path via the concrete
+        // QVariantMap read. Nested dicts (a{sa{sv}} etc.) are handled by
+        // the recursive readBySignature branch below.
+        if (sig.startsWith("a{") && sig.length() == 4 && sig[2] == 's') {
             QVariantMap map;
             arg >> map;
             QVariantMap out;
@@ -154,7 +193,7 @@ QVariant unwrapDbus(const QVariant &v) {
                 out.insert(it.key(), unwrapDbus(it.value()));
             return out;
         }
-        // Array of variants — safe to iterate with QVariant target.
+        // Array of variants — safe to iterate with QVariant target at top level.
         if (sig == "av") {
             QVariantList list;
             arg.beginArray();
@@ -193,165 +232,10 @@ QVariant unwrapDbus(const QVariant &v) {
             return bytes;
         }
 
-        // Struct arrays — a(...) where ... is any member types.
-        // e.g. a(ssssssb) from fcitx5 → QVariantList of QVariantList.
-        if (sig.startsWith("a(")) {
-            QVariantList result;
-            arg.beginArray();
-            while (!arg.atEnd()) {
-                arg.beginStructure();
-                QVariantList members;
-                while (!arg.atEnd()) {
-                    members.append(readBySignature(arg));
-                }
-                arg.endStructure();
-                // NOTE: QVariant::fromValue wraps the member list as ONE
-                // element — plain result.append(members) would call the
-                // QList::append(const QList&) overload and CONCATENATE the
-                // members, flattening the struct array (754 structs became
-                // 5278 flat members). Caught on the arch-niri VM.
-                result.append(QVariant::fromValue(members));
-            }
-            arg.endArray();
-            return result;
-        }
-
-        // Mixed tuples — bare (...) without array wrapper.
-        // e.g. sssssssbsa{sv} from fcitx5 → QVariantList.
-        if (sig.startsWith("(")) {
-            QVariantList members;
-            arg.beginStructure();
-            while (!arg.atEnd()) {
-                members.append(readBySignature(arg));
-            }
-            arg.endStructure();
-            return members;
-        }
-
-        // Generic dicts — a{...} with any key type.
-        // The a{s*} handler above already covers string keys; this is the
-        // fallback for dicts with other key types.
-        if (sig.startsWith("a{")) {
-            QVariantMap result;
-            arg.beginMap();
-            while (!arg.atEnd()) {
-                arg.beginMapEntry();
-                QVariant key, value;
-                arg >> key;
-                arg >> value;
-                result.insert(key.toString(), unwrapDbus(value));
-                arg.endMapEntry();
-            }
-            arg.endMap();
-            return result;
-        }
-
-        // Arrays of dicts — aa{...}, e.g. NetworkManager's aa{sv}
-        // (Ip4Config.AddressData / NameserverData, Wireless AP data).
-        // Each element is a dict (QDBusArgument map): read it per-entry and
-        // recurse via unwrapDbus on each value. Keys/values are read via
-        // readBySignature — operator>>(QDBusArgument, QVariant&) crashes
-        // inside libdbus at this nesting depth (caught on arch-niri VM).
-        if (sig.startsWith("aa{")) {
-            QVariantList out;
-            arg.beginArray();
-            while (!arg.atEnd()) {
-                QVariantMap m;
-                arg.beginMap();
-                while (!arg.atEnd()) {
-                    arg.beginMapEntry();
-                    QVariant key = readBySignature(arg);
-                    QVariant value = readBySignature(arg);
-                    m.insert(key.toString(), unwrapDbus(value));
-                    arg.endMapEntry();
-                }
-                arg.endMap();
-                out.append(m);
-            }
-            arg.endArray();
-            return out;
-        }
-
-        // Generic arrays of basic types — au, ai, ad, ab, an, aq, at, ax,
-        // ag, av. Uses beginArray + specific C++ type read per element.
-        // Concrete-typed arrays cannot be read with an untyped QVariant
-        // target (crashes inside libdbus), so we dispatch to the correct
-        // C++ type via the signature character.
-        if (sig.startsWith("a") && sig.length() == 2) {
-            switch (sig[1].toLatin1()) {
-            case 'y': {
-                QList<uchar> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 'b': {
-                QList<bool> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 'n': {
-                QList<short> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 'q': {
-                QList<ushort> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 'i': {
-                QList<int> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 'u': {
-                QList<uint> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 'x': {
-                QList<qint64> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 't': {
-                QList<quint64> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 'd': {
-                QList<double> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 's': {
-                QStringList l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 'o': {
-                QList<QDBusObjectPath> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 'g': {
-                QList<QDBusSignature> l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            case 'v': {
-                QVariantList l;
-                arg >> l;
-                return toVariantList(l);
-            }
-            default:
-                break;
-            }
-        }
-
-        // Unrecognized signature — make the gap visible in logs.
-        qWarning("DBus: unwrapDbus: unsupported signature %s", qPrintable(sig));
-        return v;
+        // Everything else — nested containers, dict arrays, structs,
+        // tuples, deep nesting. readBySignature recurses per-element and
+        // never touches operator>>(QDBusArgument, QVariant&).
+        return readBySignature(arg);
     }
     return v;
 }

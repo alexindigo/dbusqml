@@ -21,6 +21,33 @@
 #include "../dbusadaptor.h"
 #include "dbustypes.h"
 
+// a{sa{sv}}-ish container shapes for the test service replies.
+// Registered with QtDBus in main() so the service methods can marshal.
+typedef QMap<QString, QVariantMap> StringVariantMapMap;
+Q_DECLARE_METATYPE(QList<QVariantMap>)
+Q_DECLARE_METATYPE(StringVariantMapMap)
+
+// (ii) struct for the a(ii) struct-array test — registered as a D-Bus type
+// so QtDBus can marshal it without hand-built QDBusArgument wrapping.
+struct IntPair {
+    int first;
+    int second;
+};
+Q_DECLARE_METATYPE(IntPair)
+
+inline QDBusArgument &operator<<(QDBusArgument &arg, const IntPair &p) {
+    arg.beginStructure();
+    arg << p.first << p.second;
+    arg.endStructure();
+    return arg;
+}
+inline const QDBusArgument &operator>>(const QDBusArgument &arg, IntPair &p) {
+    arg.beginStructure();
+    arg >> p.first >> p.second;
+    arg.endStructure();
+    return arg;
+}
+
 // ==================== Mock D-Bus Service ====================
 
 class TestService : public QObject {
@@ -60,6 +87,28 @@ public slots:
         b[QStringLiteral("prefix")] = 8U;
         return {a, b};
     }
+
+    // Dict of dicts — a{sa{sv}}, NM GetSettings connection section shape:
+    // {"802-11-wireless": {"ssid": "MyWifi", "mode": "infrastructure"}, ...}
+    StringVariantMapMap connectionSettings() {
+        QVariantMap wifi;
+        wifi[QStringLiteral("ssid")] = QStringLiteral("MyWifi");
+        wifi[QStringLiteral("mode")] = QStringLiteral("infrastructure");
+        QVariantMap sec;
+        sec[QStringLiteral("key-mgmt")] = QStringLiteral("wpa-psk");
+        QMap<QString, QVariantMap> out;
+        out.insert(QStringLiteral("802-11-wireless"), wifi);
+        out.insert(QStringLiteral("802-11-wireless-security"), sec);
+        return out;
+    }
+
+    // Array of byte arrays — aay. Each element is an ay (SSID bytes etc.).
+    QList<QByteArray> byteArrayList() {
+        return {QByteArray("Hello"), QByteArray("\x00\x01\xfe\xff")};
+    }
+
+    // Struct array — a(ii). Exercises the recursive struct reader.
+    QList<IntPair> intPairList() { return {{0, 0}, {1, 10}, {2, 20}}; }
 
     int methodWithArgs(int a, const QString &b) { return a + b.size(); }
     void noReturnMethod() {}
@@ -126,11 +175,6 @@ static bool registerTestService() {
 
     return true;
 }
-
-// a{sa{sv}}-ish container shape for the aa{sv} service reply.
-// Registered with QtDBus in main() so TestService::addressDataList()
-// (aa{sv}) can be marshaled over the bus.
-Q_DECLARE_METATYPE(QList<QVariantMap>)
 
 // ==================== Test Class ====================
 
@@ -1100,6 +1144,100 @@ private slots:
         delete reply;
     }
 
+    // Dict of dicts — a{sa{sv}}, NM connection-settings shape. Previously
+    // fell to the generic a{...} fallback which read values via
+    // operator>>(QDBusArgument, QVariant&) — the libdbus crash path.
+    // The recursive reader must handle nested dict values per-signature.
+    void testUnwrapDictOfDicts() {
+        DBusMessage msg;
+        msg.setService("org.dbusqml.TestService");
+        msg.setPath("/TestService");
+        msg.setIface("org.dbusqml.TestService");
+        msg.setMember("connectionSettings");
+
+        SessionBusConnection bus;
+        auto *reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY(!reply->isError());
+
+        QVariant v = reply->value();
+        QCOMPARE(v.userType(), qMetaTypeId<QVariantMap>());
+        QVariantMap sections = v.toMap();
+        QVERIFY(sections.contains(QStringLiteral("802-11-wireless")));
+        QVERIFY(sections.contains(QStringLiteral("802-11-wireless-security")));
+
+        QCOMPARE(sections[QStringLiteral("802-11-wireless")].userType(),
+                 qMetaTypeId<QVariantMap>());
+        QVariantMap wifi = sections[QStringLiteral("802-11-wireless")].toMap();
+        QCOMPARE(wifi[QStringLiteral("ssid")].toString(), QStringLiteral("MyWifi"));
+        QCOMPARE(wifi[QStringLiteral("mode")].toString(), QStringLiteral("infrastructure"));
+
+        QVariantMap sec = sections[QStringLiteral("802-11-wireless-security")].toMap();
+        QCOMPARE(sec[QStringLiteral("key-mgmt")].toString(), QStringLiteral("wpa-psk"));
+
+        delete reply;
+    }
+
+    // Array of byte arrays — aay. Each element must demarshal as an
+    // independent QByteArray (no flattening, no string conversion).
+    void testUnwrapByteArrayList() {
+        DBusMessage msg;
+        msg.setService("org.dbusqml.TestService");
+        msg.setPath("/TestService");
+        msg.setIface("org.dbusqml.TestService");
+        msg.setMember("byteArrayList");
+
+        SessionBusConnection bus;
+        auto *reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY(!reply->isError());
+
+        QVariant v = reply->value();
+        QCOMPARE(v.userType(), qMetaTypeId<QVariantList>());
+        QVariantList list = v.toList();
+        QCOMPARE(list.size(), 2);
+        QCOMPARE(list.at(0).toByteArray(), QByteArray("Hello"));
+        QCOMPARE(list.at(1).toByteArray(), QByteArray("\x00\x01\xfe\xff"));
+
+        delete reply;
+    }
+
+    // Struct array — a(ii). Elements must arrive as a QVariantList of
+    // QVariantList (one per struct), with member values intact.
+    void testUnwrapStructArray() {
+        DBusMessage msg;
+        msg.setService("org.dbusqml.TestService");
+        msg.setPath("/TestService");
+        msg.setIface("org.dbusqml.TestService");
+        msg.setMember("intPairList");
+
+        SessionBusConnection bus;
+        auto *reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY(!reply->isError());
+
+        QVariant v = reply->value();
+        QCOMPARE(v.userType(), qMetaTypeId<QVariantList>());
+        QVariantList structs = v.toList();
+        QCOMPARE(structs.size(), 3);
+
+        for (int i = 0; i < 3; ++i) {
+            QCOMPARE(structs.at(i).userType(), qMetaTypeId<QVariantList>());
+            QVariantList pair = structs.at(i).toList();
+            QCOMPARE(pair.size(), 2);
+            QCOMPARE(pair.at(0).toInt(), i);
+            QCOMPARE(pair.at(1).toInt(), i * 10);
+        }
+
+        delete reply;
+    }
+
     // Switching iface at runtime must remove the old iface's dynamic methods
     // from the property map. Otherwise they stay callable and silently dispatch
     // on the new iface, producing method-not-found errors.
@@ -1201,6 +1339,10 @@ int main(int argc, char *argv[]) {
     // QList<QVariantMap> must be a registered D-Bus metatype for the
     // aa{sv} service method to marshal.
     qDBusRegisterMetaType<QList<QVariantMap>>();
+    qDBusRegisterMetaType<StringVariantMapMap>();
+    qDBusRegisterMetaType<QList<QByteArray>>();
+    qDBusRegisterMetaType<IntPair>();
+    qDBusRegisterMetaType<QList<IntPair>>();
 
     int rc = 0;
     {
