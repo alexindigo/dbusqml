@@ -246,6 +246,32 @@ QVariant unwrapDbus(const QVariant &v) {
             return result;
         }
 
+        // Arrays of dicts — aa{...}, e.g. NetworkManager's aa{sv}
+        // (Ip4Config.AddressData / NameserverData, Wireless AP data).
+        // Each element is a dict (QDBusArgument map): read it per-entry and
+        // recurse via unwrapDbus on each value. Keys/values are read via
+        // readBySignature — operator>>(QDBusArgument, QVariant&) crashes
+        // inside libdbus at this nesting depth (caught on arch-niri VM).
+        if (sig.startsWith("aa{")) {
+            QVariantList out;
+            arg.beginArray();
+            while (!arg.atEnd()) {
+                QVariantMap m;
+                arg.beginMap();
+                while (!arg.atEnd()) {
+                    arg.beginMapEntry();
+                    QVariant key = readBySignature(arg);
+                    QVariant value = readBySignature(arg);
+                    m.insert(key.toString(), unwrapDbus(value));
+                    arg.endMapEntry();
+                }
+                arg.endMap();
+                out.append(m);
+            }
+            arg.endArray();
+            return out;
+        }
+
         // Generic arrays of basic types — au, ai, ad, ab, an, aq, at, ax,
         // ag, av. Uses beginArray + specific C++ type read per element.
         // Concrete-typed arrays cannot be read with an untyped QVariant

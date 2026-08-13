@@ -10,6 +10,7 @@
 #include <QThread>
 #include <QProcess>
 #include <QDBusConnectionInterface>
+#include <QDBusMetaType>
 #include <iostream>
 
 #include "../dbusconnection.h"
@@ -46,6 +47,18 @@ public slots:
     QDBusVariant echoVariant(const QDBusVariant &v) { return v; }
     QList<QDBusObjectPath> objectPathList() {
         return {QDBusObjectPath("/a"), QDBusObjectPath("/b"), QDBusObjectPath("/c/d")};
+    }
+
+    // Array of dicts — aa{sv}, NetworkManager Ip4Config.AddressData shape:
+    // [{"address":"192.168.1.2","prefix":24}, ...]
+    QList<QVariantMap> addressDataList() {
+        QVariantMap a;
+        a[QStringLiteral("address")] = QStringLiteral("192.168.1.2");
+        a[QStringLiteral("prefix")] = 24U;
+        QVariantMap b;
+        b[QStringLiteral("address")] = QStringLiteral("10.0.0.5");
+        b[QStringLiteral("prefix")] = 8U;
+        return {a, b};
     }
 
     int methodWithArgs(int a, const QString &b) { return a + b.size(); }
@@ -113,6 +126,11 @@ static bool registerTestService() {
 
     return true;
 }
+
+// a{sa{sv}}-ish container shape for the aa{sv} service reply.
+// Registered with QtDBus in main() so TestService::addressDataList()
+// (aa{sv}) can be marshaled over the bus.
+Q_DECLARE_METATYPE(QList<QVariantMap>)
 
 // ==================== Test Class ====================
 
@@ -993,6 +1011,44 @@ private slots:
         delete reply;
     }
 
+    // Array of dicts — aa{sv}, NetworkManager Ip4Config.AddressData shape.
+    // unwrapDbus previously fell through to the "unsupported signature"
+    // warning and surfaced an empty string; with operator>>(QDBusArgument,
+    // QVariant&) inside a nested container it crashed inside libdbus
+    // (caught on the arch-niri VM). Regression guard: values must arrive
+    // as QVariantList of QVariantMap with intact entries.
+    void testUnwrapArrayOfDicts() {
+        DBusMessage msg;
+        msg.setService("org.dbusqml.TestService");
+        msg.setPath("/TestService");
+        msg.setIface("org.dbusqml.TestService");
+        msg.setMember("addressDataList");
+
+        SessionBusConnection bus;
+        auto *reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY(!reply->isError());
+
+        QVariant v = reply->value();
+        QVERIFY(v.isValid());
+        QCOMPARE(v.userType(), qMetaTypeId<QVariantList>());
+        QVariantList list = v.toList();
+        QCOMPARE(list.size(), 2);
+
+        QCOMPARE(list.at(0).userType(), qMetaTypeId<QVariantMap>());
+        QVariantMap first = list.at(0).toMap();
+        QCOMPARE(first[QStringLiteral("address")].toString(), QStringLiteral("192.168.1.2"));
+        QCOMPARE(first[QStringLiteral("prefix")].toUInt(), 24U);
+
+        QVariantMap second = list.at(1).toMap();
+        QCOMPARE(second[QStringLiteral("address")].toString(), QStringLiteral("10.0.0.5"));
+        QCOMPARE(second[QStringLiteral("prefix")].toUInt(), 8U);
+
+        delete reply;
+    }
+
     // Switching iface at runtime must remove the old iface's dynamic methods
     // from the property map. Otherwise they stay callable and silently dispatch
     // on the new iface, producing method-not-found errors.
@@ -1090,6 +1146,10 @@ private slots:
 
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
+
+    // QList<QVariantMap> must be a registered D-Bus metatype for the
+    // aa{sv} service method to marshal.
+    qDBusRegisterMetaType<QList<QVariantMap>>();
 
     int rc = 0;
     {
