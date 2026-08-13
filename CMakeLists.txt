@@ -57,6 +57,15 @@ qt_add_resources(dbusqml "catalog"
     PREFIX "/dbusqml"
     FILES
         types/org.freedesktop.NetworkManager.xml
+        types/org.freedesktop.NetworkManager.AccessPoint.xml
+        types/org.freedesktop.NetworkManager.Connection.Active.xml
+        types/org.freedesktop.NetworkManager.Device.xml
+        types/org.freedesktop.NetworkManager.Device.Wired.xml
+        types/org.freedesktop.NetworkManager.Device.Wireless.xml
+        types/org.freedesktop.NetworkManager.IP4Config.xml
+        types/org.freedesktop.NetworkManager.IP6Config.xml
+        types/org.freedesktop.NetworkManager.Settings.xml
+        types/org.freedesktop.NetworkManager.Settings.Connection.xml
         types/org.mpris.MediaPlayer2.xml
         types/org.mpris.MediaPlayer2.Player.xml
         types/org.freedesktop.Notifications.xml

@@ -1,0 +1,11 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="org.freedesktop.NetworkManager.Device.Wired">
+    <property type="s" name="HwAddress" access="read"/>
+    <property type="s" name="PermHwAddress" access="read"/>
+    <property type="u" name="Speed" access="read"/>
+    <property type="as" name="S390Subchannels" access="read"/>
+    <property type="b" name="Carrier" access="read"/>
+  </interface>
+</node>
