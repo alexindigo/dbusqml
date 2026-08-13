@@ -383,10 +383,22 @@ QVariant toDbusVariant(const QVariant &v) {
         return QVariant::fromValue(v.value<DBus::ObjectPath>().value);
     if (type == qMetaTypeId<DBus::Signature>())
         return QVariant::fromValue(v.value<DBus::Signature>().value);
-    if (type == qMetaTypeId<DBus::Dict>())
-        return QVariant::fromValue(v.value<DBus::Dict>().value);
-    if (type == qMetaTypeId<DBus::Variant>())
-        return QVariant::fromValue(v.value<DBus::Variant>().value);
+    if (type == qMetaTypeId<DBus::Dict>()) {
+        // Unwrap recursively: a Dict's QVariantMap may itself hold Dict /
+        // Variant values (e.g. NetworkManager connection dicts a{sa{sv}}).
+        // Raw DBus::Dict values are not registered with QtDBus — leaving them
+        // nested crashes the marshaller ("type 'DBus::Dict' is not
+        // registered", caught on the arch-niri VM).
+        QVariantMap m = v.value<DBus::Dict>().value;
+        for (auto it = m.begin(); it != m.end(); ++it)
+            it.value() = toDbusVariant(it.value());
+        return QVariant::fromValue(m);
+    }
+    if (type == qMetaTypeId<DBus::Variant>()) {
+        // Recurse into the variant payload for the same reason.
+        return QVariant::fromValue(
+            QDBusVariant(toDbusVariant(v.value<DBus::Variant>().propValue())));
+    }
 
     return v;
 }

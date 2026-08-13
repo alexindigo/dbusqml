@@ -616,6 +616,57 @@ private slots:
         delete reply;
     }
 
+    // A DBus::Dict whose map holds a nested DBus::Dict value (e.g. NM
+    // connection dicts a{sa{sv}} shape). Raw nested DBus::Dict is not a
+    // registered QtDBus type — toDbusVariant must recurse into the map,
+    // otherwise the marshaller fails with "type 'DBus::Dict' is not
+    // registered" (caught on the arch-niri VM). The outer still marshals
+    // as a{sv}; the inner arrives wrapped in a variant — round-trip both.
+    void testNestedDictMarshal() {
+        QVariantMap inner;
+        inner[QStringLiteral("ssid")] = QStringLiteral("MyWifi");
+        inner[QStringLiteral("mode")] = QStringLiteral("infrastructure");
+
+        QVariantMap outer;
+        outer[QStringLiteral("802-11-wireless")] = QVariant::fromValue(DBus::Dict(inner));
+        outer[QStringLiteral("connection")] =
+            QVariant::fromValue(DBus::Variant(QJSValue(QStringLiteral("auto"))));
+
+        // toDbusVariant must unwrap the nested DBus::Dict and recurse into
+        // the Variant payload. Direct unit-level assertion — no bus needed
+        // for the crash path (the marshaller error is a QVariant-level
+        // registration failure, not a bus error).
+        QVariant unwrapped = toDbusVariant(QVariant::fromValue(DBus::Dict(outer)));
+        QCOMPARE(unwrapped.userType(), qMetaTypeId<QVariantMap>());
+
+        QVariantMap m = unwrapped.toMap();
+        QCOMPARE(m[QStringLiteral("802-11-wireless")].userType(), qMetaTypeId<QVariantMap>());
+        QVariantMap wifi = m[QStringLiteral("802-11-wireless")].toMap();
+        QCOMPARE(wifi[QStringLiteral("ssid")].toString(), QStringLiteral("MyWifi"));
+
+        // Variant payload must be unwrapped into a QDBusVariant of QString
+        QCOMPARE(m[QStringLiteral("connection")].userType(), qMetaTypeId<QDBusVariant>());
+        QCOMPARE(m[QStringLiteral("connection")].value<QDBusVariant>().variant().toString(),
+                 QStringLiteral("auto"));
+
+        // Round-trip over the bus through the a{sv} echo service.
+        DBusMessage msg;
+        msg.setService("org.dbusqml.TestService");
+        msg.setPath("/TestService");
+        msg.setIface("org.dbusqml.TestService");
+        msg.setMember("echoDict");
+        msg.setArguments({unwrapped});
+
+        SessionBusConnection bus;
+        auto *reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY2(!reply->isError(),
+                 qPrintable(reply->error().name() + ": " + reply->error().message()));
+        delete reply;
+    }
+
     void testDynamicMethodsExist() {
         QQmlEngine engine;
 
