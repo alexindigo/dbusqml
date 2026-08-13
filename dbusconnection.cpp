@@ -119,6 +119,94 @@ static QVariant readBySignature(const QDBusArgument &arg) {
         return QVariant::fromValue(v);
     }
 
+    // Arrays of basic types — ai, au, ad, ab, an, aq, at, ax, ag.
+    // Concrete-typed arrays can't be element-iterated with an untyped
+    // QVariant target (crashes inside libdbus). Read via the concrete
+    // QList<T> and flatten to QVariantList.
+    if (sig.startsWith(QLatin1Char('a')) && sig.length() == 2) {
+        const QChar elemType = sig.at(1);
+        if (elemType == QLatin1Char('y')) {
+            QList<uchar> l;
+            arg >> l;
+            QVariantList out;
+            for (uchar v : l)
+                out.append(v);
+            return out;
+        }
+        if (elemType == QLatin1Char('b')) {
+            QList<bool> l;
+            arg >> l;
+            QVariantList out;
+            for (bool v : l)
+                out.append(v);
+            return out;
+        }
+        if (elemType == QLatin1Char('n')) {
+            QList<short> l;
+            arg >> l;
+            QVariantList out;
+            for (short v : l)
+                out.append(v);
+            return out;
+        }
+        if (elemType == QLatin1Char('q')) {
+            QList<ushort> l;
+            arg >> l;
+            QVariantList out;
+            for (ushort v : l)
+                out.append(v);
+            return out;
+        }
+        if (elemType == QLatin1Char('i')) {
+            QList<int> l;
+            arg >> l;
+            QVariantList out;
+            for (int v : l)
+                out.append(v);
+            return out;
+        }
+        if (elemType == QLatin1Char('u')) {
+            QList<uint> l;
+            arg >> l;
+            QVariantList out;
+            for (uint v : l)
+                out.append(v);
+            return out;
+        }
+        if (elemType == QLatin1Char('x')) {
+            QList<qint64> l;
+            arg >> l;
+            QVariantList out;
+            for (qint64 v : l)
+                out.append(v);
+            return out;
+        }
+        if (elemType == QLatin1Char('t')) {
+            QList<quint64> l;
+            arg >> l;
+            QVariantList out;
+            for (quint64 v : l)
+                out.append(v);
+            return out;
+        }
+        if (elemType == QLatin1Char('d')) {
+            QList<double> l;
+            arg >> l;
+            QVariantList out;
+            for (double v : l)
+                out.append(v);
+            return out;
+        }
+        if (elemType == QLatin1Char('g')) {
+            QList<QDBusSignature> l;
+            arg >> l;
+            QVariantList out;
+            for (const QDBusSignature &v : l)
+                out.append(v.signature());
+            return out;
+        }
+    }
+
     // Containers — recursive, signature-driven. The caller has already
     // opened the container (beginStructure / beginMap / beginMapEntry /
     // beginArray) and we're positioned at one complete element. For a
