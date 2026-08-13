@@ -396,4 +396,44 @@ TestCase {
         verify(typeof rejected.message === "string",
                "error object must have a message property")
     }
+
+    // ── DBusUtils ─────────────────────────────────────────
+
+    function test_dbusutils_singleton() {
+        compare(typeof DBusQML.DBusUtils, "object",
+                "DBusUtils singleton should be available")
+        compare(typeof DBusQML.DBusUtils.textFromBytes, "function",
+                "textFromBytes should be a function")
+        compare(typeof DBusQML.DBusUtils.bytesFromText, "function",
+                "bytesFromText should be a function")
+    }
+
+    function test_dbusutils_text_roundtrip() {
+        var buf = DBusQML.DBusUtils.bytesFromText("Hello")
+        verify(buf instanceof ArrayBuffer, "bytesFromText returns ArrayBuffer")
+        compare(buf.byteLength, 5, "byteLength matches UTF-8 length")
+
+        var text = DBusQML.DBusUtils.textFromBytes(buf)
+        compare(text, "Hello", "textFromBytes decodes UTF-8")
+    }
+
+    function test_dbusutils_utf8_multibyte() {
+        var original = "Мой Wifi — 日本語"
+        var buf = DBusQML.DBusUtils.bytesFromText(original)
+        var decoded = DBusQML.DBusUtils.textFromBytes(buf)
+        compare(decoded, original, "multibyte UTF-8 round-trip")
+    }
+
+    function test_dbusutils_text_from_number_array() {
+        // Number array input (legacy path / migration)
+        var text = DBusQML.DBusUtils.textFromBytes([72, 101, 108, 108, 111])
+        compare(text, "Hello", "textFromBytes handles number arrays")
+    }
+
+    function test_dbusutils_bytes_type() {
+        // DBus.bytes value type exists for explicit ay override
+        var b = new DBusQML.bytes("test")
+        verify(b !== undefined, "DBus.bytes constructible")
+        compare(b.toString(), "test", "bytes toString")
+    }
 }

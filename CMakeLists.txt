@@ -35,6 +35,8 @@ set(DBUSQML_SOURCES
     dbuspendingreply.h
     dbustypes.h
     dbustypes.cpp
+    dbusutils.h
+    dbusutils.cpp
 )
 
 # ==================== QML MODULE ====================
@@ -85,6 +87,7 @@ install(FILES
     dbuserror.h
     dbuspendingreply.h
     dbustypes.h
+    dbusutils.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dbusqml
 )
 
