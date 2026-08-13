@@ -4,6 +4,56 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking
+
+- **Reactive bindings always on** — `DBUSQML_REACTIVE_BINDINGS` CMake
+  option removed. Catalog/introspection pre-population of `null`
+  placeholders is unconditional. Properties known from catalog or
+  introspection read as `null` (not `undefined`) before the real D-Bus
+  value arrives. `reactiveBindingsSupported` is hardwired `true`.
+  `qt6-dbusqml-reactive` AUR package is obsolete — use `qt6-dbusqml`.
+- **`ay` reads as `ArrayBuffer`** — byte arrays consistently arrive as
+  JS `ArrayBuffer` (was inconsistent: string or array-like depending on
+  the code path). Use `DBusUtils.textFromBytes(buf)` for UTF-8 text
+  (e.g. SSIDs), or index via `new Uint8Array(buf)`.
+
+### Added
+
+- **Signature-driven argument marshaller** — method calls marshal JS
+  values against the introspected/catalog arg signature. `a{sa{sv}}`
+  (NM connection settings), `ay` (byte arrays from strings or number
+  arrays), and nested containers work with plain JS objects — no wrapper
+  types needed when the signature is known.
+- **`DBusMessage.signature`** — optional per-arg signature for the
+  low-level `asyncCall` path (e.g. `signature: "sa{sa{sv}}ay"`).
+- **`DBusUtils` QML singleton** — `textFromBytes(buf)` /
+  `bytesFromText(str)` for UTF-8 conversion of `ay` payloads.
+- **`DBus.bytes` value type** — explicit `ay` override for
+  signature-less calls.
+- **GetAll fallback** — when `Introspect` fails or returns empty XML,
+  the proxy falls back to `Properties.GetAll(iface)`. Reaches `Ready`
+  with populated reactive properties. Covers NM's `Ip4Config`,
+  `Connection.Active`, `AccessPoint` objects.
+- **NM sub-interface catalog XMLs** — `Device`, `Device.Wired`,
+  `Device.Wireless`, `Connection.Active`, `IP4Config`, `IP6Config`,
+  `AccessPoint`, `Settings`, `Settings.Connection`. Synchronous
+  placeholder pre-population and typed signatures for NM sub-objects.
+
+### Fixed
+
+- **`aa{...}` demarshaling** — arrays of dicts (NM `Ip4Config.AddressData`)
+  no longer warn and return empty strings. Per-entry signature reads
+  avoid the `operator>>(QDBusArgument, QVariant&)` libdbus crash.
+- **Nested `DBus.dict` marshaling** — `toDbusVariant` recurses through
+  `Dict` values and `Variant` payloads, fixing "type 'DBus::Dict' is not
+  registered" marshaller crashes.
+- **Signature-complete demarshaller** — `readBySignature` handles all
+  nested containers recursively. `operator>>(QDBusArgument, QVariant&)`
+  eliminated from all nested paths — the libdbus crash vector is
+  eliminated structurally.
+
 ## [0.2.5] — 2026-08-10
 
 ### Fixed

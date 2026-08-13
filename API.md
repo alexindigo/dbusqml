@@ -374,6 +374,29 @@ Most examples don't need value types — plain JS strings/numbers/booleans work 
 | `DBus::Signature` | `signature` | D-Bus signature. |
 | `DBus::Dict` | `dict` | D-Bus dictionary (map). |
 | `DBus::Variant` | `variant` | D-Bus variant. |
+| `DBus::Bytes` | `bytes` | Byte array (`ay`). |
+
+Since v0.3.0, when the method signature is known (from introspection or
+catalog), plain JS values are marshaled correctly — no wrapper types needed.
+Value types remain as explicit overrides for signature-less calls.
+
+### Byte Arrays (`ay`)
+
+Byte array properties arrive as JS `ArrayBuffer`. Use `DBusUtils` for
+text conversion:
+
+```qml
+import DBus 1.0
+
+// SSID arrives as ArrayBuffer
+var ssidText = DBusUtils.textFromBytes(accessPoint.ssid)
+
+// Marshal a string as ay (UTF-8) — signature-driven, no wrapper needed:
+proxy.call("SomeMethod", ["MyWifi"])  // if the arg is ay, string → UTF-8 bytes
+
+// Or explicitly:
+var bytes = new DBusQML.bytes("MyWifi")
+```
 
 ---
 

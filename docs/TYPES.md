@@ -61,6 +61,15 @@ dbusqml ships descriptors for these interfaces:
 - `org.freedesktop.portal.NetworkMonitor`
 - `org.freedesktop.UPower`
 - `org.freedesktop.NetworkManager`
+- `org.freedesktop.NetworkManager.Device`
+- `org.freedesktop.NetworkManager.Device.Wired`
+- `org.freedesktop.NetworkManager.Device.Wireless`
+- `org.freedesktop.NetworkManager.Connection.Active`
+- `org.freedesktop.NetworkManager.IP4Config`
+- `org.freedesktop.NetworkManager.IP6Config`
+- `org.freedesktop.NetworkManager.AccessPoint`
+- `org.freedesktop.NetworkManager.Settings`
+- `org.freedesktop.NetworkManager.Settings.Connection`
 
 ## Overriding a bundled interface
 
