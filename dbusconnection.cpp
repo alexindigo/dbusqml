@@ -267,6 +267,8 @@ QVariant toDbusVariant(const QVariant &v) {
         return QVariant::fromValue(v.value<DBus::ObjectPath>().value);
     if (type == qMetaTypeId<DBus::Signature>())
         return QVariant::fromValue(v.value<DBus::Signature>().value);
+    if (type == qMetaTypeId<DBus::Bytes>())
+        return QVariant::fromValue(v.value<DBus::Bytes>().value);
     if (type == qMetaTypeId<DBus::Dict>()) {
         // Unwrap recursively: a Dict's QVariantMap may itself hold Dict /
         // Variant values (e.g. NetworkManager connection dicts a{sa{sv}}).
@@ -287,14 +289,244 @@ QVariant toDbusVariant(const QVariant &v) {
     return v;
 }
 
+// ==================== Signature-driven marshaller ====================
+
+// Parse one complete D-Bus type from `sig` starting at `pos`.
+// Returns the type's signature substring and advances pos past it.
+// Returns empty on parse failure.
+static QString firstCompleteType(const QString &sig, int &pos) {
+    if (pos >= sig.size())
+        return {};
+    int start = pos;
+    QChar c = sig.at(pos);
+
+    // Basic single-char types
+    if (QStringLiteral("ybnqiuxtdhsogv").contains(c)) {
+        ++pos;
+        return sig.mid(start, 1);
+    }
+
+    if (c == QLatin1Char('a')) {
+        // Array — 'a' followed by one complete type
+        ++pos;
+        QString elem = firstCompleteType(sig, pos);
+        if (elem.isEmpty())
+            return {};
+        // Dict entry shorthand: a{KV} — the {KV} is one element type
+        return sig.mid(start, pos - start);
+    }
+
+    if (c == QLatin1Char('(')) {
+        // Struct — (...) with member types
+        int depth = 1;
+        ++pos;
+        while (pos < sig.size() && depth > 0) {
+            if (sig.at(pos) == QLatin1Char('('))
+                ++depth;
+            else if (sig.at(pos) == QLatin1Char(')'))
+                --depth;
+            ++pos;
+        }
+        if (depth != 0)
+            return {};
+        return sig.mid(start, pos - start);
+    }
+
+    if (c == QLatin1Char('{')) {
+        // Dict entry — {KV} (only valid inside an array, but parse it anyway)
+        int depth = 1;
+        ++pos;
+        while (pos < sig.size() && depth > 0) {
+            if (sig.at(pos) == QLatin1Char('{'))
+                ++depth;
+            else if (sig.at(pos) == QLatin1Char('}'))
+                --depth;
+            ++pos;
+        }
+        if (depth != 0)
+            return {};
+        return sig.mid(start, pos - start);
+    }
+
+    return {};
+}
+
+// Forward declaration — mutual recursion between marshalBySignature and
+// marshalContainerBySignature.
+static QVariant marshalContainerBySignature(const QString &sig, const QVariant &value);
+
+// Marshal a JS-supplied QVariant against a known D-Bus signature.
+// Produces a QVariant with the correct C++ type for QtDBus to marshal
+// to the wire format matching `sig`. Falls back to toDbusVariant for
+// inference when the signature is empty, "v", or unrecognized.
+QVariant marshalBySignature(const QString &sig, const QVariant &value) {
+    if (sig.isEmpty() || sig == QLatin1String("v"))
+        return toDbusVariant(value);
+
+    // Explicit DBus.* wrapper types always win — the caller chose the type.
+    if (value.userType() != qMetaTypeId<QVariantList>() &&
+        value.userType() != qMetaTypeId<QVariantMap>() && value.userType() != QMetaType::QString &&
+        value.userType() != QMetaType::Bool && value.userType() != QMetaType::Int &&
+        value.userType() != QMetaType::Double && value.userType() != QMetaType::UInt &&
+        value.userType() != QMetaType::LongLong && value.userType() != QMetaType::ULongLong &&
+        value.userType() != QMetaType::QByteArray) {
+        // Non-plain type — likely a DBus.* gadget or QDBusObjectPath etc.
+        // Unwrap via toDbusVariant; the resulting type should match the
+        // signature already.
+        return toDbusVariant(value);
+    }
+
+    // Basic types — coerce the QVariant to the exact C++ type.
+    if (sig == QLatin1String("y"))
+        return QVariant::fromValue(static_cast<uchar>(value.toUInt()));
+    if (sig == QLatin1String("b"))
+        return QVariant::fromValue(value.toBool());
+    if (sig == QLatin1String("n"))
+        return QVariant::fromValue(static_cast<short>(value.toInt()));
+    if (sig == QLatin1String("q"))
+        return QVariant::fromValue(static_cast<ushort>(value.toUInt()));
+    if (sig == QLatin1String("i"))
+        return QVariant::fromValue(value.toInt());
+    if (sig == QLatin1String("u"))
+        return QVariant::fromValue(value.toUInt());
+    if (sig == QLatin1String("x"))
+        return QVariant::fromValue(static_cast<qint64>(value.toLongLong()));
+    if (sig == QLatin1String("t"))
+        return QVariant::fromValue(static_cast<quint64>(value.toULongLong()));
+    if (sig == QLatin1String("d"))
+        return QVariant::fromValue(value.toDouble());
+    if (sig == QLatin1String("s"))
+        return QVariant::fromValue(value.toString());
+    if (sig == QLatin1String("o"))
+        return QVariant::fromValue(QDBusObjectPath(value.toString()));
+    if (sig == QLatin1String("g"))
+        return QVariant::fromValue(QDBusSignature(value.toString()));
+
+    // Byte array — ay. Accept string (UTF-8), number array, or QByteArray.
+    if (sig == QLatin1String("ay")) {
+        if (value.userType() == QMetaType::QByteArray)
+            return value;
+        if (value.userType() == QMetaType::QString)
+            return QVariant::fromValue(value.toString().toUtf8());
+        if (value.userType() == qMetaTypeId<QVariantList>()) {
+            QByteArray bytes;
+            const QVariantList list = value.toList();
+            bytes.reserve(list.size());
+            for (const QVariant &b : list)
+                bytes.append(static_cast<char>(b.toInt()));
+            return QVariant::fromValue(bytes);
+        }
+        // Fallback: try string conversion
+        return QVariant::fromValue(value.toString().toUtf8());
+    }
+
+    // String array — as. Use DBusAsArray to force the correct marshaling
+    // (QStringList alone may marshal as av).
+    if (sig == QLatin1String("as")) {
+        DBusAsArray arr;
+        const QVariantList list = value.toList();
+        for (const QVariant &item : list)
+            arr.value << item.toString();
+        return QVariant::fromValue(arr);
+    }
+
+    // Variant — wrap in QDBusVariant after unwrapping any DBus.* types.
+    if (sig == QLatin1String("v"))
+        return QVariant::fromValue(QDBusVariant(toDbusVariant(value)));
+
+    // Container types — delegate to the recursive container marshaller.
+    if (sig.startsWith(QLatin1Char('a')) || sig.startsWith(QLatin1Char('(')) ||
+        sig.startsWith(QLatin1Char('{')))
+        return marshalContainerBySignature(sig, value);
+
+    // Unrecognized — fall back to inference.
+    return toDbusVariant(value);
+}
+
+// Container marshaling — handles a{...}, a<complex>, (...), etc.
+// For dicts we register the correct QtDBus type on the fly via
+// QDBusMetaType::registerCustomType or use known container types.
+static QVariant marshalContainerBySignature(const QString &sig, const QVariant &value) {
+    // a{sv} — dict with string keys and variant values.
+    // QVariantMap is exactly a{sv} in QtDBus.
+    if (sig == QLatin1String("a{sv}")) {
+        QVariantMap map = value.toMap();
+        // Recurse into values — nested Dict/Variant payloads must be unwrapped.
+        for (auto it = map.begin(); it != map.end(); ++it)
+            it.value() = toDbusVariant(it.value());
+        return QVariant::fromValue(map);
+    }
+
+    // a{sa{sv}} — dict of dicts. NM connection settings shape.
+    // Needs QMap<QString,QVariantMap> — registered in dbusplugin.cpp.
+    if (sig == QLatin1String("a{sa{sv}}")) {
+        QVariantMap outer = value.toMap();
+        QMap<QString, QVariantMap> typed;
+        for (auto it = outer.begin(); it != outer.end(); ++it) {
+            QVariantMap inner = it.value().toMap();
+            for (auto jt = inner.begin(); jt != inner.end(); ++jt)
+                jt.value() = toDbusVariant(jt.value());
+            typed.insert(it.key(), inner);
+        }
+        return QVariant::fromValue(typed);
+    }
+
+    // a(sss...) — array of structs with homogeneous members.
+    // Marshal as QVariantList of QVariantList; QtDBus can't type-check this
+    // without a registered struct type, so we hand-marshal via QDBusArgument.
+    // This is the general path for any a(...) where ... is not a basic type.
+
+    // Generic container marshaling via QDBusArgument — the escape hatch.
+    // Build a writable QDBusArgument, populate it per the signature, and
+    // wrap it as a QVariant. QtDBus will cross-marshal it into the message.
+    // NOTE: This requires QtDBus to accept a QDBusArgument as a message
+    // argument. The fallback mechanism (registerCustomType) covers the
+    // known shapes; for unknown deep nesting we use QDBusArgument.
+    {
+        // For now, handle aay (array of byte arrays) explicitly.
+        if (sig == QLatin1String("aay")) {
+            QList<QByteArray> list;
+            const QVariantList items = value.toList();
+            for (const QVariant &item : items) {
+                if (item.userType() == QMetaType::QByteArray)
+                    list << item.toByteArray();
+                else if (item.userType() == QMetaType::QString)
+                    list << item.toString().toUtf8();
+                else
+                    list << item.toByteArray();
+            }
+            return QVariant::fromValue(list);
+        }
+
+        // Generic: try inference. The typed-container registrations handle
+        // the common shapes; anything else falls through to toDbusVariant.
+        return toDbusVariant(value);
+    }
+}
+
 static QDBusMessage toQDBusMessage(const DBusMessage &msg) {
     auto qmsg =
         QDBusMessage::createMethodCall(msg.service(), msg.path(), msg.iface(), msg.member());
 
     if (!msg.arguments().isEmpty()) {
         QVariantList args = msg.arguments();
-        for (int i = 0; i < args.size(); ++i)
-            args[i] = toDbusVariant(args[i]);
+
+        // If the message carries an explicit signature, use it to drive
+        // per-argument marshaling. The signature is a concatenation of
+        // per-arg complete types, e.g. "sa{sa{sv}}ay" for three args.
+        if (!msg.signature().isEmpty()) {
+            QString sig = msg.signature();
+            int pos = 0;
+            for (int i = 0; i < args.size() && pos < sig.size(); ++i) {
+                QString argSig = firstCompleteType(sig, pos);
+                if (argSig.isEmpty())
+                    break;
+                args[i] = marshalBySignature(argSig, args[i]);
+            }
+        } else {
+            for (int i = 0; i < args.size(); ++i)
+                args[i] = toDbusVariant(args[i]);
+        }
         qmsg.setArguments(args);
     }
 

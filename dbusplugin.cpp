@@ -15,6 +15,16 @@ static void registerTypeConverters() {
 
     qDBusRegisterMetaType<QStringList>();
     qDBusRegisterMetaType<DBusAsArray>();
+    // a{sa{sv}} — dict of dicts, NM connection-settings shape.
+    // Registered so the signature-driven marshaller can produce it from
+    // plain JS objects.
+    {
+        typedef QMap<QString, QVariantMap> StringVariantMapMap;
+        qDBusRegisterMetaType<StringVariantMapMap>();
+        auto mt = QMetaType::fromType<StringVariantMapMap>();
+        if (mt.isValid())
+            QDBusMetaType::registerCustomType(mt, QByteArray("a{sa{sv}}"));
+    }
     // NOTE: These registrations are process-global. The QStringList → "as"
     // and DBusAsArray → "as" mappings affect the host app's QtDBus marshaling
     // for ALL D-Bus traffic, not just dbusqml's. This is intentional — the
@@ -52,6 +62,8 @@ static void registerTypeConverters() {
         [](const DBus::Variant &v) { return v.value; });
     QMetaType::registerConverter<DBus::Variant, QVariant>(
         [](const DBus::Variant &v) { return v.value.variant(); });
+    QMetaType::registerConverter<DBus::Bytes, QByteArray>(
+        [](const DBus::Bytes &b) { return b.value; });
 }
 
 // Static initializer — runs when the shared library is loaded

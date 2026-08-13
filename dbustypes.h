@@ -95,6 +95,19 @@ public:
     QDBusVariant value;
 };
 
+class Bytes {
+    Q_GADGET
+    QML_VALUE_TYPE(bytes)
+    QML_CONSTRUCTIBLE_VALUE
+    Q_PROPERTY(QByteArray value MEMBER value)
+public:
+    explicit Bytes() {}
+    Q_INVOKABLE explicit Bytes(const QByteArray &v) : value(v) {}
+    Q_INVOKABLE QString toString() const { return QString::fromUtf8(value); }
+    operator QVariant() const { return QVariant::fromValue(*this); }
+    QByteArray value;
+};
+
 } // namespace DBus
 
 // Distinct type to force D-Bus marshaling fallthrough to appendRegisteredType for "as".

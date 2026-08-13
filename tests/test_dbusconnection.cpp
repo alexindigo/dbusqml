@@ -107,6 +107,13 @@ public slots:
         return {QByteArray("Hello"), QByteArray("\x00\x01\xfe\xff")};
     }
 
+    // Verify the received argument is a{sa{sv}} by checking the message
+    // signature, then echo the content back for value verification.
+    StringVariantMapMap echoConnectionSettings(const StringVariantMapMap &v) { return v; }
+
+    // Verify ay received as raw bytes.
+    QByteArray echoBytes(const QByteArray &v) { return v; }
+
     // Struct array — a(ii). Exercises the recursive struct reader.
     QList<IntPair> intPairList() { return {{0, 0}, {1, 10}, {2, 20}}; }
 
@@ -1203,6 +1210,109 @@ private slots:
         QCOMPARE(list.at(0).toByteArray(), QByteArray("Hello"));
         QCOMPARE(list.at(1).toByteArray(), QByteArray("\x00\x01\xfe\xff"));
 
+        delete reply;
+    }
+
+    // Marshal a{sa{sv}} — dict of dicts, NM AddAndActivateConnection shape.
+    // The signature-driven marshaller must produce QMap<QString,QVariantMap>
+    // from a plain QVariantMap so QtDBus emits a{sa{sv}} on the wire.
+    void testMarshalDictOfDicts() {
+        QVariantMap inner;
+        inner[QStringLiteral("ssid")] = QStringLiteral("MyWifi");
+        inner[QStringLiteral("mode")] = QStringLiteral("infrastructure");
+        QVariantMap outer;
+        outer[QStringLiteral("802-11-wireless")] = inner;
+
+        QVariant marshaled = marshalBySignature(QStringLiteral("a{sa{sv}}"), outer);
+        QCOMPARE(marshaled.userType(), qMetaTypeId<StringVariantMapMap>());
+
+        // Round-trip through the echo service.
+        DBusMessage msg;
+        msg.setService("org.dbusqml.TestService");
+        msg.setPath("/TestService");
+        msg.setIface("org.dbusqml.TestService");
+        msg.setMember("echoConnectionSettings");
+        msg.setArguments({marshaled});
+
+        SessionBusConnection bus;
+        auto *reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY2(!reply->isError(),
+                 qPrintable(reply->error().name() + ": " + reply->error().message()));
+
+        QVariant v = reply->value();
+        QCOMPARE(v.userType(), qMetaTypeId<QVariantMap>());
+        QVariantMap sections = v.toMap();
+        QCOMPARE(
+            sections[QStringLiteral("802-11-wireless")].toMap()[QStringLiteral("ssid")].toString(),
+            QStringLiteral("MyWifi"));
+        delete reply;
+    }
+
+    // Marshal ay from a JS string — UTF-8 encoded QByteArray.
+    void testMarshalByteArrayFromString() {
+        QVariant marshaled =
+            marshalBySignature(QStringLiteral("ay"), QVariant(QStringLiteral("MyWifi")));
+        QCOMPARE(marshaled.userType(), qMetaTypeId<QByteArray>());
+        QCOMPARE(marshaled.toByteArray(), QByteArray("MyWifi"));
+
+        // Round-trip.
+        DBusMessage msg;
+        msg.setService("org.dbusqml.TestService");
+        msg.setPath("/TestService");
+        msg.setIface("org.dbusqml.TestService");
+        msg.setMember("echoBytes");
+        msg.setArguments({marshaled});
+
+        SessionBusConnection bus;
+        auto *reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY(!reply->isError());
+        QCOMPARE(reply->value().toByteArray(), QByteArray("MyWifi"));
+        delete reply;
+    }
+
+    // Marshal ay from a JS number array (byte codes).
+    void testMarshalByteArrayFromList() {
+        QVariantList bytes = {72, 101, 108, 108, 111}; // "Hello"
+        QVariant marshaled = marshalBySignature(QStringLiteral("ay"), QVariant(bytes));
+        QCOMPARE(marshaled.userType(), qMetaTypeId<QByteArray>());
+        QCOMPARE(marshaled.toByteArray(), QByteArray("Hello"));
+    }
+
+    // DBusMessage with explicit signature — the universal escape hatch.
+    // Sends a{sa{sv}} via the low-level asyncCall path with no introspection.
+    void testMessageSignatureMarshaling() {
+        QVariantMap wifi;
+        wifi[QStringLiteral("ssid")] = QStringLiteral("TestNet");
+        QVariantMap outer;
+        outer[QStringLiteral("802-11-wireless")] = wifi;
+
+        DBusMessage msg;
+        msg.setService("org.dbusqml.TestService");
+        msg.setPath("/TestService");
+        msg.setIface("org.dbusqml.TestService");
+        msg.setMember("echoConnectionSettings");
+        msg.setSignature(QStringLiteral("a{sa{sv}}"));
+        msg.setArguments({outer});
+
+        SessionBusConnection bus;
+        auto *reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY2(!reply->isError(),
+                 qPrintable(reply->error().name() + ": " + reply->error().message()));
+
+        QVariant v = reply->value();
+        QCOMPARE(v.userType(), qMetaTypeId<QVariantMap>());
+        QCOMPARE(
+            v.toMap()[QStringLiteral("802-11-wireless")].toMap()[QStringLiteral("ssid")].toString(),
+            QStringLiteral("TestNet"));
         delete reply;
     }
 

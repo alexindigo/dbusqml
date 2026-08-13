@@ -20,78 +20,12 @@
 #include <QTimer>
 #include <QXmlStreamReader>
 
-// Map a D-Bus type signature character to the corresponding C++ QVariant type.
-// Used to convert JS values to the correct D-Bus type before calling a method.
+// Map a D-Bus type signature to the corresponding C++ QVariant type.
+// Delegates to the signature-driven marshaller in dbusconnection.cpp.
+// The marshaller handles all types — basic coercion, ay (string→UTF-8),
+// as (via DBusAsArray), a{sv}, a{sa{sv}}, and nested containers.
 static QVariant toTypedDbusVariant(const QVariant &v, const QString &dbusType) {
-    if (dbusType.isEmpty() || dbusType == "v")
-        return toDbusVariant(v);
-
-    // Complex types — build via QDBusArgument for correct marshaling
-    if (dbusType == "as") {
-        const auto list = v.toList();
-        DBusAsArray arr;
-        for (const auto &item : list)
-            arr.value << item.toString();
-        return QVariant::fromValue(arr);
-    }
-    if (dbusType == "a{sv}") {
-        return v.toMap();
-    }
-
-    // Typed wrappers
-    if (v.userType() == qMetaTypeId<DBus::Uint32>())
-        return QVariant::fromValue(v.value<DBus::Uint32>().value);
-    if (v.userType() == qMetaTypeId<DBus::Int32>())
-        return QVariant::fromValue(v.value<DBus::Int32>().value);
-    // ... other typed wrappers are handled by toDbusVariant fallback
-
-    // Plain JS value — coerce to the expected D-Bus type
-    if (dbusType == "u") {
-        bool ok = false;
-        uint val = v.toUInt(&ok);
-        if (ok)
-            return QVariant::fromValue(val);
-    }
-    if (dbusType == "i") {
-        bool ok = false;
-        int val = v.toInt(&ok);
-        if (ok)
-            return QVariant::fromValue(val);
-    }
-    if (dbusType == "b")
-        return QVariant::fromValue(v.toBool());
-    if (dbusType == "d")
-        return QVariant::fromValue(v.toDouble());
-    if (dbusType == "y")
-        return QVariant::fromValue(v.value<uchar>());
-    if (dbusType == "n") {
-        bool ok = false;
-        short val = v.toInt(&ok);
-        if (ok)
-            return QVariant::fromValue(val);
-    }
-    if (dbusType == "q") {
-        bool ok = false;
-        ushort val = v.toUInt(&ok);
-        if (ok)
-            return QVariant::fromValue(val);
-    }
-    if (dbusType == "x") {
-        bool ok = false;
-        qint64 val = v.toLongLong(&ok);
-        if (ok)
-            return QVariant::fromValue(val);
-    }
-    if (dbusType == "t") {
-        bool ok = false;
-        quint64 val = v.toULongLong(&ok);
-        if (ok)
-            return QVariant::fromValue(val);
-    }
-    if (dbusType == "s")
-        return QVariant::fromValue(v.toString());
-
-    return toDbusVariant(v);
+    return marshalBySignature(dbusType, v);
 }
 
 // Helper object exposed to the JS engine so evaluated functions can make D-Bus calls

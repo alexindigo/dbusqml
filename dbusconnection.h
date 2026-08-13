@@ -12,6 +12,13 @@
 
 QVariant toDbusVariant(const QVariant &v);
 
+// Marshal a JS-supplied QVariant against a known D-Bus signature.
+// Produces a QVariant with the correct C++ type for QtDBus to marshal
+// to the wire format matching `sig`. DBus.* wrapper types take priority
+// over the signature. Falls back to toDbusVariant when sig is empty or
+// unrecognized.
+QVariant marshalBySignature(const QString &sig, const QVariant &value);
+
 // Recursively unwrap QDBusVariant / QDBusArgument values into plain QVariant
 // containers (QVariantMap, QVariantList) so QML can traverse them as
 // JavaScript objects. Handles nested a{sv}, a{ss}, av, as, ao, etc.
