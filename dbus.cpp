@@ -182,6 +182,13 @@ void DBusProxy::doIntrospect() {
                 if (!reply.isError()) {
                     m_introspectCache.insert(cacheKey, reply.value());
                     onIntrospectionReady(reply.value());
+                } else if (m_propertiesEnabled) {
+                    // Introspection failed — fall back to GetAll. Many
+                    // services (NM Ip4Config, AccessPoint, Connection.Active)
+                    // return empty or failing Introspect but answer
+                    // Properties.GetAll fine. Empty XML means no methods or
+                    // signals from introspection; the catalog can fill in.
+                    onIntrospectionReady(QString());
                 } else {
                     m_status = Error;
                     emit statusChanged();
@@ -537,8 +544,9 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
         if (!warned.contains(m_iface)) {
             warned.insert(m_iface);
             qWarning().nospace() << "DBusProxy: interface " << m_iface
-                                 << " returned empty Introspect XML and no catalog entry exists. "
-                                 << "Use proxy.call(\"MethodName\", args) to invoke methods, "
+                                 << " has no introspection data and no catalog entry. "
+                                 << "Falling back to Properties.GetAll for property access. "
+                                 << "For method calls use proxy.call(\"MethodName\", args), "
                                  << "or drop " << m_iface << ".xml at "
                                  << QStandardPaths::writableLocation(
                                         QStandardPaths::GenericConfigLocation)

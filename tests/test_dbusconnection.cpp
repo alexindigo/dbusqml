@@ -11,6 +11,7 @@
 #include <QProcess>
 #include <QDBusConnectionInterface>
 #include <QDBusMetaType>
+#include <QDBusVirtualObject>
 #include <iostream>
 
 #include "../dbusconnection.h"
@@ -47,6 +48,46 @@ inline const QDBusArgument &operator>>(const QDBusArgument &arg, IntPair &p) {
     arg.endStructure();
     return arg;
 }
+
+// ==================== Non-introspectable Service ====================
+
+// Simulates NM's Ip4Config/AccessPoint objects: answers
+// Properties.GetAll/Get but returns empty Introspect XML.
+class NonIntrospectableObject : public QDBusVirtualObject {
+    Q_OBJECT
+
+public:
+    explicit NonIntrospectableObject(QObject *parent = nullptr) : QDBusVirtualObject(parent) {}
+
+    QString introspect(const QString &) const override {
+        // Empty XML — the object does not describe itself.
+        return {};
+    }
+
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.interface() == QLatin1String("org.freedesktop.DBus.Properties")) {
+            if (msg.member() == QLatin1String("GetAll")) {
+                QVariantMap props;
+                props[QStringLiteral("Address")] = QStringLiteral("192.168.1.100");
+                props[QStringLiteral("Prefix")] = 24U;
+                conn.send(msg.createReply({QVariant::fromValue(props)}));
+                return true;
+            }
+            if (msg.member() == QLatin1String("Get")) {
+                // Get(iface, propName) — return the Address property.
+                QVariantMap props;
+                props[QStringLiteral("Address")] = QStringLiteral("192.168.1.100");
+                props[QStringLiteral("Prefix")] = 24U;
+                QString propName = msg.arguments().at(1).toString();
+                conn.send(
+                    msg.createReply({QVariant::fromValue(QDBusVariant(props.value(propName)))}));
+                return true;
+            }
+        }
+        // Not handled — let QtDBus return an error for unknown methods.
+        return false;
+    }
+};
 
 // ==================== Mock D-Bus Service ====================
 
@@ -1440,6 +1481,36 @@ private slots:
         }
 
         delete proxy;
+    }
+
+    // A proxy pointed at a non-introspectable object (empty Introspect
+    // XML, like NM's Ip4Config) must fall back to Properties.GetAll and
+    // still reach Ready with populated properties — not Error.
+    void testGetAllFallback() {
+        QDBusConnection bus = QDBusConnection::sessionBus();
+
+        // Register the non-introspectable object on the same service.
+        auto *noIntro = new NonIntrospectableObject(this);
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/NoIntro"), noIntro));
+
+        DBusProxy proxy;
+        proxy.setService("org.dbusqml.TestService");
+        proxy.setPath("/NoIntro");
+        proxy.setIface("org.dbusqml.TestService");
+
+        // Wait for the fallback to complete (introspection → empty XML →
+        // GetAll → properties populated → Ready).
+        QSignalSpy readySpy(&proxy, &DBusProxy::introspectionCompleted);
+        for (int i = 0; i < 30; ++i) {
+            QTest::qWait(200);
+            if (proxy.status() == DBusProxy::Ready || proxy.status() == DBusProxy::Error)
+                break;
+        }
+
+        QCOMPARE(proxy.status(), DBusProxy::Ready);
+        QCOMPARE(proxy.value(QStringLiteral("address")).toString(),
+                 QStringLiteral("192.168.1.100"));
+        QCOMPARE(proxy.value(QStringLiteral("prefix")).toUInt(), 24U);
     }
 };
 
