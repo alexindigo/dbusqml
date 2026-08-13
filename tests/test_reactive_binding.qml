@@ -13,8 +13,8 @@ Window {
     // Intermediate readonly property — the pattern that historically
     // broke with QQmlPropertyMap (auto-created properties resolved to
     // undefined and never re-evaluated when the real DBus value arrived).
-    // Fixed by catalog pre-population when DBUSQML_REACTIVE_BINDINGS=ON:
-    // null placeholders inserted before QML bindings evaluate, so
+    // Fixed since 0.3.0 (always-on): catalog/introspection pre-population
+    // inserts null placeholders before QML bindings evaluate, so
     // QQmlPropertyMap's built-in reactivity handles subsequent updates.
     readonly property bool wifiEnabled: nm.wirelessEnabled === true
 

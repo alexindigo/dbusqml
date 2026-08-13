@@ -16,13 +16,6 @@ qt_policy(SET QTP0001 NEW)
 
 include(GNUInstallDirs)
 
-option(DBUSQML_REACTIVE_BINDINGS
-       "Enable reactive property bindings via catalog pre-population. \
-Pre-populates null placeholders for catalog-declared properties before \
-QML bindings evaluate, so QQmlPropertyMap's built-in reactivity handles \
-subsequent updates. Default OFF."
-       OFF)
-
 # Production sources
 set(DBUSQML_SOURCES
     dbusadaptor.cpp
@@ -57,10 +50,6 @@ qt_add_qml_module(dbusqml
 target_link_libraries(dbusqml PRIVATE
     Qt6::Core Qt6::Qml Qt6::DBus
 )
-
-if(DBUSQML_REACTIVE_BINDINGS)
-    target_compile_definitions(dbusqml PRIVATE DBUSQML_REACTIVE_BINDINGS)
-endif()
 
 qt_add_resources(dbusqml "catalog"
     PREFIX "/dbusqml"

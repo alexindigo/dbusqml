@@ -110,9 +110,7 @@ private:
     void onIntrospectionReady(const QString &xml);
     void setupDynamicMethods(const QStringList &methodNames);
     void disconnectSignals();
-#ifdef DBUSQML_REACTIVE_BINDINGS
     void prepopulateFromCatalog();
-#endif
 
     QString m_service;
     QString m_path;

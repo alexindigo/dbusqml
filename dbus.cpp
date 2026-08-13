@@ -165,9 +165,7 @@ void DBusProxy::setService(const QString &v) {
     if (m_serviceWatcher)
         m_serviceWatcher->setWatchedServices({m_service});
     emit serviceChanged();
-#ifdef DBUSQML_REACTIVE_BINDINGS
     prepopulateFromCatalog();
-#endif
     if (!m_iface.isEmpty() && !m_path.isEmpty())
         scheduleIntrospect();
 }
@@ -177,9 +175,7 @@ void DBusProxy::setPath(const QString &v) {
         return;
     m_path = v;
     emit pathChanged();
-#ifdef DBUSQML_REACTIVE_BINDINGS
     prepopulateFromCatalog();
-#endif
     if (!m_iface.isEmpty() && !m_service.isEmpty())
         scheduleIntrospect();
 }
@@ -190,9 +186,7 @@ void DBusProxy::setIface(const QString &v) {
     QString oldIface = m_iface;
     m_iface = v;
     emit ifaceChanged();
-#ifdef DBUSQML_REACTIVE_BINDINGS
     prepopulateFromCatalog();
-#endif
 
     disconnectSignals();
 
@@ -586,9 +580,7 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
     QStringList signalNames = data.signalNames;
     QStringList methodNames = data.methodNames;
     m_methodArgTypes = data.methodArgTypes;
-#ifdef DBUSQML_REACTIVE_BINDINGS
     QStringList propertyNames = data.propertyNames;
-#endif
 
     // Merge with user-land catalog (interface descriptors from XDG paths and
     // bundled resources). Live introspection wins on arg types; catalog fills
@@ -637,7 +629,6 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
         m_signalsConnected = true;
     }
 
-#ifdef DBUSQML_REACTIVE_BINDINGS
     // Pre-populate null placeholders for every property declared in the
     // introspection XML. This makes keys exist at QML binding-evaluation
     // time, so QQmlPropertyMap's built-in reactivity can update them
@@ -649,7 +640,6 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
         if (!contains(qmlName))
             insert(qmlName, QVariant::fromValue(nullptr));
     }
-#endif
 
     setupDynamicMethods(methodNames);
 
@@ -669,18 +659,16 @@ void DBusProxy::reloadTypes() {
 }
 
 bool DBusProxy::reactiveBindingsSupported() {
-#ifdef DBUSQML_REACTIVE_BINDINGS
+    // Reactive bindings are the only supported mode since 0.3.0 — catalog
+    // and introspection pre-population is unconditional. Property kept for
+    // consumer compat (they may already read it to detect the capability).
     return true;
-#else
-    return false;
-#endif
 }
 
 bool DBusProxy::hasReactiveBindings() const {
     return reactiveBindingsSupported();
 }
 
-#ifdef DBUSQML_REACTIVE_BINDINGS
 void DBusProxy::prepopulateFromCatalog() {
     if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
         return;
@@ -692,6 +680,5 @@ void DBusProxy::prepopulateFromCatalog() {
         }
     }
 }
-#endif
 
 #include "dbus.moc"

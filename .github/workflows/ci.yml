@@ -8,13 +8,12 @@ on:
 
 jobs:
   build-and-test:
-    name: Build & test (Qt ${{ matrix.qt }}, reactive=${{ matrix.reactive }})
+    name: Build & test (Qt ${{ matrix.qt }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         qt: ["6.8.2", "6.10.0"]
-        reactive: ["ON", "OFF"]
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +33,7 @@ jobs:
           cache: true
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDBUSQML_REACTIVE_BINDINGS=${{ matrix.reactive }}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build

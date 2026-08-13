@@ -62,7 +62,6 @@ Button {
 ```bash
 yay -S qt6-dbusqml           # release
 yay -S qt6-dbusqml-git       # git master
-yay -S qt6-dbusqml-reactive  # release, reactive bindings enabled
 ```
 
 If AUR is unavailable, install directly from the GitHub mirrors:
@@ -74,16 +73,9 @@ cd aur-qt6-dbusqml && makepkg -si
 
 ### Build from source
 
-For **reactive property bindings** through intermediate `readonly property`
-layers (e.g. `readonly property bool wifiEnabled: nm.wirelessEnabled === true`),
-enable `-DDBUSQML_REACTIVE_BINDINGS=ON` (default `OFF`):
-
-```sh
-cmake -B build-release -DCMAKE_BUILD_TYPE=Release -DDBUSQML_REACTIVE_BINDINGS=ON
-```
-
-See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#reactive-property-bindings-with-readonly-property-layers)
-for the background on this issue.
+Reactive property bindings (through intermediate `readonly property`
+layers, e.g. `readonly property bool wifiEnabled: nm.wirelessEnabled === true`)
+are always enabled — there is no build flag.
 
 ```sh
 cmake -B build-release -DCMAKE_BUILD_TYPE=Release
