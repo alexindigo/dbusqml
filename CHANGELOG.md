@@ -29,7 +29,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`DBus::Struct` value type** (`struct_` in QML) — wraps a
   `QVariantList` and marshals via `beginStructure`/`endStructure`.
   Enables struct-typed D-Bus values like `(ddd)` accent-color and
-  `(uu)` StateReason.
+  `(uu)` StateReason. In method replies and signal args the struct is
+  emitted through a writable `QDBusArgument` (QtDBus can't register a
+  fixed signature for a variable-member struct).
+- **Nested gadget unwrap in plain maps** — `toDbusVariant` recurses
+  into `QVariantMap` values, so QML object literals returned from
+  adaptor methods (`{ ns: { key: new DBusQML.variant(1) } }`) marshal
+  as proper `a{sa{sv}}` with variant payloads.
 
 ## [0.3.0] — 2026-08-12
 
