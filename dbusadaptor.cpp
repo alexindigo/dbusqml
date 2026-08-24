@@ -14,6 +14,16 @@
 #include <QRegularExpression>
 #include <qqmlinfo.h>
 
+// Map a D-Bus PascalCase member name to the QML camelCase convention.
+// Same rule as the proxy's dbusPropToQml: fold only the first character.
+// QML forbids uppercase-initial method names, so a spec-faithful D-Bus
+// member like "ReadOne" is declared in QML as "readOne".
+static QString dbusMemberToQml(const QString &name) {
+    if (name.isEmpty())
+        return name;
+    return name.at(0).toLower() + name.mid(1);
+}
+
 // Helper: forwards QML signal emissions to D-Bus.
 // One relay per signal, with the signal name baked in at construction.
 class SignalRelay : public QObject {
@@ -167,16 +177,42 @@ QString DBusAdaptor::introspect(const QString &) const {
     return generateXml();
 }
 
+// Convert a QJSValue to QVariant for D-Bus marshaling. Gadget types
+// (DBus::Variant, DBus::Dict, etc.) are preserved by QJSValue::toVariant()
+// in Qt 6 when the gadget's metatype is registered — which the plugin's
+// static initializer ensures.
+static QVariant qjsValueToVariant(const QJSValue &jsval) {
+    QVariant v = jsval.toVariant();
+    // QJSValue::toVariant() on a QML value type (gadget) may produce a
+    // QVariantMap if the engine converts it via the property map rather
+    // than the metatype system. Detect this by checking if the value is
+    // a QVariantMap with a single "value" key — the gadget's Q_PROPERTY.
+    if (v.userType() == qMetaTypeId<QVariantMap>()) {
+        QVariantMap m = v.toMap();
+        if (m.size() == 1 && m.contains(QStringLiteral("value"))) {
+            QVariant inner = m.value(QStringLiteral("value"));
+            // The inner value is the gadget's payload — wrap it as a
+            // QDBusVariant (the most common case for a gadget in a
+            // signal/reply context).
+            if (inner.isValid())
+                return QVariant::fromValue(QDBusVariant(toDbusVariant(inner)));
+        }
+    }
+    return v;
+}
+
 void DBusAdaptor::emitSignal(const QString &name, const QJSValue &arguments) {
     QDBusMessage msg = QDBusMessage::createSignal(m_path, m_iface, name);
     if (!arguments.isUndefined()) {
         QVariantList args;
         if (arguments.isArray()) {
             int len = arguments.property(QStringLiteral("length")).toInt();
-            for (int i = 0; i < len; ++i)
-                args.append(arguments.property(i).toVariant());
+            for (int i = 0; i < len; ++i) {
+                QJSValue item = arguments.property(i);
+                args.append(toDbusVariant(qjsValueToVariant(item)));
+            }
         } else {
-            args.append(arguments.toVariant());
+            args.append(toDbusVariant(qjsValueToVariant(arguments)));
         }
         msg.setArguments(args);
     }
@@ -382,12 +418,24 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
     for (QVariant &a : dbusArgs)
         a = unwrapDbus(a);
 
+    // D-Bus members are PascalCase; QML methods are camelCase (QML
+    // forbids uppercase-initial names). Try exact match first (C++
+    // Q_INVOKABLEs can be PascalCase), then the folded name.
+    const QString qmlMember = dbusMemberToQml(member);
+    QString matchedName; // the method name that matched (exact or folded)
+
     for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
         QMetaMethod method = meta->method(i);
         if (method.methodType() != QMetaMethod::Method && method.methodType() != QMetaMethod::Slot)
             continue;
-        if (QString::fromLatin1(method.name()) != member)
+        const QString methodName = QString::fromLatin1(method.name());
+        if (methodName == member) {
+            matchedName = member;
+        } else if (methodName == qmlMember) {
+            matchedName = qmlMember;
+        } else {
             continue;
+        }
 
         if (method.parameterCount() != dbusArgs.size()) {
             continue;
@@ -405,6 +453,8 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             QJSValue thisObj = engine->newQObject(this);
             QQmlEngine::setObjectOwnership(this, QQmlEngine::CppOwnership);
             QJSValue fn = thisObj.property(member);
+            if (!fn.isCallable() && qmlMember != member)
+                fn = thisObj.property(qmlMember);
             if (fn.isCallable()) {
                 QJSValueList jsArgs;
                 jsArgs.reserve(dbusArgs.size());
@@ -418,7 +468,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             }
         }
         if (!invoked) {
-            QByteArray methodName = member.toLatin1();
+            QByteArray methodName = matchedName.toLatin1();
             switch (dbusArgs.size()) {
             case 0:
                 invoked =
@@ -458,8 +508,11 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             }
         }
 
-        QList<QVariant> replyArgs = {retVal};
-        conn.send(msg.createReply(replyArgs));
+        retVal = toDbusVariant(retVal);
+        if (retVal.isValid())
+            conn.send(msg.createReply({retVal}));
+        else
+            conn.send(msg.createReply()); // void return — no reply args
         return true;
     }
 
