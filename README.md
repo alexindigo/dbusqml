@@ -44,16 +44,26 @@ Button {
 - **Async replies** — every call returns a `DBusPendingReply` with `finished`,
   `isError`, `error`, `value`.
 - **`DBusAdaptor`** — export QML objects onto the bus with methods, properties,
-  and signals declared inline.
+  and signals declared inline. PascalCase D-Bus members dispatch to camelCase
+  QML functions; variant/struct return types marshal correctly (portal-grade
+  serving — e.g. `org.freedesktop.impl.portal.Settings`).
+- **Reactive property bindings** — catalog/introspection pre-population makes
+  intermediate `readonly property` layers reactive out of the box (0.3.0+).
+- **Signature-driven marshaling** — method args marshal against the
+  introspected signature; `a{sa{sv}}`, `ay`, and nested containers work with
+  plain JS objects (0.3.0+).
 - **User-land type catalog** — drop XML descriptors into
   `$XDG_CONFIG_HOME/dbusqml/types/` for services that don't publish
   introspection (Chromium-based MPRIS players, for example). See [`docs/TYPES.md`](docs/TYPES.md).
-- **Nested container unmarshaling** — `a{sv}` / `a{ss}` / arrays arrive as
-  `QVariantMap` / `QVariantList` you can traverse directly in JS.
+- **Nested container unmarshaling** — `a{sv}` / `aa{sv}` / `a{sa{sv}}` /
+  struct arrays arrive as real JS `Array` / `Object` instances you can
+  traverse directly.
+- **`DBusUtils`** — `textFromBytes()` / `bytesFromText()` for `ay` payloads
+  (0.3.0+).
 - **`SessionBus` and `SystemBus`** singletons; `connectToBus(address)` for
   peer/custom connections.
-- **Value types** — `dbusVariant`, `dbusMessage`, `dbusError`, etc., via
-  `import DBus 1.0 as DBusQML`.
+- **Value types** — `dbusVariant`, `dbusMessage`, `dbusError`, `bytes`,
+  `struct_`, etc., via `import DBus 1.0 as DBusQML`.
 
 ## Install
 

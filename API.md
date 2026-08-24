@@ -237,11 +237,61 @@ DBusAdaptor {
 
 When the adaptor is registered on the bus, other processes can call `Get`, `GetAll`, `Set` on its properties, and invoke its QML functions as D-Bus methods.
 
+**Naming convention:** D-Bus members are PascalCase (`ReadOne`, `ReadAll`),
+but QML forbids uppercase-initial method names. The adaptor folds the first
+character when dispatching — a D-Bus call to `ReadOne` invokes the QML
+function `readOne`. This is the same convention the proxy side uses for
+property names (`dbusPropToQml`). Exact-name matches still work for C++
+`Q_INVOKABLE`s.
+
+**Return-value marshaling (0.3.1+):** return values are marshaled through
+`toDbusVariant`, so `DBusQML.variant(x)` produces a real D-Bus variant
+(`v`), and `DBusQML.dict(...)` produces `a{sv}`. A function that returns
+nothing sends an empty reply. Nested object literals with gadget values
+(`{ ns: { key: new DBusQML.variant(1) } }`) marshal correctly at any
+depth.
+
+Example — serving `org.freedesktop.impl.portal.Settings` (the portal
+backend pattern):
+
+```qml
+DBusAdaptor {
+    service: "org.freedesktop.impl.portal.MyShell"
+    path: "/org/freedesktop/portal/desktop"
+    iface: "org.freedesktop.impl.portal.Settings"
+
+    // D-Bus ReadOne(ss) → v — called by xdg-desktop-portal as "ReadOne"
+    function readOne(ns, key) {
+        if (ns === "org.freedesktop.appearance" && key === "color-scheme")
+            return new DBusQML.variant(1)              // prefer-dark
+        if (ns === "org.freedesktop.appearance" && key === "accent-color")
+            return new DBusQML.struct_([0.2, 0.5, 0.9]) // (ddd) on the wire
+        return new DBusQML.variant("")
+    }
+
+    // D-Bus ReadAll(as) → a{sa{sv}}
+    function readAll(namespaces) {
+        return {
+            "org.freedesktop.appearance": {
+                "color-scheme": new DBusQML.variant(1)
+            }
+        }
+    }
+
+    function onThemeChanged() {
+        // Emits SettingChanged with signature (ssv) — portal-compliant
+        emitSignal("SettingChanged",
+            ["org.freedesktop.appearance", "color-scheme", new DBusQML.variant(0)])
+    }
+}
+```
+
 **Limitations:**
-- Function names must follow QML camelCase convention (lowercase first letter)
 - QML `signal` declarations are automatically forwarded as D-Bus signals (maximum 5 parameters)
 - Static `DBus.emitSignal(service, path, iface, name, args)` always uses the session bus
 - Instance `emitSignal(name, args)` intentionally attempts `registerService(service)` so the signal appears to originate from that name (portal-style signals)
+- `emitSignal(name, args)` arguments are marshaled through `toDbusVariant` — use `DBusQML.variant(x)` for variant-typed signal args (e.g. the portal `SettingChanged` `(ssv)` signature)
+- A struct **inside** a variant (`DBusQML.variant(DBusQML.struct_(...))`) cannot be marshaled — QtDBus requires a fixed wire signature per metatype, and a variable-member struct has none. Return the struct directly instead (see `struct_` below).
 
 #### Properties
 
@@ -375,6 +425,7 @@ Most examples don't need value types — plain JS strings/numbers/booleans work 
 | `DBus::Dict` | `dict` | D-Bus dictionary (map). |
 | `DBus::Variant` | `variant` | D-Bus variant. |
 | `DBus::Bytes` | `bytes` | Byte array (`ay`). |
+| `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. Cannot be nested inside a variant (QtDBus needs a fixed signature per type). |
 
 Since v0.3.0, when the method signature is known (from introspection or
 catalog), plain JS values are marshaled correctly — no wrapper types needed.
