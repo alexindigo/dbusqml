@@ -121,6 +121,7 @@ private slots:
     void testReplyMarshalVariant();
     void testEmitSignalMarshalVariant();
     void testStructMarshal();
+    void testGenerateXmlClean();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -392,6 +393,24 @@ void TestDBusAdaptor::testStructMarshal() {
     QCOMPARE(unwrapped.value<DBus::Struct>().value.at(0).toDouble(), 0.5);
     QCOMPARE(unwrapped.value<DBus::Struct>().value.at(1).toDouble(), 0.3);
     QCOMPARE(unwrapped.value<DBus::Struct>().value.at(2).toDouble(), 0.8);
+}
+
+// generateXml must not leak Qt internals (destroyed, objectNameChanged)
+// and must type signal args from parameterTypes, not hardcode "v".
+void TestDBusAdaptor::testGenerateXmlClean() {
+    TestAdaptor adaptor;
+    adaptor.setIface(QStringLiteral("org.dbusqml.TestAdaptor"));
+    QString xml = adaptor.introspect(QString());
+
+    // No Qt internals in the XML
+    QVERIFY(!xml.contains(QStringLiteral("destroyed")));
+    QVERIFY(!xml.contains(QStringLiteral("objectNameChanged")));
+
+    // Signal args typed from parameterTypes, not hardcoded "v".
+    // TestAdaptor's signals (testIntChanged, testStringChanged) have no
+    // params, so no <arg> elements. The key assertion: no signal arg is
+    // typed as "v" — the hardcoded fallback is gone.
+    QVERIFY(!xml.contains(QStringLiteral("type=\"v\"")));
 }
 
 int main(int argc, char *argv[]) {

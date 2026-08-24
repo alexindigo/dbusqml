@@ -318,13 +318,18 @@ QString DBusAdaptor::generateXml() const {
         QString name = QString::fromLatin1(method.name());
         if (name.startsWith(QStringLiteral("qml")) || name == QStringLiteral("serviceChanged") ||
             name == QStringLiteral("pathChanged") || name == QStringLiteral("ifaceChanged") ||
-            name == QStringLiteral("connectionChanged"))
+            name == QStringLiteral("connectionChanged") || name == QStringLiteral("destroyed") ||
+            name == QStringLiteral("objectNameChanged"))
             continue;
 
         xml += QStringLiteral("    <signal name=\"%1\">\n").arg(name);
+        const auto sigParamTypes = method.parameterTypes();
+        const auto sigParamNames = method.parameterNames();
         for (int j = 0; j < method.parameterCount(); ++j) {
-            xml += QStringLiteral("      <arg name=\"%1\" type=\"v\"/>\n")
-                       .arg(QString::fromLatin1(method.parameterNames().at(j)));
+            int typeId = QMetaType::fromName(sigParamTypes.at(j)).id();
+            QString dbusType = metaTypeToDbusSignature(typeId);
+            xml += QStringLiteral("      <arg name=\"%1\" type=\"%2\"/>\n")
+                       .arg(QString::fromLatin1(sigParamNames.at(j)), dbusType);
         }
         xml += QStringLiteral("    </signal>\n");
     }
