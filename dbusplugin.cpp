@@ -15,6 +15,7 @@ static void registerTypeConverters() {
 
     qDBusRegisterMetaType<QStringList>();
     qDBusRegisterMetaType<DBusAsArray>();
+    qDBusRegisterMetaType<DBus::Struct>();
     // a{sa{sv}} — dict of dicts, NM connection-settings shape.
     // Registered so the signature-driven marshaller can produce it from
     // plain JS objects.
@@ -64,6 +65,8 @@ static void registerTypeConverters() {
         [](const DBus::Variant &v) { return v.value.variant(); });
     QMetaType::registerConverter<DBus::Bytes, QByteArray>(
         [](const DBus::Bytes &b) { return b.value; });
+    QMetaType::registerConverter<DBus::Struct, QVariantList>(
+        [](const DBus::Struct &s) { return s.value; });
 }
 
 // Static initializer — runs when the shared library is loaded

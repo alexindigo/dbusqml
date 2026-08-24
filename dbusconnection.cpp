@@ -357,6 +357,15 @@ QVariant toDbusVariant(const QVariant &v) {
         return QVariant::fromValue(v.value<DBus::Signature>().value);
     if (type == qMetaTypeId<DBus::Bytes>())
         return QVariant::fromValue(v.value<DBus::Bytes>().value);
+    if (type == qMetaTypeId<DBus::Struct>()) {
+        // Struct marshals via its QDBusArgument operator<< — the members
+        // are marshaled per their QVariant types inside beginStructure.
+        // Recurse into members to unwrap any nested DBus.* types first.
+        QVariantList members = v.value<DBus::Struct>().value;
+        for (auto &m : members)
+            m = toDbusVariant(m);
+        return QVariant::fromValue(DBus::Struct(members));
+    }
     if (type == qMetaTypeId<DBus::Dict>()) {
         // Unwrap recursively: a Dict's QVariantMap may itself hold Dict /
         // Variant values (e.g. NetworkManager connection dicts a{sa{sv}}).

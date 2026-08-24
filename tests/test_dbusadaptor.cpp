@@ -16,6 +16,7 @@
 #include "dbusadaptor.h"
 #include "dbusconnection.h"
 #include "dbus.h"
+#include "dbustypes.h"
 
 // Test adaptor with QML-exposed properties (simulates QML usage)
 class TestAdaptor : public DBusAdaptor {
@@ -119,6 +120,7 @@ private slots:
     void testCaseFoldedDispatch();
     void testReplyMarshalVariant();
     void testEmitSignalMarshalVariant();
+    void testStructMarshal();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -373,6 +375,23 @@ void TestDBusAdaptor::testEmitSignalMarshalVariant() {
     QCOMPARE(catcher.lastSignal.arguments().at(2).value<QDBusVariant>().variant().toInt(), 42);
 
     delete adaptor;
+}
+
+// Struct value type — accent-color is (ddd), a JS array would marshal as
+// av. DBus::Struct wraps a QVariantList and marshals via beginStructure.
+void TestDBusAdaptor::testStructMarshal() {
+    // Unit-level: verify the QDBusArgument operators produce a struct.
+    DBus::Struct s({0.5, 0.3, 0.8});
+    QVariant v = QVariant::fromValue(s);
+    QCOMPARE(v.userType(), qMetaTypeId<DBus::Struct>());
+
+    // Round-trip through toDbusVariant — must preserve the struct type.
+    QVariant unwrapped = toDbusVariant(v);
+    QCOMPARE(unwrapped.userType(), qMetaTypeId<DBus::Struct>());
+    QCOMPARE(unwrapped.value<DBus::Struct>().value.size(), 3);
+    QCOMPARE(unwrapped.value<DBus::Struct>().value.at(0).toDouble(), 0.5);
+    QCOMPARE(unwrapped.value<DBus::Struct>().value.at(1).toDouble(), 0.3);
+    QCOMPARE(unwrapped.value<DBus::Struct>().value.at(2).toDouble(), 0.8);
 }
 
 int main(int argc, char *argv[]) {

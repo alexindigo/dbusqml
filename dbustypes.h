@@ -108,7 +108,28 @@ public:
     QByteArray value;
 };
 
+class Struct {
+    Q_GADGET
+    QML_VALUE_TYPE(struct_)
+    QML_CONSTRUCTIBLE_VALUE
+    Q_PROPERTY(QVariantList value MEMBER value)
+public:
+    explicit Struct() {}
+    Q_INVOKABLE explicit Struct(const QVariantList &v) : value(v) {}
+    Q_INVOKABLE QString toString() const { return QVariant::fromValue(value).toString(); }
+    operator QVariant() const { return QVariant::fromValue(*this); }
+    QVariantList value;
+};
+
 } // namespace DBus
+
+Q_DECLARE_METATYPE(DBus::Struct)
+
+// D-Bus marshaling for DBus::Struct — beginStructure/endStructure with
+// per-member QVariant marshaling.
+class QDBusArgument;
+QDBusArgument &operator<<(QDBusArgument &arg, const DBus::Struct &s);
+const QDBusArgument &operator>>(const QDBusArgument &arg, DBus::Struct &s);
 
 // Distinct type to force D-Bus marshaling fallthrough to appendRegisteredType for "as".
 // QStringList is handled by Qt's internal marshaling but may produce "av";
