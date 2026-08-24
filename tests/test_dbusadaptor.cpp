@@ -122,6 +122,7 @@ private slots:
     void testEmitSignalMarshalVariant();
     void testStructMarshal();
     void testGenerateXmlClean();
+    void testStructInReply();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -411,6 +412,48 @@ void TestDBusAdaptor::testGenerateXmlClean() {
     // params, so no <arg> elements. The key assertion: no signal arg is
     // typed as "v" — the hardcoded fallback is gone.
     QVERIFY(!xml.contains(QStringLiteral("type=\"v\"")));
+}
+
+// Struct in a method reply — accent-color is (ddd). The struct must
+// marshal as a struct on the wire, not as an array of variants.
+void TestDBusAdaptor::testStructInReply() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "import DBus 1.0 as DBusQML\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.StructTest'\n"
+                      "  path: '/Struct'\n"
+                      "  iface: 'org.dbusqml.StructTest'\n"
+                      "  function getColor() {\n"
+                      "    return new DBusQML.struct_([0.5, 0.3, 0.8])\n"
+                      "  }\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    auto *adaptor = component.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.StructTest"), QStringLiteral("/Struct"),
+        QStringLiteral("org.dbusqml.StructTest"), QStringLiteral("getColor"));
+    QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(!reply.arguments().isEmpty());
+
+    // The reply arg should be a QDBusArgument containing a struct (ddd)
+    QVariant arg = reply.arguments().first();
+    if (arg.userType() == qMetaTypeId<QDBusArgument>()) {
+        const QDBusArgument dbusArg = arg.value<QDBusArgument>();
+        QCOMPARE(dbusArg.currentSignature(), QStringLiteral("(ddd)"));
+    }
+
+    delete adaptor;
 }
 
 int main(int argc, char *argv[]) {

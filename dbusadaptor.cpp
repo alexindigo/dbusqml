@@ -1,5 +1,6 @@
 #include "dbusadaptor.h"
 #include "dbusconnection.h"
+#include "dbustypes.h"
 
 #include <QDBusArgument>
 #include <QDBusConnection>
@@ -191,9 +192,28 @@ static QVariant qjsValueToVariant(const QJSValue &jsval) {
         QVariantMap m = v.toMap();
         if (m.size() == 1 && m.contains(QStringLiteral("value"))) {
             QVariant inner = m.value(QStringLiteral("value"));
-            // The inner value is the gadget's payload — wrap it as a
-            // QDBusVariant (the most common case for a gadget in a
-            // signal/reply context).
+            // Struct payload (QVariantList) — marshal via QDBusArgument
+            // so it gets a real struct signature on the wire.
+            if (inner.userType() == qMetaTypeId<QVariantList>()) {
+                QVariantList members = inner.toList();
+                if (!members.isEmpty()) {
+                    bool allDouble = true;
+                    for (const QVariant &member : members) {
+                        if (member.userType() != QMetaType::Double) {
+                            allDouble = false;
+                            break;
+                        }
+                    }
+                    if (allDouble) {
+                        QDBusArgument arg;
+                        arg.beginStructure();
+                        for (const QVariant &member : members)
+                            arg << member.toDouble();
+                        arg.endStructure();
+                        return QVariant::fromValue(arg);
+                    }
+                }
+            }
             if (inner.isValid())
                 return QVariant::fromValue(QDBusVariant(toDbusVariant(inner)));
         }
@@ -467,7 +487,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                     jsArgs << engine->toScriptValue(arg);
                 QJSValue result = fn.callWithInstance(thisObj, jsArgs);
                 if (!result.isError()) {
-                    retVal = result.isUndefined() ? QVariant() : result.toVariant();
+                    retVal = result.isUndefined() ? QVariant() : qjsValueToVariant(result);
                     invoked = true;
                 }
             }
@@ -514,10 +534,20 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         }
 
         retVal = toDbusVariant(retVal);
-        if (retVal.isValid())
-            conn.send(msg.createReply({retVal}));
-        else
+        if (retVal.isValid()) {
+            // DBus::Struct can't be marshaled by QtDBus's metatype system
+            // (variable signature). Convert to QDBusArgument which QtDBus
+            // cross-marshals into the message.
+            if (retVal.userType() == qMetaTypeId<DBus::Struct>()) {
+                QDBusArgument structArg;
+                structArg << retVal.value<DBus::Struct>();
+                conn.send(msg.createReply({QVariant::fromValue(structArg)}));
+            } else {
+                conn.send(msg.createReply({retVal}));
+            }
+        } else {
             conn.send(msg.createReply()); // void return — no reply args
+        }
         return true;
     }
 
