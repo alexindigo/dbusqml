@@ -123,6 +123,7 @@ private slots:
     void testStructMarshal();
     void testGenerateXmlClean();
     void testStructInReply();
+    void testNestedVariantInMapReply();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -452,6 +453,47 @@ void TestDBusAdaptor::testStructInReply() {
         const QDBusArgument dbusArg = arg.value<QDBusArgument>();
         QCOMPARE(dbusArg.currentSignature(), QStringLiteral("(ddd)"));
     }
+
+    delete adaptor;
+}
+
+// Nested variant gadget inside a returned map — ReadAll shape:
+// { "ns": { "key": new DBusQML.variant(1) } }. The gadget must be
+// unwrapped to QDBusVariant at every nesting level.
+void TestDBusAdaptor::testNestedVariantInMapReply() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "import DBus 1.0 as DBusQML\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.NestedVarTest'\n"
+                      "  path: '/NestedVar'\n"
+                      "  iface: 'org.dbusqml.NestedVarTest'\n"
+                      "  function readAll(namespaces) {\n"
+                      "    var result = {}\n"
+                      "    result['org.test'] = {\n"
+                      "      'color-scheme': new DBusQML.variant(1)\n"
+                      "    }\n"
+                      "    return result\n"
+                      "  }\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    auto *adaptor = component.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.NestedVarTest"), QStringLiteral("/NestedVar"),
+        QStringLiteral("org.dbusqml.NestedVarTest"), QStringLiteral("readAll"));
+    msg.setArguments({QVariant(QStringList{QStringLiteral("org.test")})});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(!reply.arguments().isEmpty());
 
     delete adaptor;
 }

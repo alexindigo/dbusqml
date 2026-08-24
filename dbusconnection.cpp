@@ -366,6 +366,14 @@ QVariant toDbusVariant(const QVariant &v) {
             m = toDbusVariant(m);
         return QVariant::fromValue(DBus::Struct(members));
     }
+    // Plain QVariantMap holding DBus.* gadget values (from QML object
+    // literals in adaptor return values) — recurse into the values.
+    if (type == qMetaTypeId<QVariantMap>()) {
+        QVariantMap m = v.toMap();
+        for (auto it = m.begin(); it != m.end(); ++it)
+            it.value() = toDbusVariant(it.value());
+        return QVariant::fromValue(m);
+    }
     if (type == qMetaTypeId<DBus::Dict>()) {
         // Unwrap recursively: a Dict's QVariantMap may itself hold Dict /
         // Variant values (e.g. NetworkManager connection dicts a{sa{sv}}).
