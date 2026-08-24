@@ -4,6 +4,33 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-08-12
+
+### Fixed
+
+- **Adaptor case-folded method dispatch** — D-Bus PascalCase members
+  (`ReadOne`) now dispatch to QML camelCase methods (`readOne`). QML
+  forbids uppercase-initial method names; previously the call got
+  `UnknownMethod`. Exact match tried first for C++ Q_INVOKABLEs.
+- **Adaptor reply marshaling** — method replies now run through
+  `toDbusVariant()`, so `DBusQML.variant(x)` returns marshal as real
+  D-Bus variants. Previously the caller timed out. Void returns now
+  send an empty reply instead of an invalid-Variant error.
+- **Adaptor signal marshaling** — `emitSignal()` arguments now run
+  through `toDbusVariant()` via `qjsValueToVariant()`. Portal
+  `SettingChanged` emits `(ssv)` instead of `(ssi)` — xdg-desktop-portal
+  no longer drops the signal.
+- **Adaptor introspection XML** — `destroyed`/`objectNameChanged` no
+  longer leak into the served XML. Signal args typed from
+  `parameterTypes()` instead of hardcoded `v`.
+
+### Added
+
+- **`DBus::Struct` value type** (`struct_` in QML) — wraps a
+  `QVariantList` and marshals via `beginStructure`/`endStructure`.
+  Enables struct-typed D-Bus values like `(ddd)` accent-color and
+  `(uu)` StateReason.
+
 ## [0.3.0] — 2026-08-12
 
 ### Breaking
