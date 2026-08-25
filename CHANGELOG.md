@@ -45,6 +45,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `DBusQML.struct_` value previously emitted an empty struct `()` and
   dropped the bus connection when nested in a variant/map/signal; it now
   cross-marshals correctly in every position.
+- **Unmarshalable payloads degrade gracefully** — a reply value that cannot
+  be marshaled (e.g. a returned JS function) now produces a
+  `org.freedesktop.DBus.Error.Failed` error reply and a warning, instead of
+  silently dropping the bus connection. Unmarshalable signal args are warned
+  and skipped.
 
 ## [0.3.1] — 2026-08-12
 

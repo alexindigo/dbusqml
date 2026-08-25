@@ -315,6 +315,11 @@ user type catalog, its declared out-args drive reply marshaling. A
 `a{sa{sv}}` (the shape xdg-desktop-portal requires) from a plain object
 literal, with no override needed.
 
+**Robustness:** a method return value that cannot be marshaled (e.g. a
+returned JS function) produces a D-Bus `org.freedesktop.DBus.Error.Failed`
+error reply — never a dropped bus connection. An unmarshalable signal arg is
+warned about and skipped (signals have no error-reply channel).
+
 #### Methods
 
 | Method | Arguments | Description |

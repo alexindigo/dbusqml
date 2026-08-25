@@ -158,6 +158,7 @@ private slots:
     void testStructInVariantReply();
     void testStructInMapValueReply();
     void testStructSignalArg();
+    void testUnmarshalableReplySurvival();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -930,6 +931,53 @@ void TestDBusAdaptor::testStructSignalArg() {
     QCOMPARE(catcher.count, 1);
     QCOMPARE(catcher.lastSignal.member(), QStringLiteral("ColorChanged"));
     QCOMPARE(catcher.lastSignal.signature(), QStringLiteral("(ddd)"));
+
+    delete adaptor;
+}
+
+// T4 — robustness: an unmarshalable return value degrades to an error reply,
+// never kills the connection. A subsequent normal call still succeeds.
+void TestDBusAdaptor::testUnmarshalableReplySurvival() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.UnmarshalSurvival'\n"
+                      "  path: '/UnmarshalSurvival'\n"
+                      "  iface: 'org.dbusqml.UnmarshalSurvival'\n"
+                      "  function bad() { return function(){} }\n"
+                      "  function good() { return 42 }\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    auto *adaptor = component.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
+                                           "dbusqml: reply for .* is not marshalable")));
+    QDBusMessage badCall = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.UnmarshalSurvival"), QStringLiteral("/UnmarshalSurvival"),
+        QStringLiteral("org.dbusqml.UnmarshalSurvival"), QStringLiteral("bad"));
+    QDBusMessage badReply = bus.call(badCall, QDBus::Block, 3000);
+    QCOMPARE(badReply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(badReply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+
+    QVERIFY(bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.UnmarshalSurvival")));
+
+    QDBusMessage goodCall = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.UnmarshalSurvival"), QStringLiteral("/UnmarshalSurvival"),
+        QStringLiteral("org.dbusqml.UnmarshalSurvival"), QStringLiteral("good"));
+    QDBusMessage goodReply = bus.call(goodCall, QDBus::Block, 3000);
+    QCOMPARE(goodReply.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(!goodReply.arguments().isEmpty());
+    QCOMPARE(goodReply.arguments().first().toInt(), 42);
 
     delete adaptor;
 }
