@@ -4,6 +4,42 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-08-24
+
+### Added
+
+- **Generic signature-walking marshaller (`writeBySignature`)** — the write
+  side is now signature-general, mirroring the signature-general read side
+  (`readBySignature`). Any producible D-Bus signature — nested maps, arrays
+  of dicts (`aa{sv}`), arbitrary structs — is built from public QtDBus
+  primitives.
+- **Declared reply signatures on `DBusAdaptor`** — method replies marshal
+  against the served interface's declared out-signature. Precedence:
+  explicit `_signatures` override → bundled/user type catalog → stable
+  inference. Serves `org.freedesktop.impl.portal.Settings` correctly
+  (`ReadAll` → `a{sa{sv}}`, the shape xdg-desktop-portal requires).
+- **`_signatures` override property** on both `DBus` (call-argument
+  signatures) and `DBusAdaptor` (reply signatures). The underscore prefix
+  keeps it outside the mirrored/served D-Bus namespace.
+- **Underscore-private adaptor properties** — `_`-prefixed properties are
+  never exported via `generateXml()` or `Properties.Get/GetAll/Set`, so
+  consumers get private helper properties for free.
+- **`aa{sv}` support** — arrays of dicts (NM `Ip4Config.AddressData` shape)
+  marshal from plain JS arrays.
+- **Bundled `org.freedesktop.impl.portal.Settings` type** — the backend
+  interface catalog, so Settings backends serve correct reply signatures
+  with no per-app override.
+- **`v(struct)` limitation lifted** — a hand-built struct payload now
+  marshals inside a variant (spike-verified on Qt 6.11).
+- **Deep map nesting** — `a{sa{sa{sv}}}` and arbitrary map depth work.
+
+### Fixed
+
+- **Declared signatures are no longer silently ignored** — an unproducible
+  declared signature emits
+  `qWarning("dbusqml: cannot produce declared signature …")` and falls back
+  to inference, rather than emitting a different wire type with no notice.
+
 ## [0.3.1] — 2026-08-12
 
 ### Fixed

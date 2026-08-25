@@ -58,6 +58,7 @@ dbusqml ships descriptors for these interfaces:
 - `org.freedesktop.ScreenSaver`
 - `org.freedesktop.login1.Manager`
 - `org.freedesktop.portal.Settings`
+- `org.freedesktop.impl.portal.Settings`
 - `org.freedesktop.portal.NetworkMonitor`
 - `org.freedesktop.UPower`
 - `org.freedesktop.NetworkManager`
@@ -92,3 +93,13 @@ When a proxy connects to a service, the catalog spec is unioned with whatever
 the service reports via `Introspect()`. Where both name the same method, the
 service's arg types are preferred (the server is authoritative when it
 speaks); the catalog only fills in what the server didn't report.
+
+## Serving side: declared reply signatures
+
+The catalog is also consulted on the **serving** side. When a `DBusAdaptor`
+serves an interface whose method declares `<arg direction="out">` types, those
+declared signatures drive the reply marshaling. This is what lets a
+`org.freedesktop.impl.portal.Settings` backend return `ReadAll` as
+`a{sa{sv}}` — the shape xdg-desktop-portal requires — from a plain QML object
+literal, with no per-app override. Explicit `_signatures` overrides beat the
+catalog; unproducible declared shapes warn and fall back to inference.

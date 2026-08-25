@@ -81,6 +81,7 @@ Properties auto-update via `PropertiesChanged` signals. Property names follow QM
 | `path` | `string` | The D-Bus object path. |
 | `iface` | `string` | The D-Bus interface name. |
 | `connection` | `DBusConnection` | The connection associated with this proxy. |
+| `_signatures` | `var` (object) | Explicit call-argument signatures, keyed by D-Bus member name (see Shape Selection). |
 
 #### Runtime Properties
 
@@ -291,7 +292,7 @@ DBusAdaptor {
 - Static `DBus.emitSignal(service, path, iface, name, args)` always uses the session bus
 - Instance `emitSignal(name, args)` intentionally attempts `registerService(service)` so the signal appears to originate from that name (portal-style signals)
 - `emitSignal(name, args)` arguments are marshaled through `toDbusVariant` — use `DBusQML.variant(x)` for variant-typed signal args (e.g. the portal `SettingChanged` `(ssv)` signature)
-- A struct **inside** a variant (`DBusQML.variant(DBusQML.struct_(...))`) cannot be marshaled — QtDBus requires a fixed wire signature per metatype, and a variable-member struct has none. Return the struct directly instead (see `struct_` below).
+- A struct **inside** a variant (`DBusQML.variant(DBusQML.struct_(...))`) marshals as a real `v` with a struct payload (lifted in 0.4.0); return the struct directly when you need a bare `(...)` signature.
 
 #### Properties
 
@@ -301,12 +302,63 @@ DBusAdaptor {
 | `path` | `string` | The object path to register at. |
 | `iface` | `string` | The interface name to expose. |
 | `connection` | `DBusConnection` | The bus to register on (default session bus). |
+| `_signatures` | `var` (object) | Explicit reply signatures, keyed by D-Bus member name (see Shape Selection). |
+
+**Private properties:** any adaptor property whose name starts with `_` is
+library meta-config (`_signatures`, or your own helpers) and is never served
+over D-Bus — it is excluded from `generateXml()` and
+`Properties.Get/GetAll/Set`.
+
+**Declared reply signatures:** when the served interface is in the bundled or
+user type catalog, its declared out-args drive reply marshaling. A
+`org.freedesktop.impl.portal.Settings` backend therefore returns `ReadAll` as
+`a{sa{sv}}` (the shape xdg-desktop-portal requires) from a plain object
+literal, with no override needed.
 
 #### Methods
 
 | Method | Arguments | Description |
 | :--- | :--- | :--- |
 | `emitSignal(name, args)` | `string name`, `list args` | Emit a D-Bus signal on this adaptor's path/interface. |
+
+---
+
+## Shape Selection
+
+When dbusqml marshals a JS value to the wire, the D-Bus signature comes from
+declarations, never from guessing the data's shape. Inference is stable and
+boring: `QVariantMap` → `a{sv}`, always. Anything fancier must be declared.
+
+Precedence, on both the **proxy** (call arguments it sends) and the
+**adaptor** (replies it returns):
+
+1. **Explicit `_signatures` override** — the author corrects wrong or
+   missing introspection.
+2. **Declared signature** — the proxy's introspected/cataloged in-args; the
+   adaptor's cataloged out-args.
+3. **Stable inference** — `QVariantMap` → `a{sv}`, etc.
+
+The `_signatures` property is a JS object mapping D-Bus member names to a
+concatenated signature string, split per-argument by the parser:
+
+```qml
+// Proxy — declare the in-arg signature for a call:
+DBus {
+    iface: "com.example.Service"
+    _signatures: ({ AddThing: "a{sa{sv}}oo" })   // a{sa{sv}}, o, o
+}
+
+// Adaptor — declare the out-arg signature for a reply:
+DBusAdaptor {
+    iface: "com.example.Service"
+    _signatures: ({ ReadAll: "a{sa{sv}}" })
+}
+```
+
+A declared signature is never silently ignored. If dbusqml cannot produce a
+declared signature (e.g. an array of anonymous structs, which needs a
+registered carrier type), it logs a warning and falls back to inference —
+never a different wire type with no notice.
 
 ---
 
@@ -425,7 +477,7 @@ Most examples don't need value types — plain JS strings/numbers/booleans work 
 | `DBus::Dict` | `dict` | D-Bus dictionary (map). |
 | `DBus::Variant` | `variant` | D-Bus variant. |
 | `DBus::Bytes` | `bytes` | Byte array (`ay`). |
-| `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. Cannot be nested inside a variant (QtDBus needs a fixed signature per type). |
+| `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. Since 0.4.0 a struct can also be nested inside a variant. |
 
 Since v0.3.0, when the method signature is known (from introspection or
 catalog), plain JS values are marshaled correctly — no wrapper types needed.
