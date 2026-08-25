@@ -1,4 +1,5 @@
 #include <QDBusConnection>
+#include <QDBusConnectionInterface>
 #include <QDBusMessage>
 #include <QDBusPendingCall>
 #include <QDBusPendingReply>
@@ -154,6 +155,9 @@ private slots:
     void testWireSignatureOverrideBeatsCatalog();
     void testWireSignatureCppInvokable();
     void testWireSignatureUnproducibleWarns();
+    void testStructInVariantReply();
+    void testStructInMapValueReply();
+    void testStructSignalArg();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -418,13 +422,13 @@ void TestDBusAdaptor::testStructMarshal() {
     QVariant v = QVariant::fromValue(s);
     QCOMPARE(v.userType(), qMetaTypeId<DBus::Struct>());
 
-    // Round-trip through toDbusVariant — must preserve the struct type.
+    // toDbusVariant emits the writable QDBusArgument form — variable-member
+    // structs have no fixed signature, so the raw gadget would marshal as an
+    // empty struct. The QDBusArgument cross-marshals in every position.
     QVariant unwrapped = toDbusVariant(v);
-    QCOMPARE(unwrapped.userType(), qMetaTypeId<DBus::Struct>());
-    QCOMPARE(unwrapped.value<DBus::Struct>().value.size(), 3);
-    QCOMPARE(unwrapped.value<DBus::Struct>().value.at(0).toDouble(), 0.5);
-    QCOMPARE(unwrapped.value<DBus::Struct>().value.at(1).toDouble(), 0.3);
-    QCOMPARE(unwrapped.value<DBus::Struct>().value.at(2).toDouble(), 0.8);
+    QCOMPARE(unwrapped.userType(), qMetaTypeId<QDBusArgument>());
+    const QDBusArgument arg = unwrapped.value<QDBusArgument>();
+    QCOMPARE(arg.currentSignature(), QStringLiteral("(ddd)"));
 }
 
 // generateXml must not leak Qt internals (destroyed, objectNameChanged)
@@ -819,6 +823,115 @@ void TestDBusAdaptor::testWireSignatureUnproducibleWarns() {
         "}");
     QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(reply.signature(), QStringLiteral("av"));
+}
+
+// T1 — struct inside a variant (the TODO reproducer). readOne returns
+// variant(struct_(…)) — the accent-color shape. Must reply "v" with a
+// (ddd) payload, not an empty struct, and must not drop the connection.
+void TestDBusAdaptor::testStructInVariantReply() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.StructInVar"), QStringLiteral("/StructInVar"),
+        QStringLiteral("org.dbusqml.StructInVar"), QStringLiteral("readOne"),
+        {QStringLiteral("org.freedesktop.appearance"), QStringLiteral("accent-color")},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.StructInVar'\n"
+        "  path: '/StructInVar'\n"
+        "  iface: 'org.dbusqml.StructInVar'\n"
+        "  function readOne(ns, key) {\n"
+        "    return new DBusQML.variant(new DBusQML.struct_([0.039, 0.518, new "
+        "DBusQML.double(1.0)]))\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("v"));
+    QVariant payload = unwrapDbus(reply.arguments().first());
+    QCOMPARE(payload.userType(), qMetaTypeId<QVariantList>());
+    QVariantList list = payload.toList();
+    QCOMPARE(list.size(), 3);
+    QCOMPARE(list.at(0).toDouble(), 0.039);
+    QCOMPARE(list.at(1).toDouble(), 0.518);
+    QCOMPARE(list.at(2).toDouble(), 1.0);
+}
+
+// T2 — struct as a map value inside a nested return. Outer wire signature
+// unchanged; the struct payload survives demarshal.
+void TestDBusAdaptor::testStructInMapValueReply() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.StructInMap"), QStringLiteral("/StructInMap"),
+        QStringLiteral("org.dbusqml.StructInMap"), QStringLiteral("readAll"),
+        {QVariant(QStringList{QStringLiteral("org.freedesktop.appearance")})},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.StructInMap'\n"
+        "  path: '/StructInMap'\n"
+        "  iface: 'org.dbusqml.StructInMap'\n"
+        "  function readAll(namespaces) {\n"
+        "    var result = {}\n"
+        "    result['org.freedesktop.appearance'] = {\n"
+        "      'accent-color': new DBusQML.struct_([0.039, 0.518, new DBusQML.double(1.0)])\n"
+        "    }\n"
+        "    return result\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sv}"));
+    QVariantMap outer = unwrapDbus(reply.arguments().first()).toMap();
+    QVERIFY(outer.contains(QStringLiteral("org.freedesktop.appearance")));
+    QVariantMap inner = outer.value(QStringLiteral("org.freedesktop.appearance")).toMap();
+    QVariantList acc = inner.value(QStringLiteral("accent-color")).toList();
+    QCOMPARE(acc.size(), 3);
+    QCOMPARE(acc.at(0).toDouble(), 0.039);
+    QCOMPARE(acc.at(1).toDouble(), 0.518);
+    QCOMPARE(acc.at(2).toDouble(), 1.0);
+}
+
+// T3 — struct as a signal arg. emitSignal with a struct_ arg must hit the
+// wire as literal "(ddd)".
+void TestDBusAdaptor::testStructSignalArg() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "import DBus 1.0 as DBusQML\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.StructSig'\n"
+                      "  path: '/StructSig'\n"
+                      "  iface: 'org.dbusqml.StructSig'\n"
+                      "  function fire() {\n"
+                      "    emitSignal('ColorChanged',\n"
+                      "      [new DBusQML.struct_([0.039, 0.518, new DBusQML.double(1.0)])])\n"
+                      "  }\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    auto *adaptor = component.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.StructSig"), QStringLiteral("/StructSig"),
+                        QStringLiteral("org.dbusqml.StructSig"), QStringLiteral("ColorChanged"),
+                        &catcher, SLOT(onSignal(QDBusMessage))));
+
+    QDBusMessage call = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.StructSig"), QStringLiteral("/StructSig"),
+        QStringLiteral("org.dbusqml.StructSig"), QStringLiteral("fire"));
+    QCOMPARE(bus.call(call, QDBus::Block, 3000).type(), QDBusMessage::ReplyMessage);
+
+    for (int i = 0; i < 20 && catcher.count == 0; ++i)
+        QTest::qWait(100);
+    QCOMPARE(catcher.count, 1);
+    QCOMPARE(catcher.lastSignal.member(), QStringLiteral("ColorChanged"));
+    QCOMPARE(catcher.lastSignal.signature(), QStringLiteral("(ddd)"));
+
+    delete adaptor;
 }
 
 int main(int argc, char *argv[]) {

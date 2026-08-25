@@ -640,17 +640,10 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
         retVal = toDbusVariant(retVal);
         if (retVal.isValid()) {
-            // DBus::Struct replies marshal via their own QDBusArgument
-            // (variable signature) — independent of any declared out-signature.
-            if (retVal.userType() == qMetaTypeId<DBus::Struct>()) {
-                QDBusArgument structArg;
-                structArg << retVal.value<DBus::Struct>();
-                conn.send(msg.createReply({QVariant::fromValue(structArg)}));
-                return true;
-            }
-
             // Honor a declared reply signature: explicit _signatures override
-            // → catalog declaration → stable inference (unchanged).
+            // → catalog declaration → stable inference (unchanged). Struct
+            // replies now arrive here already in writable-QDBusArgument form
+            // (toDbusVariant), so no top-level special case is needed.
             const QStringList outTypes = declaredOutTypes(member);
             if (outTypes.size() == 1) {
                 conn.send(msg.createReply({marshalBySignature(outTypes.first(), retVal)}));

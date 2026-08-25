@@ -360,13 +360,22 @@ QVariant toDbusVariant(const QVariant &v) {
     if (type == qMetaTypeId<DBus::Bytes>())
         return QVariant::fromValue(v.value<DBus::Bytes>().value);
     if (type == qMetaTypeId<DBus::Struct>()) {
-        // Struct marshals via its QDBusArgument operator<< — the members
-        // are marshaled per their QVariant types inside beginStructure.
-        // Recurse into members to unwrap any nested DBus.* types first.
+        // A raw DBus::Struct gadget has no fixed D-Bus signature (variable
+        // members), so handing it to QtDBus marshals an empty struct `()` and
+        // corrupts the connection. Emit the writable-QDBusArgument form instead
+        // — that cross-marshals in EVERY position (variant payloads, map/list
+        // values, signal args, call args), not just top-level replies.
         QVariantList members = v.value<DBus::Struct>().value;
-        for (auto &m : members)
-            m = toDbusVariant(m);
-        return QVariant::fromValue(DBus::Struct(members));
+        // Inner struct members must stay gadgets: operator<<(QDBusArgument,
+        // DBus::Struct) dispatches nested DBus::Struct natively but has no
+        // case for QDBusArgument members. Only non-struct members are unwrapped.
+        for (auto &m : members) {
+            if (m.userType() != qMetaTypeId<DBus::Struct>())
+                m = toDbusVariant(m);
+        }
+        QDBusArgument arg;
+        arg << DBus::Struct(members);
+        return QVariant::fromValue(arg);
     }
     // Plain QVariantMap holding DBus.* gadget values (from QML object
     // literals in adaptor return values) — recurse into the values.

@@ -477,7 +477,7 @@ Most examples don't need value types — plain JS strings/numbers/booleans work 
 | `DBus::Dict` | `dict` | D-Bus dictionary (map). |
 | `DBus::Variant` | `variant` | D-Bus variant. |
 | `DBus::Bytes` | `bytes` | Byte array (`ay`). |
-| `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. Since 0.4.0 a struct can also be nested inside a variant. |
+| `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. Since 0.4.0 it works in every position — variant payloads, map/list values, signal args, call args. The outermost struct carries the wire signature; inner structs compose naturally. |
 
 Since v0.3.0, when the method signature is known (from introspection or
 catalog), plain JS values are marshaled correctly — no wrapper types needed.

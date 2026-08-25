@@ -30,7 +30,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interface catalog, so Settings backends serve correct reply signatures
   with no per-app override.
 - **`v(struct)` limitation lifted** — a hand-built struct payload now
-  marshals inside a variant (spike-verified on Qt 6.11).
+  marshals inside a variant, as a map/list value, and as a signal or call
+  arg (spike-verified on Qt 6.11). The outermost struct carries the wire
+  signature; inner structs compose naturally.
 - **Deep map nesting** — `a{sa{sa{sv}}}` and arbitrary map depth work.
 
 ### Fixed
@@ -39,6 +41,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   declared signature emits
   `qWarning("dbusqml: cannot produce declared signature …")` and falls back
   to inference, rather than emitting a different wire type with no notice.
+- **Struct gadgets marshal via a writable `QDBusArgument`** — a
+  `DBusQML.struct_` value previously emitted an empty struct `()` and
+  dropped the bus connection when nested in a variant/map/signal; it now
+  cross-marshals correctly in every position.
 
 ## [0.3.1] — 2026-08-12
 
