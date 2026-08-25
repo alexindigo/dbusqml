@@ -83,6 +83,35 @@ private slots:
                  QStringList({QStringLiteral("s")}));
     }
 
+    void testOutArgsCollected() {
+        const QString xml = QStringLiteral(R"(
+            <node>
+              <interface name="org.test.Foo">
+                <method name="GetInfo">
+                  <arg type="s" direction="in"/>
+                  <arg type="a{sa{sv}}" direction="out"/>
+                </method>
+                <method name="ReadAll">
+                  <arg type="as" direction="in"/>
+                  <arg type="a{sa{sv}}" direction="out"/>
+                </method>
+              </interface>
+            </node>
+        )");
+
+        auto data = parseDBusIntrospection(xml, QStringLiteral("org.test.Foo"));
+        QCOMPARE(data.methodOutTypes.value(QStringLiteral("GetInfo")),
+                 QStringList({QStringLiteral("a{sa{sv}}")}));
+        QCOMPARE(data.methodOutTypes.value(QStringLiteral("ReadAll")),
+                 QStringList({QStringLiteral("a{sa{sv}}")}));
+        // CamelCase lookup mirror also populated
+        QCOMPARE(data.methodOutTypes.value(QStringLiteral("readAll")),
+                 QStringList({QStringLiteral("a{sa{sv}}")}));
+        // In-args still separated
+        QCOMPARE(data.methodArgTypes.value(QStringLiteral("ReadAll")),
+                 QStringList({QStringLiteral("as")}));
+    }
+
     void testNoDirectionTreatedAsIn() {
         const QString xml = QStringLiteral(R"(
             <node>

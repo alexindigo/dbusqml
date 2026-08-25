@@ -10,7 +10,8 @@ class DBusCatalog {
 public:
     struct MethodSpec {
         QString name;
-        QStringList argTypes;
+        QStringList argTypes; // in-args, declaration order
+        QStringList outTypes; // out-args, declaration order
     };
     struct SignalSpec {
         QString name;

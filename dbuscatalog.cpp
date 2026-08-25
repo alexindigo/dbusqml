@@ -83,6 +83,25 @@ void DBusCatalog::loadFile(const QString &filePath) {
     QString currentMethod;
     QString currentSignal;
     QStringList currentArgs;
+    QStringList currentOutArgs;
+
+    auto flushMethod = [&]() {
+        if (!currentMethod.isEmpty()) {
+            spec.methods.insert(currentMethod,
+                                MethodSpec{currentMethod, currentArgs, currentOutArgs});
+            currentMethod.clear();
+        }
+    };
+    auto flushSignal = [&]() {
+        if (!currentSignal.isEmpty()) {
+            spec.signals_.insert(currentSignal, SignalSpec{currentSignal, currentArgs});
+            currentSignal.clear();
+        }
+    };
+    auto clearArgs = [&]() {
+        currentArgs.clear();
+        currentOutArgs.clear();
+    };
 
     while (!reader.atEnd()) {
         reader.readNext();
@@ -95,43 +114,36 @@ void DBusCatalog::loadFile(const QString &filePath) {
                 spec.source = filePath;
                 currentMethod.clear();
                 currentSignal.clear();
+                clearArgs();
             } else if (name == QLatin1String("method") && !currentIface.isEmpty()) {
-                if (!currentMethod.isEmpty()) {
-                    spec.methods.insert(currentMethod, MethodSpec{currentMethod, currentArgs});
-                }
+                flushMethod();
+                flushSignal();
                 currentMethod = reader.attributes().value("name").toString();
-                currentSignal.clear();
-                currentArgs.clear();
+                clearArgs();
             } else if (name == QLatin1String("signal") && !currentIface.isEmpty()) {
-                if (!currentMethod.isEmpty()) {
-                    spec.methods.insert(currentMethod, MethodSpec{currentMethod, currentArgs});
-                    currentMethod.clear();
-                }
-                if (!currentSignal.isEmpty()) {
-                    spec.signals_.insert(currentSignal, SignalSpec{currentSignal, currentArgs});
-                }
+                flushMethod();
+                flushSignal();
                 currentSignal = reader.attributes().value("name").toString();
-                currentArgs.clear();
+                clearArgs();
             } else if (name == QLatin1String("arg") &&
                        (!currentMethod.isEmpty() || !currentSignal.isEmpty())) {
-                currentArgs << reader.attributes().value("type").toString();
+                const QString dir = reader.attributes().value("direction").toString();
+                const QString type = reader.attributes().value("type").toString();
+                if (dir == QLatin1String("out"))
+                    currentOutArgs << type;
+                else
+                    currentArgs << type;
             } else if (name == QLatin1String("property") && !currentIface.isEmpty()) {
                 spec.properties << reader.attributes().value("name").toString();
             }
         } else if (reader.isEndElement()) {
             const auto name = reader.name();
             if (name == QLatin1String("interface")) {
-                if (!currentMethod.isEmpty()) {
-                    spec.methods.insert(currentMethod, MethodSpec{currentMethod, currentArgs});
-                    currentMethod.clear();
-                }
-                if (!currentSignal.isEmpty()) {
-                    spec.signals_.insert(currentSignal, SignalSpec{currentSignal, currentArgs});
-                    currentSignal.clear();
-                }
+                flushMethod();
+                flushSignal();
                 m_ifaces.insert(currentIface, spec);
                 currentIface.clear();
-                currentArgs.clear();
+                clearArgs();
             }
         }
     }

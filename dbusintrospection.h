@@ -9,6 +9,7 @@ struct DBusIntrospectionData {
     QStringList methodNames;
     QStringList signalNames;
     QHash<QString, QStringList> methodArgTypes; // in-args only, declaration order
+    QHash<QString, QStringList> methodOutTypes; // out-args only, declaration order
     QStringList propertyNames;                  // always collected
 };
 

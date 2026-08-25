@@ -26,6 +26,19 @@ DBusIntrospectionData parseDBusIntrospection(const QString &xml, const QString &
     QXmlStreamReader reader(xml);
     QString currentMethod;
     QStringList currentArgs;
+    QStringList currentOutArgs;
+
+    auto flushMethod = [&]() {
+        if (currentMethod.isEmpty())
+            return;
+        data.methodArgTypes.insert(currentMethod, currentArgs);
+        data.methodArgTypes.insert(dbusPropToQml(currentMethod), currentArgs);
+        data.methodOutTypes.insert(currentMethod, currentOutArgs);
+        data.methodOutTypes.insert(dbusPropToQml(currentMethod), currentOutArgs);
+        currentMethod.clear();
+        currentArgs.clear();
+        currentOutArgs.clear();
+    };
 
     while (!reader.atEnd()) {
         reader.readNext();
@@ -50,35 +63,26 @@ DBusIntrospectionData parseDBusIntrospection(const QString &xml, const QString &
             if (name == QLatin1String("signal")) {
                 // Flush pending method before starting a signal block
                 // so signal <arg>s don't pollute the method's arg list.
-                if (!currentMethod.isEmpty()) {
-                    data.methodArgTypes.insert(currentMethod, currentArgs);
-                    data.methodArgTypes.insert(dbusPropToQml(currentMethod), currentArgs);
-                    currentMethod.clear();
-                    currentArgs.clear();
-                }
+                flushMethod();
                 data.signalNames << reader.attributes().value(QStringLiteral("name")).toString();
             } else if (name == QLatin1String("method")) {
-                // Flush previous method
-                if (!currentMethod.isEmpty()) {
-                    data.methodArgTypes.insert(currentMethod, currentArgs);
-                    data.methodArgTypes.insert(dbusPropToQml(currentMethod), currentArgs);
-                }
+                flushMethod();
                 currentMethod = reader.attributes().value(QStringLiteral("name")).toString();
-                currentArgs.clear();
                 data.methodNames << currentMethod;
             } else if (name == QLatin1String("arg") && !currentMethod.isEmpty()) {
-                if (isDBusInArg(reader.attributes()))
-                    currentArgs << reader.attributes().value(QStringLiteral("type")).toString();
+                const auto attrs = reader.attributes();
+                const QString type = attrs.value(QStringLiteral("type")).toString();
+                if (isDBusInArg(attrs))
+                    currentArgs << type;
+                else
+                    currentOutArgs << type;
             } else if (name == QLatin1String("property")) {
                 data.propertyNames << reader.attributes().value(QStringLiteral("name")).toString();
             }
         }
 
         // Flush the last method when the interface ends
-        if (!currentMethod.isEmpty()) {
-            data.methodArgTypes.insert(currentMethod, currentArgs);
-            data.methodArgTypes.insert(dbusPropToQml(currentMethod), currentArgs);
-        }
+        flushMethod();
 
         if (reader.hasError()) {
             qWarning("DBus: introspection XML error for %s: %s", qPrintable(iface),
