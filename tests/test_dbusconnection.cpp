@@ -104,11 +104,13 @@ public:
 
     QString introspect(const QString &) const override {
         return QStringLiteral("<node><interface name=\"org.dbusqml.SigEcho\">"
-                              "<method name=\"echo\"/>"
+                              "<method name=\"echo\"><arg type=\"s\" direction=\"in\"/></method>"
                               "</interface></node>");
     }
 
     bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.interface() == QLatin1String("org.freedesktop.DBus.Introspectable"))
+            return false;
         conn.send(msg.createReply(QVariantList{msg.signature()}));
         return true;
     }
@@ -1412,6 +1414,84 @@ private slots:
                                  "dbusqml: cannot produce declared signature a\\(ii\\)")));
         QVariant marshaled = marshalBySignature(QStringLiteral("a(ii)"), QVariant(QVariantList{}));
         QVERIFY(marshaled.isValid());
+    }
+
+    // _signatures override on the proxy — the declared call-arg signature wins
+    // over the introspected one (the echo service declares "s"; the override
+    // demands "aa{sv}").
+    void testProxySignaturesOverride() {
+        DBusProxy proxy;
+        proxy.setService("org.dbusqml.SigEcho");
+        proxy.setPath("/");
+        proxy.setIface("org.dbusqml.SigEcho");
+        proxy.setSignatures(QVariantMap{{QStringLiteral("echo"), QStringLiteral("aa{sv}")}});
+        QTest::qWait(500);
+
+        QVariantMap inner;
+        inner[QStringLiteral("address")] = QStringLiteral("192.168.1.2");
+        inner[QStringLiteral("prefix")] = 24U;
+        QVariantList list;
+        list << QVariant::fromValue(inner);
+
+        auto *reply = proxy.call(QStringLiteral("echo"), {QVariant::fromValue(list)});
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY2(!reply->isError(),
+                 qPrintable(reply->error().name() + ": " + reply->error().message()));
+        QCOMPARE(reply->value().toString(), QStringLiteral("aa{sv}"));
+        delete reply;
+    }
+
+    // _signatures override through the dynamic-method path (DbusMethodHelper).
+    void testProxySignaturesDynamicMethod() {
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+        QQmlComponent component(&engine);
+        component.setData("import DBus 1.0\n"
+                          "DBus {\n"
+                          "  service: 'org.dbusqml.SigEcho'\n"
+                          "  path: '/'\n"
+                          "  iface: 'org.dbusqml.SigEcho'\n"
+                          "  _signatures: ({ echo: 'aa{sv}' })\n"
+                          "}",
+                          QUrl());
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        auto *proxy = static_cast<DBusProxy *>(component.create());
+        QVERIFY(proxy != nullptr);
+
+        for (int i = 0; i < 20; ++i) {
+            QTest::qWait(250);
+            if (proxy->value(QStringLiteral("echo")).isValid())
+                break;
+        }
+        QVariant echoFn = proxy->value(QStringLiteral("echo"));
+        QVERIFY2(echoFn.isValid(), "dynamic echo method should exist after introspection");
+
+        QJSValue fn = echoFn.value<QJSValue>();
+        QVERIFY(fn.isCallable());
+
+        QVariantMap inner;
+        inner[QStringLiteral("address")] = QStringLiteral("192.168.1.2");
+        QVariantList list;
+        list << QVariant::fromValue(inner);
+
+        QJSValueList jsArgs;
+        jsArgs << engine.toScriptValue(QVariant::fromValue(list));
+        QJSValue ret = fn.call(jsArgs);
+        QVERIFY(!ret.isError());
+
+        auto *reply = qobject_cast<DBusPendingReply *>(ret.toQObject());
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(3000));
+        QVERIFY2(!reply->isError(),
+                 qPrintable(reply->error().name() + ": " + reply->error().message()));
+        QCOMPARE(reply->value().toString(), QStringLiteral("aa{sv}"));
+        delete proxy;
     }
 
     // DBusMessage with explicit signature — the universal escape hatch.

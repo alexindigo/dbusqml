@@ -32,22 +32,19 @@ static QVariant toTypedDbusVariant(const QVariant &v, const QString &dbusType) {
 class DbusMethodHelper : public QObject {
     Q_OBJECT
 public:
-    DbusMethodHelper(DBusProxy *proxy, const QHash<QString, QStringList> *argTypes,
-                     QObject *parent = nullptr)
-        : QObject(parent), m_proxy(proxy), m_argTypes(argTypes) {}
+    DbusMethodHelper(DBusProxy *proxy, QObject *parent = nullptr)
+        : QObject(parent), m_proxy(proxy) {}
 
     Q_INVOKABLE DBusPendingReply *callMethod(const QString &method, const QVariantList &args) {
         QDBusConnection bus = m_proxy->connection()
                                   ? static_cast<QDBusConnection>(*m_proxy->connection())
                                   : QDBusConnection::sessionBus();
 
-        // Convert arguments to match expected D-Bus types (basic types only)
+        // Convert arguments to match expected D-Bus types (override → introspected → inference).
         QVariantList converted = args;
-        if (m_argTypes) {
-            QStringList types = m_argTypes->value(method);
-            for (int i = 0; i < converted.size() && i < types.size(); ++i)
-                converted[i] = toTypedDbusVariant(converted[i], types[i]);
-        }
+        const QStringList types = m_proxy->argTypesForMethod(method);
+        for (int i = 0; i < converted.size() && i < types.size(); ++i)
+            converted[i] = toTypedDbusVariant(converted[i], types[i]);
 
         QDBusMessage msg = QDBusMessage::createMethodCall(m_proxy->service(), m_proxy->path(),
                                                           m_proxy->iface(), method);
@@ -63,7 +60,6 @@ public:
 
 private:
     DBusProxy *m_proxy;
-    const QHash<QString, QStringList> *m_argTypes;
 };
 
 // Convert D-Bus PascalCase property name to QML camelCase.
@@ -264,6 +260,35 @@ void DBusProxy::setWatchServiceStatus(bool v) {
     emit watchServiceStatusChanged();
 }
 
+void DBusProxy::setSignatures(const QVariantMap &v) {
+    if (m_signatures == v)
+        return;
+    m_signatures = v;
+    emit signaturesChanged();
+}
+
+QStringList DBusProxy::argTypesForMethod(const QString &method) const {
+    // Explicit override wins over discovered signatures — the author corrects
+    // wrong or missing introspection. Value is a concatenated in-arg signature,
+    // split per-arg.
+    auto it = m_signatures.constFind(method);
+    if (it == m_signatures.constEnd())
+        it = m_signatures.constFind(dbusPropToQml(method));
+    if (it != m_signatures.constEnd()) {
+        QStringList out;
+        const QString sig = it.value().toString();
+        int pos = 0;
+        while (pos < sig.size()) {
+            const QString argSig = firstCompleteType(sig, pos);
+            if (argSig.isEmpty())
+                break;
+            out << argSig;
+        }
+        return out;
+    }
+    return m_methodArgTypes.value(method);
+}
+
 void DBusProxy::setConnection(DBusConnection *v) {
     if (m_conn == v)
         return;
@@ -328,7 +353,7 @@ DBusPendingReply *DBusProxy::call(const QString &method, const QVariantList &arg
 
     QDBusMessage msg = QDBusMessage::createMethodCall(m_service, m_path, m_iface, method);
     if (!args.isEmpty()) {
-        QStringList types = m_methodArgTypes.value(method);
+        QStringList types = argTypesForMethod(method);
         QVariantList converted = args;
         for (int i = 0; i < converted.size(); ++i) {
             QString expectedType;
@@ -487,7 +512,7 @@ void DBusProxy::setupDynamicMethods(const QStringList &methodNames) {
         return;
     }
 
-    auto *helper = new DbusMethodHelper(this, &m_methodArgTypes, this);
+    auto *helper = new DbusMethodHelper(this, this);
     QJSValue helperObj = engine->newQObject(helper);
 
     for (const QString &name : methodNames) {

@@ -34,6 +34,7 @@ class DBusProxy : public QQmlPropertyMap, public QQmlParserStatus {
     Q_PROPERTY(bool propertiesEnabled READ propertiesEnabled WRITE setPropertiesEnabled NOTIFY
                    propertiesEnabledChanged)
     Q_PROPERTY(bool reactiveBindingsSupported READ hasReactiveBindings CONSTANT)
+    Q_PROPERTY(QVariantMap _signatures READ signatures WRITE setSignatures NOTIFY signaturesChanged)
 
 public:
     enum Status { Null, Loading, Ready, Error };
@@ -59,6 +60,14 @@ public:
     void setConnection(DBusConnection *v);
 
     Status status() const { return m_status; }
+
+    QVariantMap signatures() const { return m_signatures; }
+    void setSignatures(const QVariantMap &v);
+
+    // Effective call-argument signatures for a method, in precedence order:
+    // explicit _signatures override → introspection/catalog discovery. Empty
+    // when neither declares the method (caller falls back to inference).
+    QStringList argTypesForMethod(const QString &method) const;
 
     Q_INVOKABLE DBusPendingReply *call(const QString &method, const QVariantList &args = {});
     Q_INVOKABLE DBusPendingReply *getProperty(const QString &name);
@@ -99,6 +108,7 @@ Q_SIGNALS:
     void watchServiceStatusChanged();
     void serviceAvailableChanged();
     void propertiesEnabledChanged();
+    void signaturesChanged();
 
 private Q_SLOTS:
     void onPropertiesChanged(const QDBusMessage &msg);
@@ -132,6 +142,7 @@ private:
         m_dynamicMethodKeys; // qml-cased method names currently installed on the property map
     QHash<QString, QString> m_introspectCache;
     QHash<QString, QStringList> m_methodArgTypes;
+    QVariantMap m_signatures;
     // Maps QML camelCase property names → original D-Bus PascalCase names.
     // Populated whenever a property is learned (fetchProperties,
     // onPropertiesChanged, catalog/live pre-populate).
