@@ -10,6 +10,8 @@
 #include <QDBusVariant>
 #include <QJSValue>
 #include <QJSValueList>
+#include <QList>
+#include <QMap>
 #include <QPointer>
 #include <QQmlEngine>
 
@@ -456,6 +458,156 @@ static QString firstCompleteType(const QString &sig, int &pos) {
     return {};
 }
 
+// Map a D-Bus signature to the QMetaType used for beginArray/beginMap
+// element arguments. QDBusMetaType::signatureToMetaType() only covers basic
+// types on Qt 6.11 (container signatures return an invalid QMetaType even
+// after registerCustomType), so container shapes are mapped explicitly.
+static QMetaType metaTypeForSignature(const QString &sig) {
+    QMetaType mt = QDBusMetaType::signatureToMetaType(sig.toUtf8().constData());
+    if (mt.isValid())
+        return mt;
+    if (sig == QLatin1String("a{sv}"))
+        return QMetaType::fromType<QVariantMap>();
+    if (sig == QLatin1String("a{sa{sv}}"))
+        return QMetaType::fromType<QMap<QString, QVariantMap>>();
+    if (sig == QLatin1String("aa{sv}"))
+        return QMetaType::fromType<QList<QVariantMap>>();
+    return QMetaType();
+}
+
+// Recursive signature walker: append `value` marshaled as `sig` into a
+// writable QDBusArgument — the write-side mirror of readBySignature.
+// Returns false when `sig` cannot be produced via public QtDBus primitives
+// (e.g. arrays of anonymous structs, which need a registered carrier type).
+static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const QVariant &value) {
+    // Unwrap DBus.* gadgets nested in the value before walking. toDbusVariant
+    // recurses QVariantMap and DBus::Struct payloads; list/array elements are
+    // unwrapped as we recurse per element below.
+    const QVariant v = toDbusVariant(value);
+
+    if (sig == QLatin1String("y")) {
+        arg << static_cast<uchar>(v.toUInt());
+        return true;
+    }
+    if (sig == QLatin1String("b")) {
+        arg << v.toBool();
+        return true;
+    }
+    if (sig == QLatin1String("n")) {
+        arg << static_cast<short>(v.toInt());
+        return true;
+    }
+    if (sig == QLatin1String("q")) {
+        arg << static_cast<ushort>(v.toUInt());
+        return true;
+    }
+    if (sig == QLatin1String("i")) {
+        arg << v.toInt();
+        return true;
+    }
+    if (sig == QLatin1String("u")) {
+        arg << v.toUInt();
+        return true;
+    }
+    if (sig == QLatin1String("x")) {
+        arg << static_cast<qint64>(v.toLongLong());
+        return true;
+    }
+    if (sig == QLatin1String("t")) {
+        arg << static_cast<quint64>(v.toULongLong());
+        return true;
+    }
+    if (sig == QLatin1String("d")) {
+        arg << v.toDouble();
+        return true;
+    }
+    if (sig == QLatin1String("s")) {
+        arg << v.toString();
+        return true;
+    }
+    if (sig == QLatin1String("o")) {
+        arg << QDBusObjectPath(v.toString());
+        return true;
+    }
+    if (sig == QLatin1String("g")) {
+        arg << QDBusSignature(v.toString());
+        return true;
+    }
+    if (sig == QLatin1String("v")) {
+        if (v.userType() == qMetaTypeId<QDBusVariant>())
+            arg << v.value<QDBusVariant>();
+        else
+            arg << QDBusVariant(v);
+        return true;
+    }
+    if (sig == QLatin1String("ay")) {
+        arg << v.toByteArray();
+        return true;
+    }
+    if (sig == QLatin1String("as")) {
+        arg << v.toStringList();
+        return true;
+    }
+
+    if (sig.startsWith(QLatin1Char('('))) {
+        const QString inner = sig.mid(1, sig.size() - 2);
+        arg.beginStructure();
+        const QVariantList members = v.toList();
+        int pos = 0;
+        int mi = 0;
+        while (pos < inner.size()) {
+            const QString memberSig = firstCompleteType(inner, pos);
+            if (memberSig.isEmpty())
+                return false;
+            const QVariant mv = mi < members.size() ? members.at(mi) : QVariant();
+            if (!writeValueBySignature(arg, memberSig, mv))
+                return false;
+            ++mi;
+        }
+        arg.endStructure();
+        return true;
+    }
+
+    if (sig.startsWith(QLatin1Char('a'))) {
+        const QString elemSig = sig.mid(1);
+        if (elemSig.startsWith(QLatin1Char('{'))) {
+            int pos = 1;
+            const QString keySig = firstCompleteType(elemSig, pos);
+            const QString valSig = firstCompleteType(elemSig, pos);
+            if (keySig.isEmpty() || valSig.isEmpty())
+                return false;
+            const QMetaType kMt = metaTypeForSignature(keySig);
+            const QMetaType vMt = metaTypeForSignature(valSig);
+            if (!kMt.isValid() || !vMt.isValid())
+                return false;
+            arg.beginMap(kMt, vMt);
+            const QVariantMap map = v.toMap();
+            for (auto it = map.begin(); it != map.end(); ++it) {
+                arg.beginMapEntry();
+                if (!writeValueBySignature(arg, keySig, QVariant(it.key())))
+                    return false;
+                if (!writeValueBySignature(arg, valSig, it.value()))
+                    return false;
+                arg.endMapEntry();
+            }
+            arg.endMap();
+            return true;
+        }
+        const QMetaType eMt = metaTypeForSignature(elemSig);
+        if (!eMt.isValid())
+            return false;
+        arg.beginArray(eMt);
+        const QVariantList list = v.toList();
+        for (const QVariant &e : list) {
+            if (!writeValueBySignature(arg, elemSig, e))
+                return false;
+        }
+        arg.endArray();
+        return true;
+    }
+    return false;
+}
+
 // Forward declaration — mutual recursion between marshalBySignature and
 // marshalContainerBySignature.
 static QVariant marshalContainerBySignature(const QString &sig, const QVariant &value);
@@ -603,10 +755,25 @@ static QVariant marshalContainerBySignature(const QString &sig, const QVariant &
             return QVariant::fromValue(list);
         }
 
-        // Generic: try inference. The typed-container registrations handle
-        // the common shapes; anything else falls through to toDbusVariant.
+        // Generic: signature-walking writer. Produces a QDBusArgument-wrapped
+        // QVariant cross-marshaled by QtDBus for any producible signature.
+        // Unproducible shapes fail loudly and fall back to inference — a
+        // declared signature is never silently ignored.
+        QVariant walked = writeBySignature(sig, value);
+        if (walked.isValid())
+            return walked;
+        qWarning("dbusqml: cannot produce declared signature %s for value of type %s — "
+                 "falling back to inference",
+                 qPrintable(sig), QMetaType(value.userType()).name());
         return toDbusVariant(value);
     }
+}
+
+QVariant writeBySignature(const QString &sig, const QVariant &value) {
+    QDBusArgument arg;
+    if (!writeValueBySignature(arg, sig, value))
+        return QVariant();
+    return QVariant::fromValue(arg);
 }
 
 static QDBusMessage toQDBusMessage(const DBusMessage &msg) {

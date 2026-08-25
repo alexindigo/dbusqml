@@ -12,6 +12,7 @@
 #include <QDBusConnectionInterface>
 #include <QDBusMetaType>
 #include <QDBusVirtualObject>
+#include <QRegularExpression>
 #include <iostream>
 
 #include "../dbusconnection.h"
@@ -86,6 +87,30 @@ public:
         }
         // Not handled — let QtDBus return an error for unknown methods.
         return false;
+    }
+};
+
+// ==================== Signature Echo Service ====================
+
+// Replies with the literal signature of the received message. Wire-signature
+// assertions route through this: the test marshals an argument with
+// marshalBySignature/writeBySignature, calls echo, and asserts the reply
+// string equals the expected D-Bus signature.
+class SignatureEchoObject : public QDBusVirtualObject {
+    Q_OBJECT
+
+public:
+    explicit SignatureEchoObject(QObject *parent = nullptr) : QDBusVirtualObject(parent) {}
+
+    QString introspect(const QString &) const override {
+        return QStringLiteral("<node><interface name=\"org.dbusqml.SigEcho\">"
+                              "<method name=\"echo\"/>"
+                              "</interface></node>");
+    }
+
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        conn.send(msg.createReply(QVariantList{msg.signature()}));
+        return true;
     }
 };
 
@@ -224,6 +249,19 @@ static bool registerTestService() {
     return true;
 }
 
+// Marshal a single argument through the signature echo service and return the
+// literal D-Bus signature the wire carried.
+static QString echoWireSignature(const QVariant &arg) {
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.SigEcho"), QStringLiteral("/"),
+        QStringLiteral("org.dbusqml.SigEcho"), QStringLiteral("echo"));
+    msg.setArguments({arg});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+    if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
+        return {};
+    return reply.arguments().first().toString();
+}
+
 // ==================== Test Class ====================
 
 class TestDBusConnection : public QObject {
@@ -233,6 +271,12 @@ private slots:
     void initTestCase() {
         QVERIFY2(startPrivateBus(), "Failed to start private D-Bus daemon");
         QVERIFY2(registerTestService(), "Failed to register mock service");
+        QDBusConnection bus = QDBusConnection::sessionBus();
+        auto *sigEcho = new SignatureEchoObject(this);
+        QVERIFY2(bus.registerVirtualObject(QStringLiteral("/"), sigEcho),
+                 "Failed to register signature echo object");
+        QVERIFY2(bus.registerService(QStringLiteral("org.dbusqml.SigEcho")),
+                 "Failed to register signature echo service");
         // Let the connection stabilize
         QTest::qWait(200);
     }
@@ -1323,6 +1367,51 @@ private slots:
         QVariant marshaled = marshalBySignature(QStringLiteral("ay"), QVariant(bytes));
         QCOMPARE(marshaled.userType(), qMetaTypeId<QByteArray>());
         QCOMPARE(marshaled.toByteArray(), QByteArray("Hello"));
+    }
+
+    // Generic signature-walking marshaller: aa{sv} (NM AddressData shape) must
+    // hit the wire as literal "aa{sv}", not av or a{sv}.
+    void testMarshalArrayOfDicts() {
+        QVariantMap inner;
+        inner[QStringLiteral("address")] = QStringLiteral("192.168.1.2");
+        inner[QStringLiteral("prefix")] = 24U;
+        QVariantList list;
+        list << QVariant::fromValue(inner);
+
+        QVariant marshaled = marshalBySignature(QStringLiteral("aa{sv}"), QVariant(list));
+        QCOMPARE(echoWireSignature(marshaled), QStringLiteral("aa{sv}"));
+    }
+
+    // Empty aa{sv} must keep its signature — D-Bus requires an element
+    // signature for empty arrays.
+    void testMarshalEmptyArrayOfDicts() {
+        QVariant marshaled = marshalBySignature(QStringLiteral("aa{sv}"), QVariant(QVariantList{}));
+        QCOMPARE(echoWireSignature(marshaled), QStringLiteral("aa{sv}"));
+    }
+
+    // Deep nesting a{sa{sa{sv}}} — previously limited to three levels; the
+    // walker produces arbitrary map depth via the registered value metatypes.
+    void testMarshalDeepNestedMaps() {
+        QVariantMap innermost;
+        innermost[QStringLiteral("k")] = QVariant::fromValue(QDBusVariant(1));
+        QVariantMap mid;
+        mid[QStringLiteral("mid")] = QVariant::fromValue(innermost);
+        QVariantMap outer;
+        outer[QStringLiteral("top")] = QVariant::fromValue(mid);
+
+        QVariant marshaled = marshalBySignature(QStringLiteral("a{sa{sa{sv}}}"), QVariant(outer));
+        QCOMPARE(echoWireSignature(marshaled), QStringLiteral("a{sa{sa{sv}}}"));
+    }
+
+    // Unproducible declared signatures (arrays of anonymous structs, which
+    // need a registered carrier type) must warn and fall back to inference,
+    // never silently emit a different wire type.
+    void testMarshalUnproducibleLoudFail() {
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression(QStringLiteral(
+                                 "dbusqml: cannot produce declared signature a\\(ii\\)")));
+        QVariant marshaled = marshalBySignature(QStringLiteral("a(ii)"), QVariant(QVariantList{}));
+        QVERIFY(marshaled.isValid());
     }
 
     // DBusMessage with explicit signature — the universal escape hatch.

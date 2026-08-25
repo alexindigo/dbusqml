@@ -26,6 +26,15 @@ static void registerTypeConverters() {
         if (mt.isValid())
             QDBusMetaType::registerCustomType(mt, QByteArray("a{sa{sv}}"));
     }
+    // aa{sv} — array of dicts, NM Ip4Config.AddressData shape. Registered so
+    // the signature-driven marshaller can produce it from plain JS arrays.
+    {
+        typedef QList<QVariantMap> VariantMapList;
+        qDBusRegisterMetaType<VariantMapList>();
+        auto mt = QMetaType::fromType<VariantMapList>();
+        if (mt.isValid())
+            QDBusMetaType::registerCustomType(mt, QByteArray("aa{sv}"));
+    }
     // NOTE: These registrations are process-global. The QStringList → "as"
     // and DBusAsArray → "as" mappings affect the host app's QtDBus marshaling
     // for ALL D-Bus traffic, not just dbusqml's. This is intentional — the

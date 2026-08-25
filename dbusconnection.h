@@ -19,6 +19,13 @@ QVariant toDbusVariant(const QVariant &v);
 // unrecognized.
 QVariant marshalBySignature(const QString &sig, const QVariant &value);
 
+// Generic signature-walking marshaller. Builds a writable QDBusArgument for
+// any producible D-Bus signature via public QtDBus primitives and returns it
+// wrapped in a QVariant (cross-marshaled by QtDBus as a request or reply
+// argument). Returns an invalid QVariant when the signature cannot be
+// produced — callers must fail loudly rather than emit a different wire type.
+QVariant writeBySignature(const QString &sig, const QVariant &value);
+
 // Recursively unwrap QDBusVariant / QDBusArgument values into plain QVariant
 // containers (QVariantMap, QVariantList) so QML can traverse them as
 // JavaScript objects. Handles nested a{sv}, a{ss}, av, as, ao, etc.
