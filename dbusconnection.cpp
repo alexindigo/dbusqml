@@ -401,7 +401,7 @@ QVariant toDbusVariant(const QVariant &v) {
 // Parse one complete D-Bus type from `sig` starting at `pos`.
 // Returns the type's signature substring and advances pos past it.
 // Returns empty on parse failure.
-static QString firstCompleteType(const QString &sig, int &pos) {
+QString firstCompleteType(const QString &sig, int &pos) {
     if (pos >= sig.size())
         return {};
     int start = pos;

@@ -72,6 +72,7 @@ qt_add_resources(dbusqml "catalog"
         types/org.freedesktop.ScreenSaver.xml
         types/org.freedesktop.login1.Manager.xml
         types/org.freedesktop.portal.Settings.xml
+        types/org.freedesktop.impl.portal.Settings.xml
         types/org.freedesktop.portal.NetworkMonitor.xml
         types/org.freedesktop.UPower.xml
 )

@@ -8,6 +8,7 @@
 #include <QProcess>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTest>
 #include <QThread>
@@ -48,6 +49,25 @@ signals:
 private:
     int m_testInt = 0;
     QString m_testString;
+};
+
+// C++ Q_INVOKABLE adaptor — exercises the declared-reply-signature hook on the
+// non-QML dispatch path (invokeMethod).
+class SignatureTestAdaptor : public DBusAdaptor {
+    Q_OBJECT
+
+public:
+    explicit SignatureTestAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+
+public slots:
+    QVariant readAll(const QVariant &namespaces) {
+        Q_UNUSED(namespaces);
+        QVariantMap inner;
+        inner[QStringLiteral("color-scheme")] = QVariant::fromValue(QDBusVariant(1));
+        QVariantMap outer;
+        outer[QStringLiteral("org.test")] = inner;
+        return outer;
+    }
 };
 
 // ==================== Private Bus Fixture ====================
@@ -124,6 +144,16 @@ private slots:
     void testGenerateXmlClean();
     void testStructInReply();
     void testNestedVariantInMapReply();
+    void testWireSignatureVariantReply();
+    void testWireSignatureStructReply();
+    void testWireSignatureNestedMapsReply();
+    void testWireSignatureDeclaredOutType();
+    void testWireSignatureSettingChangedSignal();
+    void testWireSignatureExplicitOverride();
+    void testWireSignatureOverrideShapes();
+    void testWireSignatureOverrideBeatsCatalog();
+    void testWireSignatureCppInvokable();
+    void testWireSignatureUnproducibleWarns();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -496,6 +526,299 @@ void TestDBusAdaptor::testNestedVariantInMapReply() {
     QVERIFY(!reply.arguments().isEmpty());
 
     delete adaptor;
+}
+
+// Wire-signature assertions — the library's contract is the bytes on the
+// bus, not plausible-looking CLI output. busctl displays a{sv} with
+// variant-wrapped maps identically to a{sa{sv}}; xdg-desktop-portal
+// rejects the former. These tests assert literal wire signatures.
+
+// Helper: spin up a QML adaptor from inline source, invoke one method,
+// return the raw reply message.
+static QDBusMessage callQmlAdaptorMethod(const QString &service, const QString &path,
+                                         const QString &iface, const QString &member,
+                                         const QVariantList &args, const QByteArray &qmlSrc) {
+    static QQmlEngine *engine = nullptr;
+    if (!engine) {
+        engine = new QQmlEngine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine->addImportPath(binDir.path());
+        engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    }
+
+    QQmlComponent component(engine);
+    component.setData(qmlSrc, QUrl());
+    if (!component.isReady()) {
+        qWarning() << "component errors:" << component.errorString();
+        return QDBusMessage();
+    }
+    QObject *adaptor = component.create();
+    if (!adaptor)
+        return QDBusMessage();
+    QTest::qWait(300);
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(service, path, iface, member);
+    if (!args.isEmpty())
+        msg.setArguments(args);
+    QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+
+    // The adaptor must outlive the reply's demarshaling but not the test;
+    // leak it to the engine (test process) — cleanup at exit.
+    return reply;
+}
+
+// ReadOne-shape: variant reply must be literal "v" on the wire.
+void TestDBusAdaptor::testWireSignatureVariantReply() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.WireSigVar"), QStringLiteral("/WireSigVar"),
+        QStringLiteral("org.dbusqml.WireSigVar"), QStringLiteral("readOne"),
+        {QStringLiteral("ns"), QStringLiteral("key")},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.WireSigVar'\n"
+        "  path: '/WireSigVar'\n"
+        "  iface: 'org.dbusqml.WireSigVar'\n"
+        "  function readOne(ns, key) { return new DBusQML.variant(1) }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("v"));
+}
+
+// Struct reply — accent-color shape — must be literal "(ddd)".
+void TestDBusAdaptor::testWireSignatureStructReply() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.WireSigStruct"), QStringLiteral("/WireSigStruct"),
+        QStringLiteral("org.dbusqml.WireSigStruct"), QStringLiteral("getColor"), {},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.WireSigStruct'\n"
+        "  path: '/WireSigStruct'\n"
+        "  iface: 'org.dbusqml.WireSigStruct'\n"
+        "  function getColor() { return new DBusQML.struct_([0.5, 0.3, 0.8]) }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("(ddd)"));
+}
+
+// ReadAll-shape: nested object literal, NO declared signature.
+// Generic-library contract: inference is stable and boring — a nested
+// plain-JS object marshals as a{sv} (variant-wrapped inner maps), today
+// and after any fix. If a consumer needs a{sa{sv}}, the shape comes from
+// the served interface's declaration, not from the data's shape.
+void TestDBusAdaptor::testWireSignatureNestedMapsReply() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.WireSigNested"), QStringLiteral("/WireSigNested"),
+        QStringLiteral("org.dbusqml.WireSigNested"), QStringLiteral("readAll"),
+        {QVariant(QStringList{QStringLiteral("org.test")})},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.WireSigNested'\n"
+        "  path: '/WireSigNested'\n"
+        "  iface: 'org.dbusqml.WireSigNested'\n"
+        "  function readAll(namespaces) {\n"
+        "    var result = {}\n"
+        "    result['org.test'] = { 'color-scheme': new DBusQML.variant(1) }\n"
+        "    return result\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sv}"));
+}
+
+// THE TODO gap, stated as a library contract: when the served interface
+// DECLARES ReadAll → a{sa{sv}} (bundled catalog XML), the reply must carry
+// that exact signature — xdg-desktop-portal rejects a{sv} outright. The
+// reply path on 0.3.1 never consults declarations, so this fails until
+// the fix. Serves the real org.freedesktop.impl.portal.Settings iface
+// from the bundled type catalog.
+void TestDBusAdaptor::testWireSignatureDeclaredOutType() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.PortalServe"),
+        QStringLiteral("/org/freedesktop/portal/desktop"),
+        QStringLiteral("org.freedesktop.impl.portal.Settings"), QStringLiteral("ReadAll"),
+        {QVariant(QStringList{QStringLiteral("org.freedesktop.appearance")})},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.PortalServe'\n"
+        "  path: '/org/freedesktop/portal/desktop'\n"
+        "  iface: 'org.freedesktop.impl.portal.Settings'\n"
+        "  function readAll(namespaces) {\n"
+        "    var result = {}\n"
+        "    result['org.freedesktop.appearance'] = { 'color-scheme': new DBusQML.variant(1) }\n"
+        "    return result\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sa{sv}}"));
+}
+
+// SettingChanged must be (ssv) — xdg-desktop-portal drops (ssi).
+void TestDBusAdaptor::testWireSignatureSettingChangedSignal() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "import DBus 1.0 as DBusQML\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.WireSigSig'\n"
+                      "  path: '/WireSigSig'\n"
+                      "  iface: 'org.dbusqml.WireSigSig'\n"
+                      "  function fire() {\n"
+                      "    emitSignal('SettingChanged',\n"
+                      "      ['org.test', 'color-scheme', new DBusQML.variant(0)])\n"
+                      "  }\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    auto *adaptor = component.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.WireSigSig"), QStringLiteral("/WireSigSig"),
+                        QStringLiteral("org.dbusqml.WireSigSig"), QStringLiteral("SettingChanged"),
+                        &catcher, SLOT(onSignal(QDBusMessage))));
+
+    QDBusMessage call = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.WireSigSig"), QStringLiteral("/WireSigSig"),
+        QStringLiteral("org.dbusqml.WireSigSig"), QStringLiteral("fire"));
+    QCOMPARE(bus.call(call, QDBus::Block, 3000).type(), QDBusMessage::ReplyMessage);
+
+    for (int i = 0; i < 20 && catcher.count == 0; ++i)
+        QTest::qWait(100);
+    QCOMPARE(catcher.count, 1);
+    QCOMPARE(catcher.lastSignal.member(), QStringLiteral("SettingChanged"));
+    QCOMPARE(catcher.lastSignal.signature(), QStringLiteral("ssv"));
+}
+
+// Explicit _signatures override on an UNCALOGED iface — the override alone
+// drives the reply signature to a{sa{sv}}.
+void TestDBusAdaptor::testWireSignatureExplicitOverride() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.OverrideSig"), QStringLiteral("/OverrideSig"),
+        QStringLiteral("org.dbusqml.OverrideSig"), QStringLiteral("readAll"),
+        {QVariant(QStringList{QStringLiteral("org.test")})},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.OverrideSig'\n"
+        "  path: '/OverrideSig'\n"
+        "  iface: 'org.dbusqml.OverrideSig'\n"
+        "  _signatures: ({ readAll: 'a{sa{sv}}' })\n"
+        "  function readAll(namespaces) {\n"
+        "    var r = {}\n"
+        "    r['org.test'] = { 'color-scheme': new DBusQML.variant(1) }\n"
+        "    return r\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sa{sv}}"));
+}
+
+// One adaptor, several overridden shapes — each reply must carry its declared
+// wire signature (ay, as, a{sv}, aa{sv}).
+void TestDBusAdaptor::testWireSignatureOverrideShapes() {
+    struct Shape {
+        const char *member;
+        const char *sig;
+        const char *body;
+        const char *expected;
+    } shapes[] = {
+        {"bytes", "ay", "function bytes() { return [65, 66] }", "ay"},
+        {"strings", "as", "function strings() { return ['a', 'b'] }", "as"},
+        {"dict", "a{sv}", "function dict() { return { k: 'v' } }", "a{sv}"},
+        {"dicts", "aa{sv}", "function dicts() { return [{ a: 1 }] }", "aa{sv}"},
+    };
+    for (const auto &s : shapes) {
+        const QString service = QStringLiteral("org.dbusqml.Shape.%1").arg(s.member);
+        const QString path = QStringLiteral("/Shape/%1").arg(s.member);
+        const QString qml = QStringLiteral("import DBus 1.0\n"
+                                           "DBusAdaptor {\n"
+                                           "  service: '%1'\n"
+                                           "  path: '%2'\n"
+                                           "  iface: '%1'\n"
+                                           "  _signatures: ({ %3: '%4' })\n"
+                                           "  %5\n"
+                                           "}")
+                                .arg(service, path, s.member, s.sig, s.body);
+        QDBusMessage reply = callQmlAdaptorMethod(service, path, service,
+                                                  QString::fromLatin1(s.member), {}, qml.toUtf8());
+        QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(reply.signature(), QString::fromLatin1(s.expected));
+    }
+}
+
+// Precedence: on a cataloged iface, an explicit override beats the bundled
+// declaration.
+void TestDBusAdaptor::testWireSignatureOverrideBeatsCatalog() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.Precedence"), QStringLiteral("/Precedence"),
+        QStringLiteral("org.freedesktop.impl.portal.Settings"), QStringLiteral("ReadAll"),
+        {QVariant(QStringList{QStringLiteral("org.freedesktop.appearance")})},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.Precedence'\n"
+        "  path: '/Precedence'\n"
+        "  iface: 'org.freedesktop.impl.portal.Settings'\n"
+        "  _signatures: ({ readAll: 'a{sv}' })\n"
+        "  function readAll(namespaces) {\n"
+        "    var result = {}\n"
+        "    result['org.freedesktop.appearance'] = { 'color-scheme': new DBusQML.variant(1) }\n"
+        "    return result\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sv}"));
+}
+
+// C++ Q_INVOKABLE adaptor path — declared signature honored through the shared
+// reply hook (no QQmlEngine dispatch involved).
+void TestDBusAdaptor::testWireSignatureCppInvokable() {
+    SignatureTestAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.CppSig"));
+    adaptor.setPath(QStringLiteral("/CppSig"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.CppSig"));
+    adaptor.setSignatures(QVariantMap{{QStringLiteral("ReadAll"), QStringLiteral("a{sa{sv}}")}});
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.CppSig"), QStringLiteral("/CppSig"),
+        QStringLiteral("org.dbusqml.CppSig"), QStringLiteral("ReadAll"));
+    msg.setArguments({QVariant(QStringList{QStringLiteral("org.test")})});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sa{sv}}"));
+}
+
+// A declared signature that cannot be produced must warn and fall back to
+// inference, never silently emit a different wire type or crash.
+void TestDBusAdaptor::testWireSignatureUnproducibleWarns() {
+    QTest::ignoreMessage(
+        QtWarningMsg,
+        QRegularExpression(QStringLiteral("dbusqml: cannot produce declared signature a\\(ii\\)")));
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.Unproducible"), QStringLiteral("/Unproducible"),
+        QStringLiteral("org.dbusqml.Unproducible"), QStringLiteral("getPairs"), {},
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.Unproducible'\n"
+        "  path: '/Unproducible'\n"
+        "  iface: 'org.dbusqml.Unproducible'\n"
+        "  _signatures: ({ getPairs: 'a(ii)' })\n"
+        "  function getPairs() { return [[1, 2]] }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("av"));
 }
 
 int main(int argc, char *argv[]) {

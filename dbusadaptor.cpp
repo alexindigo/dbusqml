@@ -1,4 +1,5 @@
 #include "dbusadaptor.h"
+#include "dbuscatalog.h"
 #include "dbusconnection.h"
 #include "dbustypes.h"
 
@@ -23,6 +24,13 @@ static QString dbusMemberToQml(const QString &name) {
     if (name.isEmpty())
         return name;
     return name.at(0).toLower() + name.mid(1);
+}
+
+// Underscore-prefixed adaptor properties are library meta-config (e.g.
+// _signatures), not part of the served D-Bus surface. They are never exported
+// via generateXml or Properties.Get/GetAll/Set.
+static bool isPrivateProperty(const QString &name) {
+    return name.startsWith(QLatin1Char('_'));
 }
 
 // Helper: forwards QML signal emissions to D-Bus.
@@ -121,6 +129,13 @@ void DBusAdaptor::setConnection(DBusConnection *v) {
     emit connectionChanged();
 }
 
+void DBusAdaptor::setSignatures(const QVariantMap &v) {
+    if (m_signatures == v)
+        return;
+    m_signatures = v;
+    emit signaturesChanged();
+}
+
 QDBusConnection DBusAdaptor::bus() const {
     if (m_conn)
         return static_cast<QDBusConnection>(*m_conn);
@@ -146,9 +161,10 @@ void DBusAdaptor::componentComplete() {
     // Auto-connect user-defined QML signals to D-Bus
     const QMetaObject *meta = metaObject();
     static const QStringList builtInSignals = {
-        QStringLiteral("destroyed"),      QStringLiteral("objectNameChanged"),
-        QStringLiteral("serviceChanged"), QStringLiteral("pathChanged"),
-        QStringLiteral("ifaceChanged"),   QStringLiteral("connectionChanged")};
+        QStringLiteral("destroyed"),        QStringLiteral("objectNameChanged"),
+        QStringLiteral("serviceChanged"),   QStringLiteral("pathChanged"),
+        QStringLiteral("ifaceChanged"),     QStringLiteral("connectionChanged"),
+        QStringLiteral("signaturesChanged")};
 
     for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
         QMetaMethod sig = meta->method(i);
@@ -285,6 +301,8 @@ QString DBusAdaptor::generateXml() const {
     for (int i = 0; i < meta->propertyCount(); ++i) {
         QMetaProperty prop = meta->property(i);
         QString name = QString::fromLatin1(prop.name());
+        if (isPrivateProperty(name))
+            continue;
         if (name == QStringLiteral("service") || name == QStringLiteral("path") ||
             name == QStringLiteral("iface") || name == QStringLiteral("connection") ||
             name == QStringLiteral("objectName"))
@@ -358,6 +376,40 @@ QString DBusAdaptor::generateXml() const {
     return xml;
 }
 
+// Resolve the declared out-arg signatures for a method reply, in precedence
+// order: explicit _signatures override → catalog declaration. Returns empty
+// when no declaration exists (caller falls back to stable inference).
+QStringList DBusAdaptor::declaredOutTypes(const QString &member) const {
+    const QString qmlMember = dbusMemberToQml(member);
+
+    // 1. Explicit override — a concatenated signature string, split per-arg.
+    auto it = m_signatures.constFind(member);
+    if (it == m_signatures.constEnd())
+        it = m_signatures.constFind(qmlMember);
+    if (it != m_signatures.constEnd()) {
+        QStringList out;
+        const QString sig = it.value().toString();
+        int pos = 0;
+        while (pos < sig.size()) {
+            const QString argSig = firstCompleteType(sig, pos);
+            if (argSig.isEmpty())
+                break;
+            out << argSig;
+        }
+        return out;
+    }
+
+    // 2. Catalog declaration (bundled or user XML).
+    if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
+        auto mit = spec->methods.constFind(member);
+        if (mit == spec->methods.constEnd())
+            mit = spec->methods.constFind(qmlMember);
+        if (mit != spec->methods.constEnd())
+            return mit->outTypes;
+    }
+    return {};
+}
+
 bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &) {
     QDBusConnection conn = bus();
     const QString interface = msg.interface();
@@ -383,6 +435,12 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
         if (member == QStringLiteral("Get") && args.size() >= 2) {
             QString propName = args[1].toString();
+            if (isPrivateProperty(propName)) {
+                conn.send(
+                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                                         QStringLiteral("No such property: %1").arg(propName)));
+                return true;
+            }
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
                 if (QString::fromLatin1(prop.name()) != propName)
@@ -404,6 +462,8 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
                 QString name = QString::fromLatin1(prop.name());
+                if (isPrivateProperty(name))
+                    continue;
                 if (name == QStringLiteral("service") || name == QStringLiteral("path") ||
                     name == QStringLiteral("iface") || name == QStringLiteral("connection") ||
                     name == QStringLiteral("objectName"))
@@ -418,6 +478,12 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         }
         if (member == QStringLiteral("Set") && args.size() >= 3) {
             QString propName = args[1].toString();
+            if (isPrivateProperty(propName)) {
+                conn.send(
+                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                                         QStringLiteral("No such property: %1").arg(propName)));
+                return true;
+            }
             QVariant value = unwrapDbus(args[2]);
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
@@ -494,39 +560,78 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         }
         if (!invoked) {
             QByteArray methodName = matchedName.toLatin1();
+            // C++ Q_INVOKABLEs take QVariant args (matching the Q_ARG dispatch
+            // below); QVariant-returning methods have their value captured.
+            const bool captureReturn = method.returnType() == QMetaType::QVariant;
             switch (dbusArgs.size()) {
             case 0:
-                invoked =
-                    QMetaObject::invokeMethod(this, methodName.constData(), Qt::DirectConnection);
+                if (captureReturn)
+                    invoked = QMetaObject::invokeMethod(this, methodName.constData(),
+                                                        Qt::DirectConnection,
+                                                        Q_RETURN_ARG(QVariant, retVal));
+                else
+                    invoked = QMetaObject::invokeMethod(this, methodName.constData(),
+                                                        Qt::DirectConnection);
                 break;
             case 1:
-                invoked =
-                    QMetaObject::invokeMethod(this, methodName.constData(), Qt::DirectConnection,
-                                              Q_ARG(QVariant, dbusArgs.at(0)));
+                if (captureReturn)
+                    invoked = QMetaObject::invokeMethod(
+                        this, methodName.constData(), Qt::DirectConnection,
+                        Q_RETURN_ARG(QVariant, retVal), Q_ARG(QVariant, dbusArgs.at(0)));
+                else
+                    invoked = QMetaObject::invokeMethod(this, methodName.constData(),
+                                                        Qt::DirectConnection,
+                                                        Q_ARG(QVariant, dbusArgs.at(0)));
                 break;
             case 2:
-                invoked = QMetaObject::invokeMethod(
-                    this, methodName.constData(), Qt::DirectConnection,
-                    Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)));
+                if (captureReturn)
+                    invoked = QMetaObject::invokeMethod(
+                        this, methodName.constData(), Qt::DirectConnection,
+                        Q_RETURN_ARG(QVariant, retVal), Q_ARG(QVariant, dbusArgs.at(0)),
+                        Q_ARG(QVariant, dbusArgs.at(1)));
+                else
+                    invoked = QMetaObject::invokeMethod(
+                        this, methodName.constData(), Qt::DirectConnection,
+                        Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)));
                 break;
             case 3:
-                invoked = QMetaObject::invokeMethod(
-                    this, methodName.constData(), Qt::DirectConnection,
-                    Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)),
-                    Q_ARG(QVariant, dbusArgs.at(2)));
+                if (captureReturn)
+                    invoked = QMetaObject::invokeMethod(
+                        this, methodName.constData(), Qt::DirectConnection,
+                        Q_RETURN_ARG(QVariant, retVal), Q_ARG(QVariant, dbusArgs.at(0)),
+                        Q_ARG(QVariant, dbusArgs.at(1)), Q_ARG(QVariant, dbusArgs.at(2)));
+                else
+                    invoked = QMetaObject::invokeMethod(
+                        this, methodName.constData(), Qt::DirectConnection,
+                        Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)),
+                        Q_ARG(QVariant, dbusArgs.at(2)));
                 break;
             case 4:
-                invoked = QMetaObject::invokeMethod(
-                    this, methodName.constData(), Qt::DirectConnection,
-                    Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)),
-                    Q_ARG(QVariant, dbusArgs.at(2)), Q_ARG(QVariant, dbusArgs.at(3)));
+                if (captureReturn)
+                    invoked = QMetaObject::invokeMethod(
+                        this, methodName.constData(), Qt::DirectConnection,
+                        Q_RETURN_ARG(QVariant, retVal), Q_ARG(QVariant, dbusArgs.at(0)),
+                        Q_ARG(QVariant, dbusArgs.at(1)), Q_ARG(QVariant, dbusArgs.at(2)),
+                        Q_ARG(QVariant, dbusArgs.at(3)));
+                else
+                    invoked = QMetaObject::invokeMethod(
+                        this, methodName.constData(), Qt::DirectConnection,
+                        Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)),
+                        Q_ARG(QVariant, dbusArgs.at(2)), Q_ARG(QVariant, dbusArgs.at(3)));
                 break;
             case 5:
-                invoked = QMetaObject::invokeMethod(
-                    this, methodName.constData(), Qt::DirectConnection,
-                    Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)),
-                    Q_ARG(QVariant, dbusArgs.at(2)), Q_ARG(QVariant, dbusArgs.at(3)),
-                    Q_ARG(QVariant, dbusArgs.at(4)));
+                if (captureReturn)
+                    invoked = QMetaObject::invokeMethod(
+                        this, methodName.constData(), Qt::DirectConnection,
+                        Q_RETURN_ARG(QVariant, retVal), Q_ARG(QVariant, dbusArgs.at(0)),
+                        Q_ARG(QVariant, dbusArgs.at(1)), Q_ARG(QVariant, dbusArgs.at(2)),
+                        Q_ARG(QVariant, dbusArgs.at(3)), Q_ARG(QVariant, dbusArgs.at(4)));
+                else
+                    invoked = QMetaObject::invokeMethod(
+                        this, methodName.constData(), Qt::DirectConnection,
+                        Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)),
+                        Q_ARG(QVariant, dbusArgs.at(2)), Q_ARG(QVariant, dbusArgs.at(3)),
+                        Q_ARG(QVariant, dbusArgs.at(4)));
                 break;
             default:
                 return false;
@@ -535,16 +640,33 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
         retVal = toDbusVariant(retVal);
         if (retVal.isValid()) {
-            // DBus::Struct can't be marshaled by QtDBus's metatype system
-            // (variable signature). Convert to QDBusArgument which QtDBus
-            // cross-marshals into the message.
+            // DBus::Struct replies marshal via their own QDBusArgument
+            // (variable signature) — independent of any declared out-signature.
             if (retVal.userType() == qMetaTypeId<DBus::Struct>()) {
                 QDBusArgument structArg;
                 structArg << retVal.value<DBus::Struct>();
                 conn.send(msg.createReply({QVariant::fromValue(structArg)}));
-            } else {
-                conn.send(msg.createReply({retVal}));
+                return true;
             }
+
+            // Honor a declared reply signature: explicit _signatures override
+            // → catalog declaration → stable inference (unchanged).
+            const QStringList outTypes = declaredOutTypes(member);
+            if (outTypes.size() == 1) {
+                conn.send(msg.createReply({marshalBySignature(outTypes.first(), retVal)}));
+                return true;
+            }
+            if (outTypes.size() > 1) {
+                // Multi-out: the method returned a list of out values.
+                const QVariantList values = retVal.toList();
+                QVariantList reply;
+                for (int i = 0; i < outTypes.size(); ++i)
+                    reply << marshalBySignature(outTypes.at(i),
+                                                i < values.size() ? values.at(i) : QVariant());
+                conn.send(msg.createReply(reply));
+                return true;
+            }
+            conn.send(msg.createReply({retVal})); // stable inference
         } else {
             conn.send(msg.createReply()); // void return — no reply args
         }

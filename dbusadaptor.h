@@ -19,6 +19,7 @@ class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
     Q_PROPERTY(QString iface READ iface WRITE setIface NOTIFY ifaceChanged)
     Q_PROPERTY(
         DBusConnection *connection READ connection WRITE setConnection NOTIFY connectionChanged)
+    Q_PROPERTY(QVariantMap _signatures READ signatures WRITE setSignatures NOTIFY signaturesChanged)
 
 public:
     explicit DBusAdaptor(QObject *parent = nullptr);
@@ -36,6 +37,9 @@ public:
     DBusConnection *connection() const { return m_conn.data(); }
     void setConnection(DBusConnection *v);
 
+    QVariantMap signatures() const { return m_signatures; }
+    void setSignatures(const QVariantMap &v);
+
     // QQmlParserStatus
     void classBegin() override {}
     void componentComplete() override;
@@ -52,13 +56,16 @@ Q_SIGNALS:
     void pathChanged();
     void ifaceChanged();
     void connectionChanged();
+    void signaturesChanged();
 
 private:
     QString generateXml() const;
     QDBusConnection bus() const;
+    QStringList declaredOutTypes(const QString &member) const;
 
     QString m_service;
     QString m_path;
     QString m_iface;
     QPointer<DBusConnection> m_conn;
+    QVariantMap m_signatures;
 };

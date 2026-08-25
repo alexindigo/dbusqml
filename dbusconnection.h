@@ -12,6 +12,12 @@
 
 QVariant toDbusVariant(const QVariant &v);
 
+// Parse one complete D-Bus type from `sig` starting at `pos`. Returns the
+// type's signature substring and advances pos past it. Returns empty on parse
+// failure. Used to split concatenated signatures (override strings, catalog
+// out-arg lists) into per-argument signatures.
+QString firstCompleteType(const QString &sig, int &pos);
+
 // Marshal a JS-supplied QVariant against a known D-Bus signature.
 // Produces a QVariant with the correct C++ type for QtDBus to marshal
 // to the wire format matching `sig`. DBus.* wrapper types take priority
