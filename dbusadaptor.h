@@ -8,6 +8,7 @@
 #include <qqmlregistration.h>
 
 #include "dbusconnection.h"
+#include "dbusheldreply.h"
 
 class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
     Q_OBJECT
@@ -51,6 +52,17 @@ public:
     Q_INVOKABLE void emitSignal(const QString &name,
                                 const QJSValue &arguments = QJSValue::UndefinedValue);
 
+    // Deferred replies. Valid only synchronously during a method handler;
+    // returns nullptr (with a warning) outside dispatch. The returned
+    // DBusHeldReply is the only handle that can answer the caller.
+    Q_INVOKABLE DBusHeldReply *holdReply();
+
+    // Shared reply tail: marshalability guard -> declared out-signatures ->
+    // marshalBySignature -> multi-out split -> send. Used by the synchronous
+    // dispatch path and by DBusHeldReply::send().
+    void sendMethodReply(const QDBusConnection &conn, const QDBusMessage &msg,
+                         const QString &member, const QVariant &retVal);
+
 Q_SIGNALS:
     void serviceChanged();
     void pathChanged();
@@ -68,4 +80,20 @@ private:
     QString m_iface;
     QPointer<DBusConnection> m_conn;
     QVariantMap m_signatures;
+
+    // Dispatch context for holdReply(): the in-flight call's message,
+    // connection, and member name. Set around the handler invocation, cleared
+    // after; `held` records that the handler deferred the reply.
+    struct PendingCall {
+        QDBusMessage msg;
+        QDBusConnection conn;
+        QString member;
+        bool held = false;
+    };
+    PendingCall m_currentCall;
+    bool m_inDispatch = false;
 };
+
+// Convert a QJSValue to QVariant for D-Bus marshaling (preserves DBus.*
+// gadget types). Shared between the sync dispatch path and DBusHeldReply.
+QVariant qjsValueToVariant(const QJSValue &jsval);

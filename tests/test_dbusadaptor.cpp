@@ -1,7 +1,9 @@
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
+#include <QDBusObjectPath>
 #include <QDBusPendingCall>
+#include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusVariant>
 #include <QDir>
@@ -14,6 +16,8 @@
 #include <QTest>
 #include <QThread>
 #include <QTimer>
+
+#include <memory>
 
 #include "dbusadaptor.h"
 #include "dbusconnection.h"
@@ -159,6 +163,13 @@ private slots:
     void testStructInMapValueReply();
     void testStructSignalArg();
     void testUnmarshalableReplySurvival();
+
+    void testDeferredReplyDeclaredMultiOut();
+    void testDeferredSendError();
+    void testDeferredInterleaving();
+    void testDeferredTeardown();
+    void testDeferredOnceOnly();
+    void testHoldReplyOutsideDispatch();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -979,6 +990,282 @@ void TestDBusAdaptor::testUnmarshalableReplySurvival() {
     QVERIFY(!goodReply.arguments().isEmpty());
     QCOMPARE(goodReply.arguments().first().toInt(), 42);
 
+    delete adaptor;
+}
+
+// ==================== Deferred replies ====================
+//
+// Deferred-reply tests need an async caller on a SEPARATE connection: a
+// same-connection call takes QtDBus's synchronous "local loop", which cannot
+// deliver a reply sent after handleMessage returns ("local-loop message
+// cannot have delayed replies"). See spike-findings.md.
+
+static QDBusConnection deferredCaller() {
+    static std::unique_ptr<QDBusConnection> conn;
+    if (!conn || !conn->isConnected()) {
+        const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+        conn = std::make_unique<QDBusConnection>(QDBusConnection::connectToBus(
+            QString::fromLocal8Bit(addr), QStringLiteral("test-deferred-caller")));
+    }
+    return *conn;
+}
+
+static QDBusPendingCallWatcher *asyncCallDeferred(const QString &service, const QString &path,
+                                                  const QString &iface, const QString &member,
+                                                  const QVariantList &args = {}) {
+    QDBusMessage msg = QDBusMessage::createMethodCall(service, path, iface, member);
+    if (!args.isEmpty())
+        msg.setArguments(args);
+    QDBusPendingCall pending = deferredCaller().asyncCall(msg);
+    return new QDBusPendingCallWatcher(pending);
+}
+
+static QObject *createQmlAdaptor(const QByteArray &qmlSrc) {
+    static QQmlEngine *engine = nullptr;
+    if (!engine) {
+        engine = new QQmlEngine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine->addImportPath(binDir.path());
+        engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    }
+    QQmlComponent component(engine);
+    component.setData(qmlSrc, QUrl());
+    if (!component.isReady()) {
+        qWarning() << "component errors:" << component.errorString();
+        return nullptr;
+    }
+    QObject *adaptor = component.create();
+    QTest::qWait(300);
+    return adaptor;
+}
+
+// T1 — deferred send against the bundled FileChooser catalog type. The held
+// reply settles with [0, {uris:[...]}], which must split into the declared
+// multi-out (u, a{sv}) and hit the wire as literal "ua{sv}".
+void TestDBusAdaptor::testDeferredReplyDeclaredMultiOut() {
+    QObject *adaptor = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.DeferT1'\n"
+        "  path: '/DeferT1'\n"
+        "  iface: 'org.freedesktop.impl.portal.FileChooser'\n"
+        "  property var held: null\n"
+        "  function openFile(handle, appId, parentWindow, title, options) {\n"
+        "    held = holdReply()\n"
+        "    var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: 300; running: true; "
+        "repeat: false }', this)\n"
+        "    t.triggered.connect(function() { held.send([0, { uris: ['file:///tmp/x'] }]) })\n"
+        "  }\n"
+        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.DeferT1"), QStringLiteral("/DeferT1"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+
+    QVERIFY(!watcher->isError());
+    QDBusMessage reply = watcher->reply();
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("ua{sv}"));
+    QVariantList args = reply.arguments();
+    QCOMPARE(args.size(), 2);
+    QCOMPARE(args.at(0).toUInt(), 0u);
+    QVariantMap results = unwrapDbus(args.at(1)).toMap();
+    QVERIFY(results.contains(QStringLiteral("uris")));
+    QVariantList uris = unwrapDbus(results.value(QStringLiteral("uris"))).toList();
+    QCOMPARE(uris.size(), 1);
+    QCOMPARE(uris.at(0).toString(), QStringLiteral("file:///tmp/x"));
+
+    delete watcher;
+    delete adaptor;
+}
+
+// T2 — sendError settles the held reply with an exact D-Bus error.
+void TestDBusAdaptor::testDeferredSendError() {
+    QObject *adaptor = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.DeferT2'\n"
+        "  path: '/DeferT2'\n"
+        "  iface: 'org.freedesktop.impl.portal.FileChooser'\n"
+        "  property var held: null\n"
+        "  function openFile(handle, appId, parentWindow, title, options) {\n"
+        "    held = holdReply()\n"
+        "    var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: 300; running: true; "
+        "repeat: false }', this)\n"
+        "    t.triggered.connect(function() { held.sendError('org.dbusqml.TestError', 'nope') })\n"
+        "  }\n"
+        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.DeferT2"), QStringLiteral("/DeferT2"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+
+    QVERIFY(watcher->isError());
+    QDBusMessage reply = watcher->reply();
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.dbusqml.TestError"));
+    QCOMPARE(reply.errorMessage(), QStringLiteral("nope"));
+
+    delete watcher;
+    delete adaptor;
+}
+
+// T3 — interleaving: while a call is held, a synchronous method on the SAME
+// adaptor answers immediately; the held call then settles normally.
+void TestDBusAdaptor::testDeferredInterleaving() {
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "import QtQml 2.15\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.DeferT3'\n"
+                         "  path: '/DeferT3'\n"
+                         "  iface: 'org.freedesktop.impl.portal.FileChooser'\n"
+                         "  property var held: null\n"
+                         "  function openFile(handle, appId, parentWindow, title, options) {\n"
+                         "    held = holdReply()\n"
+                         "    var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: "
+                         "500; running: true; repeat: false }', this)\n"
+                         "    t.triggered.connect(function() { held.send([1, {}]) })\n"
+                         "  }\n"
+                         "  function ping() { return 'pong' }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.DeferT3"), QStringLiteral("/DeferT3"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+
+    // While OpenFile is held, a synchronous ping on the same adaptor answers
+    // immediately.
+    QDBusMessage pingCall = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.DeferT3"), QStringLiteral("/DeferT3"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("ping"));
+    QDBusMessage pingReply = QDBusConnection::sessionBus().call(pingCall, QDBus::Block, 3000);
+    QCOMPARE(pingReply.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(!pingReply.arguments().isEmpty());
+    QCOMPARE(pingReply.arguments().first().toString(), QStringLiteral("pong"));
+
+    // Then the held call settles fine.
+    QVERIFY(spy.wait(5000));
+    QVERIFY(!watcher->isError());
+    QDBusMessage reply = watcher->reply();
+    QCOMPARE(reply.signature(), QStringLiteral("ua{sv}"));
+    QVariantList args = reply.arguments();
+    QCOMPARE(args.size(), 2);
+    QCOMPARE(args.at(0).toUInt(), 1u);
+
+    delete watcher;
+    delete adaptor;
+}
+
+// T4 — teardown: destroying the adaptor while a call is held errors out the
+// caller (an error reply, not a timeout).
+void TestDBusAdaptor::testDeferredTeardown() {
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.DeferT4'\n"
+                         "  path: '/DeferT4'\n"
+                         "  iface: 'org.freedesktop.impl.portal.FileChooser'\n"
+                         "  property bool heldOpen: false\n"
+                         "  function openFile(handle, appId, parentWindow, title, options) {\n"
+                         "    holdReply()\n"
+                         "    heldOpen = true\n"
+                         "  }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.DeferT4"), QStringLiteral("/DeferT4"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+
+    QTRY_COMPARE_WITH_TIMEOUT(adaptor->property("heldOpen").toBool(), true, 3000);
+    delete adaptor;
+
+    QVERIFY(spy.wait(5000));
+    QDBusMessage reply = watcher->reply();
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+    QCOMPARE(reply.errorMessage(), QStringLiteral("adaptor destroyed with reply pending"));
+
+    delete watcher;
+}
+
+// T5 — once-only settle: a second send() after settle warns and sends nothing.
+void TestDBusAdaptor::testDeferredOnceOnly() {
+    QObject *adaptor = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.DeferT5'\n"
+        "  path: '/DeferT5'\n"
+        "  iface: 'org.freedesktop.impl.portal.FileChooser'\n"
+        "  property var held: null\n"
+        "  function openFile(handle, appId, parentWindow, title, options) {\n"
+        "    held = holdReply()\n"
+        "    var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: 300; running: true; "
+        "repeat: false }', this)\n"
+        "    t.triggered.connect(function() { held.send([0, {}]); held.send([0, {}]) })\n"
+        "  }\n"
+        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QTest::ignoreMessage(
+        QtWarningMsg, QRegularExpression(QStringLiteral("dbusqml: DBusHeldReply already settled")));
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.DeferT5"), QStringLiteral("/DeferT5"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(watcher->reply().signature(), QStringLiteral("ua{sv}"));
+
+    // Give any (erroneous) second reply time to arrive — there must be none.
+    QTest::qWait(500);
+    QCOMPARE(spy.count(), 1);
+
+    delete watcher;
+    delete adaptor;
+}
+
+// T6 — misuse: holdReply() outside dispatch warns and returns null; the
+// adaptor is unharmed.
+void TestDBusAdaptor::testHoldReplyOutsideDispatch() {
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("dbusqml: holdReply.*outside")));
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "import QtQml 2.15\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.DeferT6'\n"
+                         "  path: '/DeferT6'\n"
+                         "  iface: 'org.dbusqml.DeferT6'\n"
+                         "  property bool grabbedNull: false\n"
+                         "  Component.onCompleted: { grabbedNull = (holdReply() === null) }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+    QCOMPARE(adaptor->property("grabbedNull").toBool(), true);
     delete adaptor;
 }
 

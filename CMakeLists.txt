@@ -25,6 +25,8 @@ set(DBUSQML_SOURCES
     dbusconnection.cpp
     dbusconnection.h
     dbuserror.h
+    dbusheldreply.cpp
+    dbusheldreply.h
     dbusmessage.cpp
     dbusmessage.h
     dbus.cpp
@@ -73,6 +75,7 @@ qt_add_resources(dbusqml "catalog"
         types/org.freedesktop.login1.Manager.xml
         types/org.freedesktop.portal.Settings.xml
         types/org.freedesktop.impl.portal.Settings.xml
+        types/org.freedesktop.impl.portal.FileChooser.xml
         types/org.freedesktop.portal.NetworkMonitor.xml
         types/org.freedesktop.UPower.xml
 )
@@ -174,6 +177,7 @@ if(BUILD_TEST_MODE)
     add_executable(test_adaptor
         tests/test_dbusadaptor.cpp
         dbusadaptor.cpp
+        dbusheldreply.cpp
         dbusmessage.cpp
         dbusconnection.cpp
         dbuspendingreply.cpp

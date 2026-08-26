@@ -1,6 +1,7 @@
 #include "dbusadaptor.h"
 #include "dbuscatalog.h"
 #include "dbusconnection.h"
+#include "dbusheldreply.h"
 #include "dbustypes.h"
 
 #include <QDBusArgument>
@@ -129,9 +130,22 @@ private:
     QString m_name;
 };
 
-DBusAdaptor::DBusAdaptor(QObject *parent) : QDBusVirtualObject(parent) {}
+DBusAdaptor::DBusAdaptor(QObject *parent)
+    : QDBusVirtualObject(parent),
+      m_currentCall{QDBusMessage(), QDBusConnection::sessionBus(), QString(), false} {}
 
 DBusAdaptor::~DBusAdaptor() {
+    // Error out any held reply that was never settled. The adaptor is being
+    // destroyed, so the deferred reply can never be answered — send an error
+    // reply rather than leaving the caller to time out.
+    const auto heldReplies = findChildren<DBusHeldReply *>();
+    for (DBusHeldReply *reply : heldReplies) {
+        if (!reply->isSettled()) {
+            reply->sendError(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                             QStringLiteral("adaptor destroyed with reply pending"));
+        }
+    }
+
     QDBusConnection conn = bus();
     conn.unregisterObject(m_path);
     if (!m_service.isEmpty()) {
@@ -238,7 +252,7 @@ QString DBusAdaptor::introspect(const QString &) const {
 // (DBus::Variant, DBus::Dict, etc.) are preserved by QJSValue::toVariant()
 // in Qt 6 when the gadget's metatype is registered — which the plugin's
 // static initializer ensures.
-static QVariant qjsValueToVariant(const QJSValue &jsval) {
+QVariant qjsValueToVariant(const QJSValue &jsval) {
     QVariant v = jsval.toVariant();
     // QJSValue::toVariant() on a QML value type (gadget) may produce a
     // QVariantMap if the engine converts it via the property map rather
@@ -372,8 +386,8 @@ QString DBusAdaptor::generateXml() const {
         QString name = QString::fromLatin1(method.name());
         // Skip internal Qt methods
         if (name.startsWith(QStringLiteral("qml")) || name == QStringLiteral("emitSignal") ||
-            name == QStringLiteral("deleteLater") || name == QStringLiteral("destroyed") ||
-            name == QStringLiteral("objectNameChanged"))
+            name == QStringLiteral("holdReply") || name == QStringLiteral("deleteLater") ||
+            name == QStringLiteral("destroyed") || name == QStringLiteral("objectNameChanged"))
             continue;
 
         xml += QStringLiteral("    <method name=\"%1\">\n").arg(name);
@@ -569,6 +583,10 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         if (method.methodType() != QMetaMethod::Method && method.methodType() != QMetaMethod::Slot)
             continue;
         const QString methodName = QString::fromLatin1(method.name());
+        // holdReply() is a library mechanism for the handler, not a D-Bus
+        // method — never dispatch to it over the wire.
+        if (methodName == QStringLiteral("holdReply"))
+            continue;
         if (methodName == member) {
             matchedName = member;
         } else if (methodName == qmlMember) {
@@ -583,6 +601,15 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
         QVariant retVal;
         bool invoked = false;
+
+        // Establish the dispatch context so holdReply() works synchronously
+        // inside the handler. Cleared immediately after invocation.
+        m_currentCall.msg = msg;
+        m_currentCall.conn = conn;
+        m_currentCall.member = member;
+        m_currentCall.held = false;
+        m_inDispatch = true;
+
         QQmlEngine *engine = qmlEngine(this);
         if (engine) {
             // Wrap the adaptor as a QJSValue and invoke the method through
@@ -683,50 +710,80 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                         Q_ARG(QVariant, dbusArgs.at(4)));
                 break;
             default:
+                m_inDispatch = false;
                 return false;
             }
         }
 
-        retVal = toDbusVariant(retVal);
-        if (retVal.isValid()) {
-            // Robustness guard: an unmarshalable payload (e.g. a returned JS
-            // function) would otherwise make QtDBus drop the bus connection.
-            // Degrade to an error reply — one failed call, never the service.
-            if (!wireMarshalable(retVal)) {
-                qWarning("dbusqml: reply for %s is not marshalable (type %s) — sending error reply",
-                         qPrintable(member), QMetaType(retVal.userType()).name());
-                conn.send(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
-                                               QStringLiteral("Reply value is not marshalable")));
-                return true;
-            }
+        m_inDispatch = false;
 
-            // Honor a declared reply signature: explicit _signatures override
-            // → catalog declaration → stable inference (unchanged). Struct
-            // replies now arrive here already in writable-QDBusArgument form
-            // (toDbusVariant), so no top-level special case is needed.
-            const QStringList outTypes = declaredOutTypes(member);
-            if (outTypes.size() == 1) {
-                conn.send(msg.createReply({marshalBySignature(outTypes.first(), retVal)}));
-                return true;
+        // If the handler deferred the reply via holdReply(), the held reply
+        // will settle it later — skip the synchronous tail. The handler's
+        // return value (if any) is ignored in that case.
+        if (m_currentCall.held) {
+            if (retVal.isValid()) {
+                qWarning("dbusqml: handler return value ignored when holdReply() was called");
             }
-            if (outTypes.size() > 1) {
-                // Multi-out: the method returned a list of out values.
-                const QVariantList values = retVal.toList();
-                QVariantList reply;
-                for (int i = 0; i < outTypes.size(); ++i)
-                    reply << marshalBySignature(outTypes.at(i),
-                                                i < values.size() ? values.at(i) : QVariant());
-                conn.send(msg.createReply(reply));
-                return true;
-            }
-            conn.send(msg.createReply({retVal})); // stable inference
-        } else {
-            conn.send(msg.createReply()); // void return — no reply args
+            return true;
         }
+
+        sendMethodReply(conn, msg, member, retVal);
         return true;
     }
 
     return false;
+}
+
+DBusHeldReply *DBusAdaptor::holdReply() {
+    if (!m_inDispatch) {
+        qWarning("dbusqml: holdReply() called outside method dispatch - ignored");
+        return nullptr;
+    }
+    auto *reply = new DBusHeldReply(this);
+    reply->setContext(this, m_currentCall.msg, m_currentCall.conn, m_currentCall.member);
+    QQmlEngine::setObjectOwnership(reply, QQmlEngine::CppOwnership);
+    m_currentCall.held = true;
+    return reply;
+}
+
+void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessage &msg,
+                                  const QString &member, const QVariant &retVal) {
+    const QVariant value = toDbusVariant(retVal);
+    if (value.isValid()) {
+        // Robustness guard: an unmarshalable payload (e.g. a returned JS
+        // function) would otherwise make QtDBus drop the bus connection.
+        // Degrade to an error reply — one failed call, never the service.
+        if (!wireMarshalable(value)) {
+            qWarning("dbusqml: reply for %s is not marshalable (type %s) — sending error reply",
+                     qPrintable(member), QMetaType(value.userType()).name());
+            conn.send(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                                           QStringLiteral("Reply value is not marshalable")));
+            return;
+        }
+
+        // Honor a declared reply signature: explicit _signatures override
+        // → catalog declaration → stable inference (unchanged). Struct
+        // replies now arrive here already in writable-QDBusArgument form
+        // (toDbusVariant), so no top-level special case is needed.
+        const QStringList outTypes = declaredOutTypes(member);
+        if (outTypes.size() == 1) {
+            conn.send(msg.createReply({marshalBySignature(outTypes.first(), value)}));
+            return;
+        }
+        if (outTypes.size() > 1) {
+            // Multi-out: the method returned a list of out values.
+            const QVariantList values = value.toList();
+            QVariantList reply;
+            for (int i = 0; i < outTypes.size(); ++i)
+                reply << marshalBySignature(outTypes.at(i),
+                                            i < values.size() ? values.at(i) : QVariant());
+            conn.send(msg.createReply(reply));
+            return;
+        }
+        conn.send(msg.createReply({value})); // stable inference
+    } else {
+        conn.send(msg.createReply()); // void return — no reply args
+    }
 }
 
 #include "dbusadaptor.moc"
