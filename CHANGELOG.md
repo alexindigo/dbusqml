@@ -21,6 +21,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   multi-out reply signatures with no per-app override.
 - **Bundled `org.freedesktop.impl.portal.Request` type** — the shared
   `Close()` request interface.
+- **Typed variant payloads (`DBusQML.variant(value, signature)`)** — the
+  variant value type gains an optional payload-signature argument, so a
+  variant's payload can be declared (`new DBusQML.variant(paths, "as")` →
+  `v(as)`). Routed through the existing `marshalBySignature` engine and
+  generic (subsumes `as`, `ay`, `au`, `(ddd)`, `aa{sv}`, anything the engine
+  produces). Unproducible signatures warn and fall back to inference — never
+  a silent wrong type. Closes the variant-payload hole that made a plain QML
+  `uris` array marshal as `av` and silently vanish inside xdg-desktop-portal.
 
 ## [0.4.0] — 2026-08-25
 

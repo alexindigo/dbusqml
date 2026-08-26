@@ -336,11 +336,13 @@ synchronously inside the handler to mark the call as deferred; it returns a
 `sendError(name, message)`:
 
 ```qml
+import DBus 1.0 as DBusQML   // alias for value types
+
 DBusAdaptor {
     iface: "org.freedesktop.impl.portal.FileChooser"
     function openFile(handle, appId, parentWindow, title, options) {
         const reply = holdReply()
-        dialog.accepted.connect(paths => reply.send([0, { uris: toFileUris(paths) }]))
+        dialog.accepted.connect(paths => reply.send([0, { uris: new DBusQML.variant(paths, "as") }]))
         dialog.cancelled.connect(() => reply.send([1, {}]))
     }
 }
@@ -366,6 +368,10 @@ Caveats:
 - There is no server-side timeout — the caller owns timeouts. (For
   xdg-desktop-portal backends that means honoring the frontend's
   `G_MAXINT`-timeout contract: the backend may hold indefinitely.)
+- A caller on the **same `QDBusConnection`** as the adaptor cannot receive a
+  deferred reply — QtDBus dispatches local-loop calls synchronously
+  (`sendWithReplyLocal`) and reports `local-loop message cannot have delayed
+  replies`. Use a separate connection when a process calls its own adaptor.
 
 ---
 
@@ -501,6 +507,7 @@ DBusQML.string("hello")
 DBusQML.boolean(true)
 DBusQML.objectPath("/org/freedesktop/UPower")
 DBusQML.variant("any value")
+DBusQML.variant(["file:///tmp/x"], "as")   // variant whose payload has signature "as"
 DBusQML.dict({ key: "value" })
 ```
 
@@ -521,7 +528,7 @@ Most examples don't need value types — plain JS strings/numbers/booleans work 
 | `DBus::ObjectPath` | `objectPath` | D-Bus object path. |
 | `DBus::Signature` | `signature` | D-Bus signature. |
 | `DBus::Dict` | `dict` | D-Bus dictionary (map). |
-| `DBus::Variant` | `variant` | D-Bus variant. |
+| `DBus::Variant` | `variant` | D-Bus variant. Optional second argument declares the payload's wire signature — `DBusQML.variant(paths, "as")` produces a variant whose payload is an `as` string array (a plain JS array inside a variant infers `av`, which strict receivers such as xdg-desktop-portal reject for `uris`). Empty signature = inference. |
 | `DBus::Bytes` | `bytes` | Byte array (`ay`). |
 | `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. Since 0.4.0 it works in every position — variant payloads, map/list values, signal args, call args. The outermost struct carries the wire signature; inner structs compose naturally. |
 
