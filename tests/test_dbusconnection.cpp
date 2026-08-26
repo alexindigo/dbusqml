@@ -782,10 +782,10 @@ private slots:
         QVariantMap wifi = m[QStringLiteral("802-11-wireless")].toMap();
         QCOMPARE(wifi[QStringLiteral("ssid")].toString(), QStringLiteral("MyWifi"));
 
-        // Variant payload must be unwrapped into a QDBusVariant of QString
-        QCOMPARE(m[QStringLiteral("connection")].userType(), qMetaTypeId<QDBusVariant>());
-        QCOMPARE(m[QStringLiteral("connection")].value<QDBusVariant>().variant().toString(),
-                 QStringLiteral("auto"));
+        // The Variant inside the a{sv} map contributes its payload directly —
+        // the map's "v" provides the wrapper (single wrap, no nested variant).
+        QCOMPARE(m[QStringLiteral("connection")].userType(), QMetaType::QString);
+        QCOMPARE(m[QStringLiteral("connection")].toString(), QStringLiteral("auto"));
 
         // Round-trip over the bus through the a{sv} echo service.
         DBusMessage msg;

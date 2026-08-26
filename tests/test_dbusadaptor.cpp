@@ -178,6 +178,9 @@ private slots:
     void testVariantTypedPayloadNoSigUnchanged();
     void testVariantTypedPayloadFileChooserAcceptance();
     void testVariantTypedPayloadListInference();
+    void testVariantInMapSingleWrap();
+    void testVariantNestedVariantExplicit();
+    void testVariantStructMemberKeepsVariant();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -1305,8 +1308,6 @@ static QVariant mapValueRawArg(const QVariant &arg, const QString &key) {
         }
         map.endMap();
     }
-    if (val.userType() == qMetaTypeId<QDBusVariant>())
-        val = val.value<QDBusVariant>().variant();
     return val;
 }
 
@@ -1545,11 +1546,77 @@ void TestDBusAdaptor::testVariantTypedPayloadListInference() {
         }
         arr.endArray();
     }
-    if (first.userType() == qMetaTypeId<QDBusVariant>())
-        first = first.value<QDBusVariant>().variant();
     QCOMPARE(payloadSignature(first), QStringLiteral("ay"));
     QCOMPARE(first.userType(), qMetaTypeId<QByteArray>());
     QCOMPARE(first.toByteArray(), QByteArray("hello"));
+}
+
+// A variant value inside an a{sv} map must demarshal to its payload (single
+// "v"), not a nested QDBusVariant — the slot-aware conversion, not a
+// double-wrap. Pre-existing 0.4.0 bug; GLib's concrete-type lookup depends on it.
+void TestDBusAdaptor::testVariantInMapSingleWrap() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.VSingleMap"), QStringLiteral("/VSingleMap"),
+        QStringLiteral("org.dbusqml.VSingleMap"), QStringLiteral("readAll"), {},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.VSingleMap'\n"
+        "  path: '/VSingleMap'\n"
+        "  iface: 'org.dbusqml.VSingleMap'\n"
+        "  function readAll() {\n"
+        "    return { 'color-scheme': new DBusQML.variant('hello') }\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sv}"));
+    const QVariant payload = mapValueRaw(reply, QStringLiteral("color-scheme"));
+    QCOMPARE(payload.userType(), QMetaType::QString);
+    QCOMPARE(payload.toString(), QStringLiteral("hello"));
+}
+
+// variant(variant(x)) is an intentional nested variant: the outer "v" carries
+// an inner "v". The slot-aware conversion must preserve it (v(v(i))), not
+// collapse it.
+void TestDBusAdaptor::testVariantNestedVariantExplicit() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.VNestedVar"), QStringLiteral("/VNestedVar"),
+        QStringLiteral("org.dbusqml.VNestedVar"), QStringLiteral("get"), {},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.VNestedVar'\n"
+        "  path: '/VNestedVar'\n"
+        "  iface: 'org.dbusqml.VNestedVar'\n"
+        "  function get() {\n"
+        "    return new DBusQML.variant(new DBusQML.variant(42))\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("v"));
+    const QVariant outer = reply.arguments().first().value<QDBusVariant>().variant();
+    QCOMPARE(outer.userType(), qMetaTypeId<QDBusVariant>());
+    QCOMPARE(outer.value<QDBusVariant>().variant().toInt(), 42);
+}
+
+// A Variant member inside a struct must keep its "v" — struct_([ns,key,variant])
+// is (ssv), not (ssx). The struct-member slot is variant-free.
+void TestDBusAdaptor::testVariantStructMemberKeepsVariant() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.VStructMember"), QStringLiteral("/VStructMember"),
+        QStringLiteral("org.dbusqml.VStructMember"), QStringLiteral("get"), {},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.VStructMember'\n"
+        "  path: '/VStructMember'\n"
+        "  iface: 'org.dbusqml.VStructMember'\n"
+        "  function get() {\n"
+        "    return new DBusQML.struct_(['ns', 'key', new DBusQML.variant(1)])\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("(ssv)"));
 }
 
 int main(int argc, char *argv[]) {

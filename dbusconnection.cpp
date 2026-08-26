@@ -330,7 +330,16 @@ QVariant unwrapDbus(const QVariant &v) {
     return v;
 }
 
-QVariant toDbusVariant(const QVariant &v) {
+// Normalize DBus.* gadgets to marshalable values, recursing into containers.
+//
+// `nested` describes the enclosing slot: true when that slot already provides
+// the D-Bus variant wrapper (an a{sv} dict value, an av list element, a
+// DBus::Dict value), false when it does not (a top-level arg, a struct member,
+// another variant's payload). A DBus::Variant in a nested slot contributes its
+// payload directly (the enclosing "v" wraps it — a nested QDBusVariant would
+// otherwise double-wrap to v(v(x))); in a free slot it carries the QDBusVariant
+// wrapper itself (so a top-level `variant(x)` is a real "v").
+static QVariant toDbusVariantImpl(const QVariant &v, bool nested) {
     int type = v.userType();
 
     if (type == qMetaTypeId<DBus::Bool>())
@@ -366,60 +375,55 @@ QVariant toDbusVariant(const QVariant &v) {
         // — that cross-marshals in EVERY position (variant payloads, map/list
         // values, signal args, call args), not just top-level replies.
         QVariantList members = v.value<DBus::Struct>().value;
-        // Inner struct members must stay gadgets: operator<<(QDBusArgument,
-        // DBus::Struct) dispatches nested DBus::Struct natively but has no
-        // case for QDBusArgument members. Only non-struct members are unwrapped.
+        // Struct members are variant-free slots: a Variant member must carry
+        // its own "v" (so (ssv) stays (ssv), not (ssx)).
         for (auto &m : members) {
             if (m.userType() != qMetaTypeId<DBus::Struct>())
-                m = toDbusVariant(m);
+                m = toDbusVariantImpl(m, false);
         }
         QDBusArgument arg;
         arg << DBus::Struct(members);
         return QVariant::fromValue(arg);
     }
-    // Plain QVariantMap holding DBus.* gadget values (from QML object
-    // literals in adaptor return values) — recurse into the values.
+    // Containers provide the "v" for their values: recurse as nested.
     if (type == qMetaTypeId<QVariantMap>()) {
         QVariantMap m = v.toMap();
         for (auto it = m.begin(); it != m.end(); ++it)
-            it.value() = toDbusVariant(it.value());
+            it.value() = toDbusVariantImpl(it.value(), true);
         return QVariant::fromValue(m);
     }
-    // Plain QVariantList holding DBus.* gadget values (e.g. the multi-out
-    // reply [0, { uris: variant(...,"as") }]) — recurse into the elements for
-    // the same reason. QStringList is a distinct metatype and passes through
-    // untouched. Rebuild unconditionally (the 0.3.1 change-detection bug).
     if (type == qMetaTypeId<QVariantList>()) {
         QVariantList list = v.toList();
         for (auto &e : list)
-            e = toDbusVariant(e);
+            e = toDbusVariantImpl(e, true);
         return QVariant::fromValue(list);
     }
     if (type == qMetaTypeId<DBus::Dict>()) {
         // Unwrap recursively: a Dict's QVariantMap may itself hold Dict /
         // Variant values (e.g. NetworkManager connection dicts a{sa{sv}}).
-        // Raw DBus::Dict values are not registered with QtDBus — leaving them
-        // nested crashes the marshaller ("type 'DBus::Dict' is not
-        // registered", caught on the arch-niri VM).
         QVariantMap m = v.value<DBus::Dict>().value;
         for (auto it = m.begin(); it != m.end(); ++it)
-            it.value() = toDbusVariant(it.value());
+            it.value() = toDbusVariantImpl(it.value(), true);
         return QVariant::fromValue(m);
     }
     if (type == qMetaTypeId<DBus::Variant>()) {
         const DBus::Variant var = v.value<DBus::Variant>();
-        // Optional payload signature: marshal the payload against the declared
-        // signature via the shared engine (which loud-fails and falls back to
-        // inference for an unproducible shape). Empty signature = inference,
-        // unchanged from before.
-        if (!var.sig.isEmpty()) {
-            return QVariant::fromValue(QDBusVariant(marshalBySignature(var.sig, var.propValue())));
-        }
-        // Recurse into the variant payload for the same reason.
-        return QVariant::fromValue(QDBusVariant(toDbusVariant(var.propValue())));
+        // Optional payload signature drives the payload through marshalBySignature
+        // (which loud-fails and falls back to inference for unproducible shapes);
+        // empty signature keeps inference. The payload is itself a variant-free
+        // slot, so recurse as free.
+        const QVariant payload = var.sig.isEmpty() ? toDbusVariantImpl(var.propValue(), false)
+                                                   : marshalBySignature(var.sig, var.propValue());
+        if (nested)
+            return payload; // the enclosing container provides the "v"
+        return QVariant::fromValue(QDBusVariant(payload));
     }
 
     return v;
+}
+
+QVariant toDbusVariant(const QVariant &v) {
+    return toDbusVariantImpl(v, false);
 }
 
 // ==================== Signature-driven marshaller ====================
