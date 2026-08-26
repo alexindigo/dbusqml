@@ -88,11 +88,16 @@ class Variant {
 public:
     explicit Variant() {}
     Q_INVOKABLE explicit Variant(const QJSValue &v) : value(v.toVariant()) {}
+    // Optional payload signature: new DBusQML.variant(value, "as") drives the
+    // variant payload's wire signature (empty = inference, unchanged).
+    Q_INVOKABLE Variant(const QJSValue &v, const QString &signature)
+        : value(v.toVariant()), sig(signature) {}
     Q_INVOKABLE QString toString() const { return value.variant().toString(); }
     operator QVariant() const { return value.variant(); }
     QVariant propValue() const { return value.variant(); }
     void setPropValue(const QVariant &v) { value = QDBusVariant(v); }
     QDBusVariant value;
+    QString sig;
 };
 
 class Bytes {

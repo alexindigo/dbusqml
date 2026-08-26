@@ -170,6 +170,14 @@ private slots:
     void testDeferredTeardown();
     void testDeferredOnceOnly();
     void testHoldReplyOutsideDispatch();
+
+    void testVariantTypedPayloadStringArray();
+    void testVariantTypedPayloadBytes();
+    void testVariantTypedPayloadStructEquivalence();
+    void testVariantTypedPayloadUnproducibleWarns();
+    void testVariantTypedPayloadNoSigUnchanged();
+    void testVariantTypedPayloadFileChooserAcceptance();
+    void testVariantTypedPayloadListInference();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -1267,6 +1275,281 @@ void TestDBusAdaptor::testHoldReplyOutsideDispatch() {
     QVERIFY(adaptor != nullptr);
     QCOMPARE(adaptor->property("grabbedNull").toBool(), true);
     delete adaptor;
+}
+
+// ==================== Typed variant payloads ====================
+//
+// DBus.variant(value, signature) must drive the variant payload's wire
+// signature. These tests assert the payload TYPE and wire signature, not
+// eyeballed output.
+
+// Extract one key's variant payload from a top-level a{sv} reply argument,
+// demarshaled as a raw QVariant (NOT flattened through unwrapDbus, which
+// would collapse QStringList "as" into QVariantList).
+static QVariant mapValueRawArg(const QVariant &arg, const QString &key) {
+    QVariant val;
+    if (arg.userType() == qMetaTypeId<QVariantMap>()) {
+        val = arg.toMap().value(key);
+    } else {
+        const QDBusArgument map = arg.value<QDBusArgument>();
+        map.beginMap();
+        while (!map.atEnd()) {
+            map.beginMapEntry();
+            QString k;
+            map >> k;
+            QDBusVariant v;
+            map >> v;
+            if (k == key)
+                val = v.variant();
+            map.endMapEntry();
+        }
+        map.endMap();
+    }
+    if (val.userType() == qMetaTypeId<QDBusVariant>())
+        val = val.value<QDBusVariant>().variant();
+    return val;
+}
+
+static QVariant mapValueRaw(const QDBusMessage &reply, const QString &key) {
+    return mapValueRawArg(reply.arguments().first(), key);
+}
+
+// Map a demarshaled payload back to its D-Bus signature, for wire-literal
+// assertions. QStringList -> as, QVariantList -> av, QByteArray -> ay, and a
+// QDBusArgument (structs/other) carries its own currentSignature().
+static QString payloadSignature(const QVariant &payload) {
+    if (payload.userType() == qMetaTypeId<QStringList>())
+        return QStringLiteral("as");
+    if (payload.userType() == qMetaTypeId<QVariantList>())
+        return QStringLiteral("av");
+    if (payload.userType() == qMetaTypeId<QByteArray>())
+        return QStringLiteral("ay");
+    if (payload.userType() == qMetaTypeId<QDBusArgument>())
+        return payload.value<QDBusArgument>().currentSignature();
+    return QString::fromLatin1(payload.typeName());
+}
+
+// V1 — the FileChooser uris case verbatim: a{sv} value variant(paths,"as")
+// must demarshal as a real string list with wire payload signature "as".
+void TestDBusAdaptor::testVariantTypedPayloadStringArray() {
+    QDBusMessage reply =
+        callQmlAdaptorMethod(QStringLiteral("org.dbusqml.VTypedAs"), QStringLiteral("/VTypedAs"),
+                             QStringLiteral("org.dbusqml.VTypedAs"), QStringLiteral("readAll"), {},
+                             "import DBus 1.0\n"
+                             "import DBus 1.0 as DBusQML\n"
+                             "DBusAdaptor {\n"
+                             "  service: 'org.dbusqml.VTypedAs'\n"
+                             "  path: '/VTypedAs'\n"
+                             "  iface: 'org.dbusqml.VTypedAs'\n"
+                             "  function readAll() {\n"
+                             "    return { uris: new DBusQML.variant(['file:///tmp/x'], 'as') }\n"
+                             "  }\n"
+                             "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sv}"));
+    const QVariant payload = mapValueRaw(reply, QStringLiteral("uris"));
+    QCOMPARE(payloadSignature(payload), QStringLiteral("as"));
+    QCOMPARE(payload.userType(), qMetaTypeId<QStringList>());
+    QCOMPARE(payload.toStringList(), QStringList{QStringLiteral("file:///tmp/x")});
+}
+
+// V2 — variant(value, "ay") produces a byte-array payload.
+void TestDBusAdaptor::testVariantTypedPayloadBytes() {
+    QDBusMessage reply =
+        callQmlAdaptorMethod(QStringLiteral("org.dbusqml.VTypedAy"), QStringLiteral("/VTypedAy"),
+                             QStringLiteral("org.dbusqml.VTypedAy"), QStringLiteral("readAll"), {},
+                             "import DBus 1.0\n"
+                             "import DBus 1.0 as DBusQML\n"
+                             "DBusAdaptor {\n"
+                             "  service: 'org.dbusqml.VTypedAy'\n"
+                             "  path: '/VTypedAy'\n"
+                             "  iface: 'org.dbusqml.VTypedAy'\n"
+                             "  function readAll() {\n"
+                             "    return { data: new DBusQML.variant('hello', 'ay') }\n"
+                             "  }\n"
+                             "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sv}"));
+    const QVariant payload = mapValueRaw(reply, QStringLiteral("data"));
+    QCOMPARE(payloadSignature(payload), QStringLiteral("ay"));
+    QCOMPARE(payload.userType(), qMetaTypeId<QByteArray>());
+    QCOMPARE(payload.toByteArray(), QByteArray("hello"));
+}
+
+// V3 — variant([0.1,0.2,0.3], "(ddd)") is wire-equivalent to
+// variant(struct_([0.1,0.2,0.3])): both v((ddd)), same payload.
+void TestDBusAdaptor::testVariantTypedPayloadStructEquivalence() {
+    QDBusMessage replyA = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.VTypedStructA"), QStringLiteral("/VTypedStructA"),
+        QStringLiteral("org.dbusqml.VTypedStructA"), QStringLiteral("get"), {},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.VTypedStructA'\n"
+        "  path: '/VTypedStructA'\n"
+        "  iface: 'org.dbusqml.VTypedStructA'\n"
+        "  function get() {\n"
+        "    return new DBusQML.variant([0.1, 0.2, 0.3], '(ddd)')\n"
+        "  }\n"
+        "}");
+    QDBusMessage replyB = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.VTypedStructB"), QStringLiteral("/VTypedStructB"),
+        QStringLiteral("org.dbusqml.VTypedStructB"), QStringLiteral("get"), {},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.VTypedStructB'\n"
+        "  path: '/VTypedStructB'\n"
+        "  iface: 'org.dbusqml.VTypedStructB'\n"
+        "  function get() {\n"
+        "    return new DBusQML.variant(new DBusQML.struct_([0.1, 0.2, 0.3]))\n"
+        "  }\n"
+        "}");
+    QCOMPARE(replyA.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(replyB.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(replyA.signature(), QStringLiteral("v"));
+    QCOMPARE(replyB.signature(), QStringLiteral("v"));
+
+    QVariant pa = replyA.arguments().first().value<QDBusVariant>().variant();
+    QVariant pb = replyB.arguments().first().value<QDBusVariant>().variant();
+    QCOMPARE(payloadSignature(pa), QStringLiteral("(ddd)"));
+    QCOMPARE(payloadSignature(pb), QStringLiteral("(ddd)"));
+    QCOMPARE(unwrapDbus(pa).toList(), unwrapDbus(pb).toList());
+}
+
+// V4 — variant(x, "a(ii)") is an unproducible boundary: warn + fall back to
+// inference, never a silent wrong type or a dropped connection.
+void TestDBusAdaptor::testVariantTypedPayloadUnproducibleWarns() {
+    QTest::ignoreMessage(
+        QtWarningMsg,
+        QRegularExpression(QStringLiteral("dbusqml: cannot produce declared signature a\\(ii\\)")));
+    QDBusMessage reply =
+        callQmlAdaptorMethod(QStringLiteral("org.dbusqml.VTypedBad"), QStringLiteral("/VTypedBad"),
+                             QStringLiteral("org.dbusqml.VTypedBad"), QStringLiteral("get"), {},
+                             "import DBus 1.0\n"
+                             "import DBus 1.0 as DBusQML\n"
+                             "DBusAdaptor {\n"
+                             "  service: 'org.dbusqml.VTypedBad'\n"
+                             "  path: '/VTypedBad'\n"
+                             "  iface: 'org.dbusqml.VTypedBad'\n"
+                             "  function get() {\n"
+                             "    return new DBusQML.variant([1, 2], 'a(ii)')\n"
+                             "  }\n"
+                             "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("v"));
+    const QVariant payload = reply.arguments().first().value<QDBusVariant>().variant();
+    QCOMPARE(payloadSignature(payload), QStringLiteral("av"));
+}
+
+// V5 — no-signature variant(value) is unchanged: payload still inferred (av).
+void TestDBusAdaptor::testVariantTypedPayloadNoSigUnchanged() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.VTypedNoSig"), QStringLiteral("/VTypedNoSig"),
+        QStringLiteral("org.dbusqml.VTypedNoSig"), QStringLiteral("readAll"), {},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.VTypedNoSig'\n"
+        "  path: '/VTypedNoSig'\n"
+        "  iface: 'org.dbusqml.VTypedNoSig'\n"
+        "  function readAll() {\n"
+        "    return { uris: new DBusQML.variant(['file:///tmp/x']) }\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sv}"));
+    const QVariant payload = mapValueRaw(reply, QStringLiteral("uris"));
+    QCOMPARE(payloadSignature(payload), QStringLiteral("av"));
+}
+
+// V6 — the FileChooser acceptance example verbatim: multi-out reply
+// [0, { uris: variant(paths,"as") }] against the bundled FileChooser catalog
+// must be literal ua{sv} with a uris payload of wire signature "as".
+void TestDBusAdaptor::testVariantTypedPayloadFileChooserAcceptance() {
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "import DBus 1.0 as DBusQML\n"
+                         "import QtQml 2.15\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.VTypedFC'\n"
+                         "  path: '/VTypedFC'\n"
+                         "  iface: 'org.freedesktop.impl.portal.FileChooser'\n"
+                         "  property var held: null\n"
+                         "  function openFile(handle, appId, parentWindow, title, options) {\n"
+                         "    held = holdReply()\n"
+                         "    var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: "
+                         "300; running: true; repeat: false }', this)\n"
+                         "    t.triggered.connect(function() { held.send([0, { uris: new "
+                         "DBusQML.variant(['file:///tmp/x'], 'as') }]) })\n"
+                         "  }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.VTypedFC"), QStringLiteral("/VTypedFC"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+
+    QVERIFY(!watcher->isError());
+    const QDBusMessage reply = watcher->reply();
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("ua{sv}"));
+    const QVariantList args = reply.arguments();
+    QCOMPARE(args.size(), 2);
+    QCOMPARE(args.at(0).toUInt(), 0u);
+    const QVariant payload = mapValueRawArg(args.at(1), QStringLiteral("uris"));
+    QCOMPARE(payloadSignature(payload), QStringLiteral("as"));
+    QCOMPARE(payload.userType(), qMetaTypeId<QStringList>());
+    QCOMPARE(payload.toStringList(), QStringList{QStringLiteral("file:///tmp/x")});
+
+    delete watcher;
+    delete adaptor;
+}
+
+// V7 — a gadget in a plain list position with no declared signature: the
+// QVariantList recursion in toDbusVariant must convert it (inference path).
+void TestDBusAdaptor::testVariantTypedPayloadListInference() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.VTypedList"), QStringLiteral("/VTypedList"),
+        QStringLiteral("org.dbusqml.VTypedList"), QStringLiteral("get"), {},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.VTypedList'\n"
+        "  path: '/VTypedList'\n"
+        "  iface: 'org.dbusqml.VTypedList'\n"
+        "  function get() {\n"
+        "    return [new DBusQML.variant('hello', 'ay')]\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("av"));
+
+    const QVariant arg = reply.arguments().first();
+    QVariant first;
+    if (arg.userType() == qMetaTypeId<QVariantList>()) {
+        const QVariantList list = arg.toList();
+        if (!list.isEmpty())
+            first = list.first();
+    } else {
+        const QDBusArgument arr = arg.value<QDBusArgument>();
+        arr.beginArray();
+        if (!arr.atEnd()) {
+            QDBusVariant v;
+            arr >> v;
+            first = v.variant();
+        }
+        arr.endArray();
+    }
+    if (first.userType() == qMetaTypeId<QDBusVariant>())
+        first = first.value<QDBusVariant>().variant();
+    QCOMPARE(payloadSignature(first), QStringLiteral("ay"));
+    QCOMPARE(first.userType(), qMetaTypeId<QByteArray>());
+    QCOMPARE(first.toByteArray(), QByteArray("hello"));
 }
 
 int main(int argc, char *argv[]) {

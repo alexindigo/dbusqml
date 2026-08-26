@@ -385,6 +385,16 @@ QVariant toDbusVariant(const QVariant &v) {
             it.value() = toDbusVariant(it.value());
         return QVariant::fromValue(m);
     }
+    // Plain QVariantList holding DBus.* gadget values (e.g. the multi-out
+    // reply [0, { uris: variant(...,"as") }]) — recurse into the elements for
+    // the same reason. QStringList is a distinct metatype and passes through
+    // untouched. Rebuild unconditionally (the 0.3.1 change-detection bug).
+    if (type == qMetaTypeId<QVariantList>()) {
+        QVariantList list = v.toList();
+        for (auto &e : list)
+            e = toDbusVariant(e);
+        return QVariant::fromValue(list);
+    }
     if (type == qMetaTypeId<DBus::Dict>()) {
         // Unwrap recursively: a Dict's QVariantMap may itself hold Dict /
         // Variant values (e.g. NetworkManager connection dicts a{sa{sv}}).
@@ -397,9 +407,16 @@ QVariant toDbusVariant(const QVariant &v) {
         return QVariant::fromValue(m);
     }
     if (type == qMetaTypeId<DBus::Variant>()) {
+        const DBus::Variant var = v.value<DBus::Variant>();
+        // Optional payload signature: marshal the payload against the declared
+        // signature via the shared engine (which loud-fails and falls back to
+        // inference for an unproducible shape). Empty signature = inference,
+        // unchanged from before.
+        if (!var.sig.isEmpty()) {
+            return QVariant::fromValue(QDBusVariant(marshalBySignature(var.sig, var.propValue())));
+        }
         // Recurse into the variant payload for the same reason.
-        return QVariant::fromValue(
-            QDBusVariant(toDbusVariant(v.value<DBus::Variant>().propValue())));
+        return QVariant::fromValue(QDBusVariant(toDbusVariant(var.propValue())));
     }
 
     return v;
