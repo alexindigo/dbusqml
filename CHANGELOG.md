@@ -30,6 +30,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a silent wrong type. Closes the variant-payload hole that made a plain QML
   `uris` array marshal as `av` and silently vanish inside xdg-desktop-portal.
 
+### Fixed
+
+- **Variant values nested in dicts/lists no longer double-wrap.** A
+  `DBusQML.variant(x)` inside an `a{sv}` dict or `av` list value previously
+  marshaled as `v(v(x))` (a nested variant) because the value carried its own
+  `QDBusVariant` on top of the container's `v`. GLib's concrete-type lookups —
+  the standard idiom `g_variant_lookup(vardict, "key", "as", …)` — silently
+  returned nothing for such values. Variant conversion is now slot-aware: a
+  variant in a variant-providing slot contributes its payload directly, while
+  `variant(variant(x))` still produces an explicit inner variant. Fixes 0.4.0
+  behavior.
+
 ## [0.4.0] — 2026-08-25
 
 ### Added

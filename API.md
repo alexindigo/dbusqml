@@ -529,6 +529,10 @@ Most examples don't need value types — plain JS strings/numbers/booleans work 
 | `DBus::Signature` | `signature` | D-Bus signature. |
 | `DBus::Dict` | `dict` | D-Bus dictionary (map). |
 | `DBus::Variant` | `variant` | D-Bus variant. Optional second argument declares the payload's wire signature — `DBusQML.variant(paths, "as")` produces a variant whose payload is an `as` string array (a plain JS array inside a variant infers `av`, which strict receivers such as xdg-desktop-portal reject for `uris`). Empty signature = inference. |
+
+A `variant` nested inside a dict or list value is the value's payload (the
+container supplies the `v`); `variant(variant(x))` produces an explicit inner
+variant.
 | `DBus::Bytes` | `bytes` | Byte array (`ay`). |
 | `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. Since 0.4.0 it works in every position — variant payloads, map/list values, signal args, call args. The outermost struct carries the wire signature; inner structs compose naturally. |
 
