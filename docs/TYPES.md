@@ -59,6 +59,8 @@ dbusqml ships descriptors for these interfaces:
 - `org.freedesktop.login1.Manager`
 - `org.freedesktop.portal.Settings`
 - `org.freedesktop.impl.portal.Settings`
+- `org.freedesktop.impl.portal.FileChooser`
+- `org.freedesktop.impl.portal.Request`
 - `org.freedesktop.portal.NetworkMonitor`
 - `org.freedesktop.UPower`
 - `org.freedesktop.NetworkManager`

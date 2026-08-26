@@ -4,6 +4,24 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0]
+
+### Added
+
+- **Deferred method replies (`holdReply()` + `DBusHeldReply`)** — a
+  `DBusAdaptor` handler can hold the D-Bus call open and answer later with
+  `reply.send(value)` / `reply.sendError(name, message)`. Explicit and
+  opt-in: the handler calls `holdReply()` synchronously during dispatch
+  (Qt's `QDBusContext::setDelayedReply` precedent). Deferred replies route
+  through the same reply tail as synchronous replies, so declared
+  out-signatures, error degradation, and multi-out splitting come for free.
+- **Bundled `org.freedesktop.impl.portal.FileChooser` type** — the backend
+  interface catalog (`OpenFile`/`SaveFile`/`SaveFiles`, each
+  `(o s s s a{sv}) → (u a{sv})`), so FileChooser backends serve correct
+  multi-out reply signatures with no per-app override.
+- **Bundled `org.freedesktop.impl.portal.Request` type** — the shared
+  `Close()` request interface.
+
 ## [0.4.0] — 2026-08-25
 
 ### Added

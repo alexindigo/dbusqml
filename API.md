@@ -325,6 +325,47 @@ warned about and skipped (signals have no error-reply channel).
 | Method | Arguments | Description |
 | :--- | :--- | :--- |
 | `emitSignal(name, args)` | `string name`, `list args` | Emit a D-Bus signal on this adaptor's path/interface. |
+| `holdReply()` | — | Defer the current method call; returns a `DBusHeldReply` (see below). |
+
+#### Deferred replies
+
+Interactive methods (file choosers, dialogs, screenshares) must hold the
+D-Bus call open and answer only when the user finishes. Call `holdReply()`
+synchronously inside the handler to mark the call as deferred; it returns a
+`DBusHeldReply` that settles the call later with `send(value)` or
+`sendError(name, message)`:
+
+```qml
+DBusAdaptor {
+    iface: "org.freedesktop.impl.portal.FileChooser"
+    function openFile(handle, appId, parentWindow, title, options) {
+        const reply = holdReply()
+        dialog.accepted.connect(paths => reply.send([0, { uris: toFileUris(paths) }]))
+        dialog.cancelled.connect(() => reply.send([1, {}]))
+    }
+}
+```
+
+`reply.send(value)` runs through the same reply tail as a synchronous
+`return`: declared multi-out signatures (FileChooser's `(u, a{sv})`) split
+automatically, and a bare `send()` sends an empty (void) reply.
+`sendError(name, message)` sends an error reply; a `name` without a `.` is
+treated as the message with the generic
+`org.freedesktop.DBus.Error.Failed` name.
+
+Caveats:
+
+- `holdReply()` is valid **only synchronously** during the handler — before
+  any event-loop spin. Outside dispatch it warns and returns `null`.
+- The handler's return value is ignored when `holdReply()` was called (a
+  warning is emitted if one is supplied).
+- Each `DBusHeldReply` settles **once**; a second `send()`/`sendError()`
+  warns and does nothing.
+- If the adaptor is destroyed while a reply is still held, the caller gets an
+  `org.freedesktop.DBus.Error.Failed` error reply instead of hanging.
+- There is no server-side timeout — the caller owns timeouts. (For
+  xdg-desktop-portal backends that means honoring the frontend's
+  `G_MAXINT`-timeout contract: the backend may hold indefinitely.)
 
 ---
 
