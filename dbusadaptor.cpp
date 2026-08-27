@@ -2,6 +2,7 @@
 #include "dbuscatalog.h"
 #include "dbusconnection.h"
 #include "dbusheldreply.h"
+#include "dbuspathdispatcher.h"
 #include "dbustypes.h"
 
 #include <QDBusArgument>
@@ -146,13 +147,7 @@ DBusAdaptor::~DBusAdaptor() {
         }
     }
 
-    QDBusConnection conn = bus();
-    conn.unregisterObject(m_path);
-    if (!m_service.isEmpty()) {
-        if (!conn.unregisterService(m_service)) {
-            qmlInfo(this) << "Failed to unregister service" << m_service;
-        }
-    }
+    DBusPathDispatcher::detach(bus(), m_path, m_service, this);
 }
 
 void DBusAdaptor::setService(const QString &v) {
@@ -202,15 +197,8 @@ void DBusAdaptor::componentComplete() {
             << "DBusAdaptor: iface is empty — introspection XML will have an empty interface name";
 
     QDBusConnection conn = bus();
-    if (!conn.registerVirtualObject(m_path, this)) {
-        qmlInfo(this) << "Failed to register object at" << m_path;
+    if (!DBusPathDispatcher::attach(conn, m_path, m_service, this))
         return;
-    }
-    if (!m_service.isEmpty()) {
-        if (!conn.registerService(m_service)) {
-            qmlInfo(this) << "Failed to register service" << m_service;
-        }
-    }
 
     // Auto-connect user-defined QML signals to D-Bus
     const QMetaObject *meta = metaObject();

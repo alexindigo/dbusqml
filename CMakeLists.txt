@@ -29,6 +29,8 @@ set(DBUSQML_SOURCES
     dbusheldreply.h
     dbusmessage.cpp
     dbusmessage.h
+    dbuspathdispatcher.cpp
+    dbuspathdispatcher.h
     dbus.cpp
     dbus.h
     dbusintrospection.cpp
@@ -181,6 +183,7 @@ if(BUILD_TEST_MODE)
         dbusheldreply.cpp
         dbusmessage.cpp
         dbusconnection.cpp
+        dbuspathdispatcher.cpp
         dbuspendingreply.cpp
         dbustypes.cpp
         dbusintrospection.cpp

@@ -56,6 +56,18 @@ private:
     QString m_testString;
 };
 
+// QVariant-typed method — the C++ dispatch path (invokeMethod) passes call args
+// as QVariant, so only QVariant-typed Q_INVOKABLEs/slots are wire-callable.
+class VariantEchoAdaptor : public DBusAdaptor {
+    Q_OBJECT
+
+public:
+    explicit VariantEchoAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+
+public slots:
+    QVariant echo(const QVariant &v) { return v; }
+};
+
 // C++ Q_INVOKABLE adaptor — exercises the declared-reply-signature hook on the
 // non-QML dispatch path (invokeMethod).
 class SignatureTestAdaptor : public DBusAdaptor {
@@ -181,6 +193,16 @@ private slots:
     void testVariantInMapSingleWrap();
     void testVariantNestedVariantExplicit();
     void testVariantStructMemberKeepsVariant();
+
+    // Multiple DBusAdaptor instances on the same path (M1–M9).
+    void testCoLocatedSamePath();
+    void testCoLocatedIntrospection();
+    void testCoLocatedPropertiesRouting();
+    void testCoLocatedTeardownPath();
+    void testCoLocatedTeardownService();
+    void testCoLocatedIfaceLessCall();
+    void testCoLocatedSeparateBuses();
+    void testCoLocatedDuplicateIface();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -1617,6 +1639,356 @@ void TestDBusAdaptor::testVariantStructMemberKeepsVariant() {
         "}");
     QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(reply.signature(), QStringLiteral("(ssv)"));
+}
+
+// ==================== Multiple adaptors on one path (M1–M9) ====================
+//
+// DESIGN.md promises "multiple DBusAdaptor instances with the same service and
+// path but different iface". The 0.5.0 implementation registers each adaptor as
+// its own virtual object, so only the first survives. M1–M6/M9 pin the fix;
+// M7/M8 are regression pins (separate buses; single-adaptor path through the
+// dispatcher).
+
+// M1 — the napkin repro verbatim: two adaptors, same service + path, ifaces A/B
+// (ping→"a", pong→"b"), each callable WITH the interface set in the call.
+void TestDBusAdaptor::testCoLocatedSamePath() {
+    QObject *a = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi1'\n"
+                                  "  path: '/Multi1'\n"
+                                  "  iface: 'org.dbusqml.IfaceA'\n"
+                                  "  function ping() { return 'a' }\n"
+                                  "}");
+    QVERIFY(a != nullptr);
+    QObject *b = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi1'\n"
+                                  "  path: '/Multi1'\n"
+                                  "  iface: 'org.dbusqml.IfaceB'\n"
+                                  "  function pong() { return 'b' }\n"
+                                  "}");
+    QVERIFY(b != nullptr);
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+
+    QDBusMessage ca = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi1"), QStringLiteral("/Multi1"),
+        QStringLiteral("org.dbusqml.IfaceA"), QStringLiteral("ping"));
+    QDBusMessage ra = bus.call(ca, QDBus::Block, 3000);
+    QCOMPARE(ra.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(ra.arguments().first().toString(), QStringLiteral("a"));
+
+    QDBusMessage cb = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi1"), QStringLiteral("/Multi1"),
+        QStringLiteral("org.dbusqml.IfaceB"), QStringLiteral("pong"));
+    QDBusMessage rb = bus.call(cb, QDBus::Block, 3000);
+    QCOMPARE(rb.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(rb.arguments().first().toString(), QStringLiteral("b"));
+
+    delete a;
+    delete b;
+}
+
+// M2 — merged introspection: Introspect on the shared path returns XML with
+// BOTH <interface> blocks (wire-literal string asserts).
+void TestDBusAdaptor::testCoLocatedIntrospection() {
+    QObject *a = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi2'\n"
+                                  "  path: '/Multi2'\n"
+                                  "  iface: 'org.dbusqml.IfaceA'\n"
+                                  "  function ping() { return 'a' }\n"
+                                  "}");
+    QVERIFY(a != nullptr);
+    QObject *b = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi2'\n"
+                                  "  path: '/Multi2'\n"
+                                  "  iface: 'org.dbusqml.IfaceB'\n"
+                                  "  function pong() { return 'b' }\n"
+                                  "}");
+    QVERIFY(b != nullptr);
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi2"), QStringLiteral("/Multi2"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"));
+    QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(!reply.arguments().isEmpty());
+    const QString xml = reply.arguments().first().toString();
+    QVERIFY2(xml.contains(QStringLiteral("org.dbusqml.IfaceA")), qPrintable(xml));
+    QVERIFY2(xml.contains(QStringLiteral("org.dbusqml.IfaceB")), qPrintable(xml));
+
+    delete a;
+    delete b;
+}
+
+// M3 — properties route by the interface ARGUMENT: GetAll("IfaceA") returns only
+// A's properties, GetAll("IfaceB") only B's.
+void TestDBusAdaptor::testCoLocatedPropertiesRouting() {
+    QObject *a = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi3'\n"
+                                  "  path: '/Multi3'\n"
+                                  "  iface: 'org.dbusqml.IfaceA'\n"
+                                  "  property int alpha: 1\n"
+                                  "}");
+    QVERIFY(a != nullptr);
+    QObject *b = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi3'\n"
+                                  "  path: '/Multi3'\n"
+                                  "  iface: 'org.dbusqml.IfaceB'\n"
+                                  "  property int beta: 2\n"
+                                  "}");
+    QVERIFY(b != nullptr);
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+
+    QDBusMessage ga = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi3"), QStringLiteral("/Multi3"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("GetAll"));
+    ga.setArguments({QStringLiteral("org.dbusqml.IfaceA")});
+    QDBusMessage ra = bus.call(ga, QDBus::Block, 3000);
+    QCOMPARE(ra.type(), QDBusMessage::ReplyMessage);
+    const QVariantMap pa = unwrapDbus(ra.arguments().first()).toMap();
+    QVERIFY(pa.contains(QStringLiteral("alpha")));
+    QVERIFY(!pa.contains(QStringLiteral("beta")));
+
+    QDBusMessage gb = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi3"), QStringLiteral("/Multi3"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("GetAll"));
+    gb.setArguments({QStringLiteral("org.dbusqml.IfaceB")});
+    QDBusMessage rb = bus.call(gb, QDBus::Block, 3000);
+    QCOMPARE(rb.type(), QDBusMessage::ReplyMessage);
+    const QVariantMap pb = unwrapDbus(rb.arguments().first()).toMap();
+    QVERIFY(pb.contains(QStringLiteral("beta")));
+    QVERIFY(!pb.contains(QStringLiteral("alpha")));
+
+    delete a;
+    delete b;
+}
+
+// M4 — teardown order (path half): destroy A, B still answers and the path
+// stays registered; destroy B, the path unregisters (call errors, no hang).
+void TestDBusAdaptor::testCoLocatedTeardownPath() {
+    QObject *a = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi4'\n"
+                                  "  path: '/Multi4'\n"
+                                  "  iface: 'org.dbusqml.IfaceA'\n"
+                                  "  function ping() { return 'a' }\n"
+                                  "}");
+    QVERIFY(a != nullptr);
+    QObject *b = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi4'\n"
+                                  "  path: '/Multi4'\n"
+                                  "  iface: 'org.dbusqml.IfaceB'\n"
+                                  "  function pong() { return 'b' }\n"
+                                  "}");
+    QVERIFY(b != nullptr);
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+
+    delete a;
+
+    QDBusMessage cb = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi4"), QStringLiteral("/Multi4"),
+        QStringLiteral("org.dbusqml.IfaceB"), QStringLiteral("pong"));
+    QDBusMessage rb = bus.call(cb, QDBus::Block, 3000);
+    QCOMPARE(rb.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(rb.arguments().first().toString(), QStringLiteral("b"));
+
+    delete b;
+
+    QDBusMessage c2 = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi4"), QStringLiteral("/Multi4"),
+        QStringLiteral("org.dbusqml.IfaceB"), QStringLiteral("pong"));
+    QDBusMessage r2 = bus.call(c2, QDBus::Block, 3000);
+    QCOMPARE(r2.type(), QDBusMessage::ErrorMessage);
+    QVERIFY2(r2.errorName().contains(QStringLiteral("Unknown")), qPrintable(r2.errorName()));
+}
+
+// M5 — teardown order (service half): A and B share a service name; destroy A,
+// the NAME is still owned and B answers via it; destroy B, the name releases.
+void TestDBusAdaptor::testCoLocatedTeardownService() {
+    QObject *a = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi5'\n"
+                                  "  path: '/Multi5'\n"
+                                  "  iface: 'org.dbusqml.IfaceA'\n"
+                                  "  function ping() { return 'a' }\n"
+                                  "}");
+    QVERIFY(a != nullptr);
+    QObject *b = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi5'\n"
+                                  "  path: '/Multi5'\n"
+                                  "  iface: 'org.dbusqml.IfaceB'\n"
+                                  "  function pong() { return 'b' }\n"
+                                  "}");
+    QVERIFY(b != nullptr);
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.Multi5")));
+
+    delete a;
+
+    QVERIFY(bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.Multi5")));
+    QDBusMessage cb = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi5"), QStringLiteral("/Multi5"),
+        QStringLiteral("org.dbusqml.IfaceB"), QStringLiteral("pong"));
+    QDBusMessage rb = bus.call(cb, QDBus::Block, 3000);
+    QCOMPARE(rb.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(rb.arguments().first().toString(), QStringLiteral("b"));
+
+    delete b;
+
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.Multi5")), 3000);
+}
+
+// M6 — iface-less call (D-Bus allows empty interface): routes by member name
+// across attached adaptors in attach order.
+void TestDBusAdaptor::testCoLocatedIfaceLessCall() {
+    QObject *a = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi6'\n"
+                                  "  path: '/Multi6'\n"
+                                  "  iface: 'org.dbusqml.IfaceA'\n"
+                                  "  function ping() { return 'a' }\n"
+                                  "}");
+    QVERIFY(a != nullptr);
+    QObject *b = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi6'\n"
+                                  "  path: '/Multi6'\n"
+                                  "  iface: 'org.dbusqml.IfaceB'\n"
+                                  "  function pong() { return 'b' }\n"
+                                  "}");
+    QVERIFY(b != nullptr);
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+
+    QDBusMessage c1 = QDBusMessage::createMethodCall(QStringLiteral("org.dbusqml.Multi6"),
+                                                     QStringLiteral("/Multi6"), QString(),
+                                                     QStringLiteral("ping"));
+    QDBusMessage r1 = bus.call(c1, QDBus::Block, 3000);
+    QCOMPARE(r1.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r1.arguments().first().toString(), QStringLiteral("a"));
+
+    QDBusMessage c2 = QDBusMessage::createMethodCall(QStringLiteral("org.dbusqml.Multi6"),
+                                                     QStringLiteral("/Multi6"), QString(),
+                                                     QStringLiteral("pong"));
+    QDBusMessage r2 = bus.call(c2, QDBus::Block, 3000);
+    QCOMPARE(r2.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r2.arguments().first().toString(), QStringLiteral("b"));
+
+    delete a;
+    delete b;
+}
+
+// M7 — regression pin, separate buses: the same path on the session bus and a
+// custom connectToBus connection do NOT share a dispatcher (registry key is
+// (connection name, path)).
+void TestDBusAdaptor::testCoLocatedSeparateBuses() {
+    auto *session = new VariantEchoAdaptor;
+    session->setService(QStringLiteral("org.dbusqml.Multi7Sess"));
+    session->setPath(QStringLiteral("/Multi7"));
+    session->setIface(QStringLiteral("org.dbusqml.Multi7Sess"));
+    session->classBegin();
+    session->componentComplete();
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *custom = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(custom != nullptr);
+
+    auto *other = new VariantEchoAdaptor;
+    other->setService(QStringLiteral("org.dbusqml.Multi7Cust"));
+    other->setPath(QStringLiteral("/Multi7"));
+    other->setIface(QStringLiteral("org.dbusqml.Multi7Cust"));
+    other->setConnection(custom);
+    other->classBegin();
+    other->componentComplete();
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+
+    // Both services are owned — the registry did not conflate the two
+    // connections (a path-only key would skip the custom connection's
+    // registration and leave its service unserved).
+    QVERIFY(bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.Multi7Sess")));
+    QVERIFY(bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.Multi7Cust")));
+
+    QDBusMessage c1 = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi7Sess"), QStringLiteral("/Multi7"),
+        QStringLiteral("org.dbusqml.Multi7Sess"), QStringLiteral("echo"));
+    c1.setArguments({42});
+    QDBusMessage r1 = bus.call(c1, QDBus::Block, 3000);
+    QCOMPARE(r1.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r1.arguments().first().toInt(), 42);
+
+    // The custom-connection adaptor answers via an async call — a same-thread
+    // blocking call would not pump the custom connection's socket.
+    QDBusMessage c2 = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi7Cust"), QStringLiteral("/Multi7"),
+        QStringLiteral("org.dbusqml.Multi7Cust"), QStringLiteral("echo"));
+    c2.setArguments({43});
+    QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(bus.asyncCall(c2));
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QVERIFY(!watcher->isError());
+    QCOMPARE(watcher->reply().type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(watcher->reply().arguments().first().toInt(), 43);
+
+    delete watcher;
+    delete session;
+    delete other;
+    delete custom;
+}
+
+// M9 — duplicate iface at one path: qWarning observed at attach, first-attached
+// wins for iface-scoped calls, no crash.
+void TestDBusAdaptor::testCoLocatedDuplicateIface() {
+    QObject *a = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi9'\n"
+                                  "  path: '/Multi9'\n"
+                                  "  iface: 'org.dbusqml.DupIface'\n"
+                                  "  function first() { return 'a' }\n"
+                                  "}");
+    QVERIFY(a != nullptr);
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
+                                           "duplicate iface org\\.dbusqml\\.DupIface")));
+    QObject *b = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.Multi9'\n"
+                                  "  path: '/Multi9'\n"
+                                  "  iface: 'org.dbusqml.DupIface'\n"
+                                  "  function second() { return 'b' }\n"
+                                  "}");
+    QVERIFY(b != nullptr);
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+
+    QDBusMessage c1 = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi9"), QStringLiteral("/Multi9"),
+        QStringLiteral("org.dbusqml.DupIface"), QStringLiteral("first"));
+    QDBusMessage r1 = bus.call(c1, QDBus::Block, 3000);
+    QCOMPARE(r1.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r1.arguments().first().toString(), QStringLiteral("a"));
+
+    // First-attached wins: the second adaptor's member is shadowed for
+    // iface-scoped calls.
+    QDBusMessage c2 = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Multi9"), QStringLiteral("/Multi9"),
+        QStringLiteral("org.dbusqml.DupIface"), QStringLiteral("second"));
+    QDBusMessage r2 = bus.call(c2, QDBus::Block, 3000);
+    QCOMPARE(r2.type(), QDBusMessage::ErrorMessage);
+
+    delete a;
+    delete b;
 }
 
 int main(int argc, char *argv[]) {
