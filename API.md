@@ -373,6 +373,44 @@ Caveats:
   (`sendWithReplyLocal`) and reports `local-loop message cannot have delayed
   replies`. Use a separate connection when a process calls its own adaptor.
 
+#### Multiple interfaces on one path
+
+A D-Bus object path can serve several interfaces from separate `DBusAdaptor`
+instances that share the same `service` and `path` but differ in `iface` — the
+standard multi-interface D-Bus shape every real service has. Co-located
+adaptors share the path registration and the service name:
+
+```qml
+DBusAdaptor {
+    service: "org.freedesktop.impl.portal.MyShell"
+    path: "/org/freedesktop/portal/desktop"
+    iface: "org.freedesktop.impl.portal.Settings"
+    function readOne(ns, key) { /* ... */ }
+}
+DBusAdaptor {
+    service: "org.freedesktop.impl.portal.MyShell"
+    path: "/org/freedesktop/portal/desktop"
+    iface: "org.freedesktop.impl.portal.FileChooser"
+    function openFile(handle, appId, parentWindow, title, options) { /* ... */ }
+}
+```
+
+Routing:
+
+- **Interface-scoped calls** route to the adaptor whose `iface` matches the
+  message's interface. A duplicate `iface` on one path warns at load time and
+  the first-attached adaptor wins.
+- **`Properties.Get/GetAll/Set`** route by the interface *argument*, so
+  `GetAll("…Settings")` returns only the Settings adaptor's properties.
+- **Empty-interface calls** (which D-Bus allows) route by member name across
+  the attached adaptors in attach order.
+- **Introspection** of a shared path merges every attached adaptor's interface
+  block, so callers see all interfaces at once.
+
+Destroying any co-located adaptor leaves the path and the service name
+registered for the survivors; only the last adaptor to be destroyed releases
+them.
+
 ---
 
 ## Shape Selection

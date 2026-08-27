@@ -4,6 +4,22 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-08-27
+
+### Fixed
+
+- **Multiple `DBusAdaptor` instances can now serve the same path.** Two or more
+  adaptors that share a `service` and `path` but differ in `iface` (the
+  standard multi-interface D-Bus shape, e.g. serving
+  `org.freedesktop.impl.portal.Settings` and
+  `org.freedesktop.impl.portal.FileChooser` together at
+  `/org/freedesktop/portal/desktop`) now register, serve, and introspect
+  correctly. Co-located adaptors share path registration through an internal
+  dispatcher, and share the service name through a reference count, so
+  destroying one adaptor no longer drops the shared path or service name for
+  the survivors. Introspection of a shared path merges every attached
+  adaptor's interface block.
+
 ## [0.5.0] — 2026-08-25
 
 ### Added
