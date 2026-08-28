@@ -80,6 +80,7 @@ private:
     QString m_iface;
     QPointer<DBusConnection> m_conn;
     QVariantMap m_signatures;
+    bool m_attached = false;
 
     // Dispatch context for holdReply(): the in-flight call's message,
     // connection, and member name. Set around the handler invocation, cleared

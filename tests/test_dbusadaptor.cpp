@@ -203,6 +203,10 @@ private slots:
     void testCoLocatedIfaceLessCall();
     void testCoLocatedSeparateBuses();
     void testCoLocatedDuplicateIface();
+
+    // Attach guard (G1, G2).
+    void testAttachGuardServiceTheft();
+    void testAttachGuardRegistryHygiene();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -1989,6 +1993,103 @@ void TestDBusAdaptor::testCoLocatedDuplicateIface() {
 
     delete a;
     delete b;
+}
+
+// ==================== Attach guard (G1, G2) ====================
+//
+// A failed path registration (foreign object already at the path) must not
+// poison the service-name refcount: the adaptor never took the claim, so its
+// destructor must not release it (that would steal a shared service name from
+// healthy adaptors — the exact bug class 0.5.1 fixed, resurrected via the
+// failure path).
+
+// G1 — the reproduction: healthy A (path /P1, service S), a foreign plain
+// object at /P2, adaptor C (path /P2, service S) whose attach fails; destroy
+// C → S must stay registered and A must still answer; destroy A → S released.
+void TestDBusAdaptor::testAttachGuardServiceTheft() {
+    QDBusConnection bus = QDBusConnection::sessionBus();
+
+    auto *a = new VariantEchoAdaptor;
+    a->setService(QStringLiteral("org.dbusqml.AttachGuard"));
+    a->setPath(QStringLiteral("/AttachGuardP1"));
+    a->setIface(QStringLiteral("org.dbusqml.AttachGuardA"));
+    a->classBegin();
+    a->componentComplete();
+
+    QObject foreign;
+    QVERIFY(bus.registerObject(QStringLiteral("/AttachGuardP2"), &foreign));
+
+    QTest::ignoreMessage(QtInfoMsg,
+                         QRegularExpression(QStringLiteral("Failed to register object")));
+    QObject *c = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.AttachGuard'\n"
+                                  "  path: '/AttachGuardP2'\n"
+                                  "  iface: 'org.dbusqml.AttachGuardC'\n"
+                                  "  function pingC() { return 'c' }\n"
+                                  "}");
+    QVERIFY(c != nullptr);
+
+    // Destroy C — must NOT release the shared service name.
+    delete c;
+
+    QVERIFY(bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.AttachGuard")));
+
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.AttachGuard"), QStringLiteral("/AttachGuardP1"),
+        QStringLiteral("org.dbusqml.AttachGuardA"), QStringLiteral("echo"));
+    m.setArguments({42});
+    QDBusMessage r = bus.call(m, QDBus::Block, 3000);
+    QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r.arguments().first().toInt(), 42);
+
+    bus.unregisterObject(QStringLiteral("/AttachGuardP2"));
+    delete a;
+
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.AttachGuard")), 3000);
+}
+
+// G2 — registry hygiene after a failed attach: after C's failed attach and
+// destruction, unregister the foreign object; a new adaptor at /P2 attaches
+// and serves normally (no stale registry entry, no leaked dispatcher).
+void TestDBusAdaptor::testAttachGuardRegistryHygiene() {
+    QDBusConnection bus = QDBusConnection::sessionBus();
+
+    QObject foreign;
+    QVERIFY(bus.registerObject(QStringLiteral("/AttachGuardP2"), &foreign));
+
+    QTest::ignoreMessage(QtInfoMsg,
+                         QRegularExpression(QStringLiteral("Failed to register object")));
+    QObject *c = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.AttachGuardHygiene'\n"
+                                  "  path: '/AttachGuardP2'\n"
+                                  "  iface: 'org.dbusqml.AttachGuardHygiene'\n"
+                                  "  function pingC() { return 'c' }\n"
+                                  "}");
+    QVERIFY(c != nullptr);
+    delete c;
+
+    bus.unregisterObject(QStringLiteral("/AttachGuardP2"));
+
+    QObject *d = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.AttachGuardHygiene'\n"
+                                  "  path: '/AttachGuardP2'\n"
+                                  "  iface: 'org.dbusqml.AttachGuardHygiene'\n"
+                                  "  function pingD() { return 'd' }\n"
+                                  "}");
+    QVERIFY(d != nullptr);
+
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.AttachGuardHygiene"), QStringLiteral("/AttachGuardP2"),
+        QStringLiteral("org.dbusqml.AttachGuardHygiene"), QStringLiteral("pingD"));
+    QDBusMessage r = bus.call(m, QDBus::Block, 3000);
+    QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r.arguments().first().toString(), QStringLiteral("d"));
+
+    delete d;
 }
 
 int main(int argc, char *argv[]) {

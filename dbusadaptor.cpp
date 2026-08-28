@@ -147,7 +147,8 @@ DBusAdaptor::~DBusAdaptor() {
         }
     }
 
-    DBusPathDispatcher::detach(bus(), m_path, m_service, this);
+    if (m_attached)
+        DBusPathDispatcher::detach(bus(), m_path, m_service, this);
 }
 
 void DBusAdaptor::setService(const QString &v) {
@@ -197,7 +198,8 @@ void DBusAdaptor::componentComplete() {
             << "DBusAdaptor: iface is empty — introspection XML will have an empty interface name";
 
     QDBusConnection conn = bus();
-    if (!DBusPathDispatcher::attach(conn, m_path, m_service, this))
+    m_attached = DBusPathDispatcher::attach(conn, m_path, m_service, this);
+    if (!m_attached)
         return;
 
     // Auto-connect user-defined QML signals to D-Bus
