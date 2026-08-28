@@ -4,6 +4,29 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] — 2026-08-28
+
+### Fixed
+
+- **`Properties.Get`/`GetAll` no longer abort the process on non-marshalable
+  property values** (remotely triggerable via routine introspection —
+  `busctl introspect` populates property values through `GetAll`). A property
+  whose value has no D-Bus wire signature (e.g. a QML `var` holding a
+  `QObject*`) now produces an `InvalidArgs` error reply on `Get` and is
+  skipped (with a warning) in `GetAll`, instead of killing the hosting
+  process inside QtDBus container writing. Gadget-valued properties
+  (`DBusQML.variant`/`bytes`/`struct_`) now marshal correctly through the
+  library's slot-aware conversion — served as a single-wrapped `v` with the
+  gadget's payload rather than skipped — and `generateXml` no longer
+  advertises properties it could never serve (`QObject*`-derived).
+- **A failed path registration no longer releases a shared service name.** An
+  adaptor whose `registerVirtualObject` failed (a foreign object already
+  occupied its path) never took the service-name reference, but its destructor
+  still ran the detach path and could decrement another adaptor's
+  `(connection, service)` claim to zero — silently stealing the bus name from
+  a healthy, still-serving adaptor. The destructor now only detaches
+  registrations that were actually attached.
+
 ## [0.5.1] — 2026-08-27
 
 ### Fixed
@@ -19,6 +42,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   destroying one adaptor no longer drops the shared path or service name for
   the survivors. Introspection of a shared path merges every attached
   adaptor's interface block.
+
+### Changed (documented retroactively in 0.5.2)
+
+- **Method calls that carry an interface name now route only to an adaptor
+  declaring that interface** — the multi-adaptor dispatcher routes
+  interface-scoped calls by interface match (and `Properties.Get/GetAll/Set`
+  by the interface argument), whereas interface-less calls keep the
+  member-name dispatch across adaptors. On 0.5.0 a single adaptor served
+  members of *several* interfaces by ignoring the message interface; that
+  workaround must be split into co-located adaptors (the pattern 0.5.1
+  enables), or its foreign-interface members become unreachable when called
+  with the interface name set.
 
 ## [0.5.0] — 2026-08-25
 

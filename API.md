@@ -318,7 +318,17 @@ literal, with no override needed.
 **Robustness:** a method return value that cannot be marshaled (e.g. a
 returned JS function) produces a D-Bus `org.freedesktop.DBus.Error.Failed`
 error reply — never a dropped bus connection. An unmarshalable signal arg is
-warned about and skipped (signals have no error-reply channel).
+warned about and skipped (signals have no error-reply channel). The same
+guard covers **properties** (0.5.2+): a property whose value cannot be
+marshaled (e.g. a `var` holding a `QObject*`, such as a stashed
+`DBusHeldReply`) produces `InvalidArgs` on `Properties.Get` and is skipped
+with a warning in `GetAll` — never an aborted process (before 0.5.2 such a
+value killed the hosting process inside QtDBus marshaling, remotely
+triggerable via routine introspection). Gadget-valued properties
+(`DBusQML.variant`/`bytes`/`struct_`) marshal like method replies do — served
+as a single-wrapped `v` carrying the gadget's payload — and properties with
+no possible D-Bus representation (`QObject*`-derived) are never advertised in
+introspection.
 
 #### Methods
 
@@ -397,9 +407,12 @@ DBusAdaptor {
 
 Routing:
 
-- **Interface-scoped calls** route to the adaptor whose `iface` matches the
-  message's interface. A duplicate `iface` on one path warns at load time and
-  the first-attached adaptor wins.
+- **Interface-scoped calls** (0.5.1+) route only to the adaptor whose `iface`
+  matches the message's interface. A call that carries an interface name
+  reaches a matching adaptor and no other — it is no longer answered by a
+  member-name match on an adaptor that declares a *different* interface. A
+  duplicate `iface` on one path warns at load time and the first-attached
+  adaptor wins.
 - **`Properties.Get/GetAll/Set`** route by the interface *argument*, so
   `GetAll("…Settings")` returns only the Settings adaptor's properties.
 - **Empty-interface calls** (which D-Bus allows) route by member name across
@@ -410,6 +423,13 @@ Routing:
 Destroying any co-located adaptor leaves the path and the service name
 registered for the survivors; only the last adaptor to be destroyed releases
 them.
+
+> **Migration from the 0.5.0 workaround:** on 0.5.0, a single adaptor could
+> serve members of *several* interfaces because dispatch ignored the message
+> interface. That no longer holds — with the interface name set, each call now
+> routes to an adaptor declaring that interface. Split such an adaptor into
+> co-located adaptors (one per interface, sharing `service` and `path`), which
+> is the pattern this section enables.
 
 ---
 
