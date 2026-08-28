@@ -256,6 +256,10 @@ private slots:
     void testPropertyGadgetConversion();
     void testPropertyGadgetQml();
     void testPropertyGuardIntrospection();
+
+    // {value:} heuristic removal pins (0.6.0 wire change).
+    void testValueKeyDictIsRealDict();
+    void testValueKeyStructListIsRealDict();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -2343,6 +2347,51 @@ void TestDBusAdaptor::testPropertyGuardIntrospection() {
     QDBusMessage pingReply = bus.call(ping, QDBus::Block, 3000);
     QCOMPARE(pingReply.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(pingReply.arguments().first().toString(), QStringLiteral("pong"));
+}
+
+// The 0.6.0 heuristic removal: a `{value: 42}` dict is a REAL dict on the
+// wire (a{sv} with key "value"), not a guessed variant. The explicit forms
+// (`new DBusQML.variant(x)`) are the documented typing contract.
+void TestDBusAdaptor::testValueKeyDictIsRealDict() {
+    QDBusMessage reply =
+        callQmlAdaptorMethod(QStringLiteral("org.dbusqml.ValueDict"), QStringLiteral("/ValueDict"),
+                             QStringLiteral("org.dbusqml.ValueDict"), QStringLiteral("get"), {},
+                             "import DBus 1.0\n"
+                             "DBusAdaptor {\n"
+                             "  service: 'org.dbusqml.ValueDict'\n"
+                             "  path: '/ValueDict'\n"
+                             "  iface: 'org.dbusqml.ValueDict'\n"
+                             "  function get() { return { value: 42 } }\n"
+                             "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sv}"));
+    const QVariantMap m = unwrapDbus(reply.arguments().first()).toMap();
+    QCOMPARE(m.size(), 1);
+    QVERIFY(m.contains(QStringLiteral("value")));
+    QCOMPARE(m.value(QStringLiteral("value")).toInt(), 42);
+}
+
+// The struct sub-heuristic removal: `{value: [0.1, 0.2]}` is likewise a real
+// dict (a{sv} whose value is an av list), not a guessed (dd) struct.
+void TestDBusAdaptor::testValueKeyStructListIsRealDict() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.ValueStruct"), QStringLiteral("/ValueStruct"),
+        QStringLiteral("org.dbusqml.ValueStruct"), QStringLiteral("get"), {},
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.ValueStruct'\n"
+        "  path: '/ValueStruct'\n"
+        "  iface: 'org.dbusqml.ValueStruct'\n"
+        "  function get() { return { value: [0.1, 0.2] } }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a{sv}"));
+    const QVariantMap m = unwrapDbus(reply.arguments().first()).toMap();
+    QVERIFY(m.contains(QStringLiteral("value")));
+    const QVariantList l = m.value(QStringLiteral("value")).toList();
+    QCOMPARE(l.size(), 2);
+    QCOMPARE(l.at(0).toDouble(), 0.1);
+    QCOMPARE(l.at(1).toDouble(), 0.2);
 }
 
 int main(int argc, char *argv[]) {

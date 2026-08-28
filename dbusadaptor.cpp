@@ -242,43 +242,15 @@ QString DBusAdaptor::introspect(const QString &) const {
 // (DBus::Variant, DBus::Dict, etc.) are preserved by QJSValue::toVariant()
 // in Qt 6 when the gadget's metatype is registered — which the plugin's
 // static initializer ensures.
+//
+// No shape-guessing here: a former heuristic treated any single-"value"-key
+// map as a flattened gadget (and its all-doubles list payload as a struct),
+// silently turning a legitimate `{value: 42}` dict into `v(i)`. Gadgets
+// survive QJSValue conversion intact; a flattened-gadget shape is a real
+// dict. Explicit typing is `new DBusQML.variant(x)` / `struct_` — the
+// documented contract since 0.3.x/0.4.0.
 QVariant qjsValueToVariant(const QJSValue &jsval) {
-    QVariant v = jsval.toVariant();
-    // QJSValue::toVariant() on a QML value type (gadget) may produce a
-    // QVariantMap if the engine converts it via the property map rather
-    // than the metatype system. Detect this by checking if the value is
-    // a QVariantMap with a single "value" key — the gadget's Q_PROPERTY.
-    if (v.userType() == qMetaTypeId<QVariantMap>()) {
-        QVariantMap m = v.toMap();
-        if (m.size() == 1 && m.contains(QStringLiteral("value"))) {
-            QVariant inner = m.value(QStringLiteral("value"));
-            // Struct payload (QVariantList) — marshal via QDBusArgument
-            // so it gets a real struct signature on the wire.
-            if (inner.userType() == qMetaTypeId<QVariantList>()) {
-                QVariantList members = inner.toList();
-                if (!members.isEmpty()) {
-                    bool allDouble = true;
-                    for (const QVariant &member : members) {
-                        if (member.userType() != QMetaType::Double) {
-                            allDouble = false;
-                            break;
-                        }
-                    }
-                    if (allDouble) {
-                        QDBusArgument arg;
-                        arg.beginStructure();
-                        for (const QVariant &member : members)
-                            arg << member.toDouble();
-                        arg.endStructure();
-                        return QVariant::fromValue(arg);
-                    }
-                }
-            }
-            if (inner.isValid())
-                return QVariant::fromValue(QDBusVariant(toDbusVariant(inner)));
-        }
-    }
-    return v;
+    return jsval.toVariant();
 }
 
 void DBusAdaptor::emitSignal(const QString &name, const QJSValue &arguments) {
