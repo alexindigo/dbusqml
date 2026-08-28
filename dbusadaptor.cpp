@@ -360,6 +360,11 @@ QString DBusAdaptor::generateXml() const {
             name == QStringLiteral("iface") || name == QStringLiteral("connection") ||
             name == QStringLiteral("objectName"))
             continue;
+        // A QObject*-derived property has no D-Bus representation — advertising
+        // it (the signature fallback would promise "v") offers a value GetAll
+        // can never serve. var (QVariant-typed) properties stay advertised "v".
+        if (prop.metaType().flags().testFlag(QMetaType::PointerToQObject))
+            continue;
 
         QString dbusType = metaTypeToDbusSignature(static_cast<int>(prop.typeId()));
 
@@ -500,7 +505,20 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                     continue;
                 QVariant val = prop.read(this);
                 if (val.userType() == qMetaTypeId<QJSValue>())
-                    val = val.value<QJSValue>().toVariant();
+                    val = qjsValueToVariant(val.value<QJSValue>());
+                // V-providing slot: the explicit QDBusVariant wrap below is the
+                // reply's "v", so gadget values contribute their payload.
+                val = toDbusVariantNested(val);
+                if (!wireMarshalable(val)) {
+                    qWarning("dbusqml: property %s on %s is not marshalable (type %s) — "
+                             "replying InvalidArgs",
+                             qPrintable(propName), qPrintable(m_iface),
+                             QMetaType(val.userType()).name());
+                    conn.send(msg.createErrorReply(
+                        QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                        QStringLiteral("Property not marshalable: %1").arg(propName)));
+                    return true;
+                }
                 // D-Bus spec: Get returns a variant (signature "v")
                 conn.send(msg.createReply(QVariantList{QVariant::fromValue(QDBusVariant(val))}));
                 return true;
@@ -523,7 +541,19 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                     continue;
                 QVariant val = prop.read(this);
                 if (val.userType() == qMetaTypeId<QJSValue>())
-                    val = val.value<QJSValue>().toVariant();
+                    val = qjsValueToVariant(val.value<QJSValue>());
+                // V-providing slot: each a{sv} map value carries its own "v",
+                // so gadget values contribute their payload (single wrap).
+                val = toDbusVariantNested(val);
+                if (!wireMarshalable(val)) {
+                    // GetAll cannot represent a per-property error — skip.
+                    // Skipping also keeps introspection (busctl populates its
+                    // property values via GetAll) from killing the process.
+                    qWarning("dbusqml: skipping non-marshalable property reply on %s in GetAll "
+                             "(type %s)",
+                             qPrintable(m_iface), QMetaType(val.userType()).name());
+                    continue;
+                }
                 props.insert(name, val);
             }
             conn.send(msg.createReply(QVariantList{props}));

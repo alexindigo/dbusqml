@@ -426,6 +426,10 @@ QVariant toDbusVariant(const QVariant &v) {
     return toDbusVariantImpl(v, false);
 }
 
+QVariant toDbusVariantNested(const QVariant &v) {
+    return toDbusVariantImpl(v, true);
+}
+
 // ==================== Signature-driven marshaller ====================
 
 // Parse one complete D-Bus type from `sig` starting at `pos`.

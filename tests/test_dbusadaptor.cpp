@@ -68,6 +68,47 @@ public slots:
     QVariant echo(const QVariant &v) { return v; }
 };
 
+// P1/P2/P5 fixture: one healthy + one unmarshalable property. The QObject*
+// poison has no D-Bus wire signature — before the 0.5.2 property guard this
+// aborted the process inside QtDBus container writing when served.
+class PoisonPropAdaptor : public DBusAdaptor {
+    Q_OBJECT
+    Q_PROPERTY(int good READ good CONSTANT)
+    Q_PROPERTY(QObject *poison READ poison CONSTANT)
+
+public:
+    explicit PoisonPropAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+    int good() const { return 42; }
+    QObject *poison() { return &m_poison; }
+
+    // QVariant return — the C++ invokeMethod dispatch path only captures
+    // QVariant returns; a QString return would send an empty reply.
+    Q_INVOKABLE QVariant ping() { return QStringLiteral("pong"); }
+
+private:
+    QObject m_poison;
+};
+
+// P4 fixture: gadget-valued properties — the conversion path. QVariant-typed
+// properties holding DBus::Variant / DBus::Bytes gadgets must marshal as a
+// single-wrapped "v" carrying the gadget's payload.
+class GadgetPropAdaptor : public DBusAdaptor {
+    Q_OBJECT
+    Q_PROPERTY(QVariant varProp READ varProp CONSTANT)
+    Q_PROPERTY(QVariant bytesProp READ bytesProp CONSTANT)
+
+public:
+    explicit GadgetPropAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+    QVariant varProp() const {
+        DBus::Variant v;
+        v.value = QDBusVariant(42);
+        return QVariant::fromValue(v);
+    }
+    QVariant bytesProp() const {
+        return QVariant::fromValue(DBus::Bytes(QByteArrayLiteral("hello")));
+    }
+};
+
 // C++ Q_INVOKABLE adaptor — exercises the declared-reply-signature hook on the
 // non-QML dispatch path (invokeMethod).
 class SignatureTestAdaptor : public DBusAdaptor {
@@ -207,6 +248,14 @@ private slots:
     // Attach guard (G1, G2).
     void testAttachGuardServiceTheft();
     void testAttachGuardRegistryHygiene();
+
+    // Property marshal guard + conversion (P1–P5).
+    void testPropertyGuardGet();
+    void testPropertyGuardGetAll();
+    void testPropertyGuardQmlStash();
+    void testPropertyGadgetConversion();
+    void testPropertyGadgetQml();
+    void testPropertyGuardIntrospection();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -2090,6 +2139,210 @@ void TestDBusAdaptor::testAttachGuardRegistryHygiene() {
     QCOMPARE(r.arguments().first().toString(), QStringLiteral("d"));
 
     delete d;
+}
+
+// ==================== Property marshal guard + conversion (P1–P5) ====================
+//
+// The Properties.Get/GetAll handlers were the last unguarded marshal path:
+// a property value with no D-Bus wire signature (organic case: a QML `var`
+// holding a DBusHeldReply*) aborted the process inside QtDBus container
+// writing — remotely triggerable via routine introspection (busctl populates
+// its RESULT/VALUE column through GetAll). Pre-fix evidence: recorded SIGABRT
+// run in the execution report (an abort cannot live inside the suite).
+
+// P1 — Get of an unmarshalable property errors instead of marshaling; a
+// healthy property on the same adaptor is unaffected.
+void TestDBusAdaptor::testPropertyGuardGet() {
+    PoisonPropAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.Poison"));
+    adaptor.setPath(QStringLiteral("/Poison"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.Poison"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
+                                           "dbusqml: property poison .* not marshalable")));
+    QDBusMessage get = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Poison"), QStringLiteral("/Poison"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    get.setArguments({QStringLiteral("org.dbusqml.Poison"), QStringLiteral("poison")});
+    QDBusMessage reply = bus.call(get, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+
+    QDBusMessage good = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Poison"), QStringLiteral("/Poison"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    good.setArguments({QStringLiteral("org.dbusqml.Poison"), QStringLiteral("good")});
+    QDBusMessage goodReply = bus.call(good, QDBus::Block, 3000);
+    QCOMPARE(goodReply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(goodReply.arguments().first().value<QDBusVariant>().variant().toInt(), 42);
+}
+
+// P2 — GetAll succeeds with the poison property skipped (wording matches the
+// downstream-observed live log) and the healthy property present.
+void TestDBusAdaptor::testPropertyGuardGetAll() {
+    PoisonPropAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.Poison"));
+    adaptor.setPath(QStringLiteral("/Poison"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.Poison"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+
+    QTest::ignoreMessage(
+        QtWarningMsg,
+        QRegularExpression(QStringLiteral(
+            "dbusqml: skipping non-marshalable property reply on org\\.dbusqml\\.Poison in "
+            "GetAll \\(type QObject\\*\\)")));
+    QDBusMessage getAll = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Poison"), QStringLiteral("/Poison"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("GetAll"));
+    getAll.setArguments({QStringLiteral("org.dbusqml.Poison")});
+    QDBusMessage reply = bus.call(getAll, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    const QVariantMap props = unwrapDbus(reply.arguments().first()).toMap();
+    QVERIFY(props.contains(QStringLiteral("good")));
+    QVERIFY(!props.contains(QStringLiteral("poison")));
+    QCOMPARE(props.value(QStringLiteral("good")).toInt(), 42);
+}
+
+// P3 — the organic QML repro: `property var` holding a QObject. GetAll must
+// not error and must omit the stash; a subsequent normal call succeeds (the
+// process is alive — the whole point of the fix). GetAll goes through a
+// separate-connection caller: the remote path is what killed pre-fix.
+void TestDBusAdaptor::testPropertyGuardQmlStash() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.QmlStash'\n"
+                                        "  path: '/QmlStash'\n"
+                                        "  iface: 'org.dbusqml.QmlStash'\n"
+                                        "  property var stash: QtObject {}\n"
+                                        "  function ping() { return 'p' }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
+                                           "dbusqml: skipping non-marshalable property reply on "
+                                           "org\\.dbusqml\\.QmlStash in GetAll")));
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.QmlStash"), QStringLiteral("/QmlStash"),
+                          QStringLiteral("org.freedesktop.DBus.Properties"),
+                          QStringLiteral("GetAll"), {QStringLiteral("org.dbusqml.QmlStash")});
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QVERIFY(!w->isError());
+    const QVariantMap props = unwrapDbus(w->reply().arguments().first()).toMap();
+    QVERIFY(!props.contains(QStringLiteral("stash")));
+    delete w;
+
+    // Process alive — a subsequent normal call still answers.
+    QDBusMessage ping = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.QmlStash"), QStringLiteral("/QmlStash"),
+        QStringLiteral("org.dbusqml.QmlStash"), QStringLiteral("ping"));
+    QDBusMessage pingReply = QDBusConnection::sessionBus().call(ping, QDBus::Block, 3000);
+    QCOMPARE(pingReply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(pingReply.arguments().first().toString(), QStringLiteral("p"));
+
+    delete adaptor;
+}
+
+// P4 — gadget-valued properties are served CORRECTLY (the conversion): a
+// QVariant property holding a DBus::Variant / DBus::Bytes gadget marshals as a
+// single-wrapped "v" with the gadget's payload, not skipped as unmarshalable.
+void TestDBusAdaptor::testPropertyGadgetConversion() {
+    GadgetPropAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.GadgetProp"));
+    adaptor.setPath(QStringLiteral("/GadgetProp"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.GadgetProp"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+
+    QDBusMessage get = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.GadgetProp"), QStringLiteral("/GadgetProp"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    get.setArguments({QStringLiteral("org.dbusqml.GadgetProp"), QStringLiteral("varProp")});
+    QDBusMessage r1 = bus.call(get, QDBus::Block, 3000);
+    QCOMPARE(r1.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r1.signature(), QStringLiteral("v"));
+    QCOMPARE(r1.arguments().first().value<QDBusVariant>().variant().toInt(), 42);
+
+    get.setArguments({QStringLiteral("org.dbusqml.GadgetProp"), QStringLiteral("bytesProp")});
+    QDBusMessage r2 = bus.call(get, QDBus::Block, 3000);
+    QCOMPARE(r2.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r2.signature(), QStringLiteral("v"));
+    const QVariant payload = r2.arguments().first().value<QDBusVariant>().variant();
+    QCOMPARE(payload.userType(), QMetaType::QByteArray);
+    QCOMPARE(payload.toByteArray(), QByteArrayLiteral("hello"));
+}
+
+// P4 (QML side, best-effort per plan) — `property var` holding a gadget.
+// Whether QJSValue::toVariant preserves or flattens the gadget decides the
+// payload; the abort-prevention holds regardless. Asserts the expected
+// single-wrap; actual behavior recorded in the execution report.
+void TestDBusAdaptor::testPropertyGadgetQml() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import DBus 1.0 as DBusQML\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.GadgetQml'\n"
+                                        "  path: '/GadgetQml'\n"
+                                        "  iface: 'org.dbusqml.GadgetQml'\n"
+                                        "  property var gv: new DBusQML.variant(42)\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusMessage get = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.GadgetQml"), QStringLiteral("/GadgetQml"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    get.setArguments({QStringLiteral("org.dbusqml.GadgetQml"), QStringLiteral("gv")});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(get, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("v"));
+    QCOMPARE(reply.arguments().first().value<QDBusVariant>().variant().toInt(), 42);
+
+    delete adaptor;
+}
+
+// P5 — introspection honesty + regression: the poison property (QObject*) is
+// never advertised (a "v" promise GetAll could never keep), the healthy one
+// stays, and wire Introspect on the poison adaptor is safe.
+void TestDBusAdaptor::testPropertyGuardIntrospection() {
+    PoisonPropAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.Poison"));
+    adaptor.setPath(QStringLiteral("/Poison"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.Poison"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    const QString xml = adaptor.introspect(QString());
+    QVERIFY(!xml.contains(QStringLiteral("poison")));
+    QVERIFY(xml.contains(QStringLiteral("good")));
+
+    // Wire Introspect (local loop, same as testCoLocatedIntrospection): the
+    // XML served through the dispatcher never advertises poison either.
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage intro = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Poison"), QStringLiteral("/Poison"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"));
+    QDBusMessage introReply = bus.call(intro, QDBus::Block, 3000);
+    QCOMPARE(introReply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(introReply.arguments().size(), 1);
+    QVERIFY(!introReply.arguments().first().toString().contains(QStringLiteral("poison")));
+    QVERIFY(introReply.arguments().first().toString().contains(QStringLiteral("good")));
+
+    // Still serving methods after the guarded paths ran.
+    QDBusMessage ping = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Poison"), QStringLiteral("/Poison"),
+        QStringLiteral("org.dbusqml.Poison"), QStringLiteral("ping"));
+    QDBusMessage pingReply = bus.call(ping, QDBus::Block, 3000);
+    QCOMPARE(pingReply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(pingReply.arguments().first().toString(), QStringLiteral("pong"));
 }
 
 int main(int argc, char *argv[]) {

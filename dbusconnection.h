@@ -12,6 +12,12 @@
 
 QVariant toDbusVariant(const QVariant &v);
 
+// Nested-slot half of the slot-aware conversion pair: for values destined to a
+// slot that already provides the D-Bus variant wrapper (an a{sv} dict value,
+// or an explicit QDBusVariant wrap). A DBus::Variant contributes its payload
+// directly, guaranteeing single-wrap semantics.
+QVariant toDbusVariantNested(const QVariant &v);
+
 // Parse one complete D-Bus type from `sig` starting at `pos`. Returns the
 // type's signature substring and advances pos past it. Returns empty on parse
 // failure. Used to split concatenated signatures (override strings, catalog
