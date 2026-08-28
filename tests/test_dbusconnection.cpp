@@ -1681,6 +1681,126 @@ private slots:
                  QStringLiteral("192.168.1.100"));
         QCOMPARE(proxy.value(QStringLiteral("prefix")).toUInt(), 24U);
     }
+
+    // ==================== Client-exit marshal guards ====================
+    //
+    // The caller-side analogue of the 0.5.2 property guard: an argument with
+    // no wire representation must fail the call LOCALLY
+    // (org.freedesktop.DBus.Error.Failed, "argument N is not marshalable")
+    // instead of aborting inside QtDBus marshaling. completeLocalError
+    // delivers synchronously in C++ (no engine), so the reply is already
+    // cached when call() returns.
+
+    static DBusProxy *clientGuardProxy() {
+        auto *proxy = new DBusProxy;
+        proxy->setService(QStringLiteral("org.dbusqml.SigEcho"));
+        proxy->setPath(QStringLiteral("/"));
+        proxy->setIface(QStringLiteral("org.dbusqml.ClientGuard"));
+        return proxy;
+    }
+
+    void testClientCallPoisonFailsLocally() {
+        QObject poison;
+        DBusProxy *proxy = clientGuardProxy();
+
+        DBusPendingReply *r = proxy->call(QStringLiteral("Any"), {QVariant::fromValue(&poison)});
+        QVERIFY(r != nullptr);
+        QVERIFY(r->isFinished());
+        QVERIFY(r->isError());
+        QCOMPARE(r->error().name(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+        QVERIFY(r->error().message().contains(QStringLiteral("argument 0 is not marshalable")));
+        delete r;
+
+        // Caller provably alive: a good call round-trips through the echo server.
+        DBusPendingReply *ok = proxy->call(QStringLiteral("Any"), {42});
+        QVERIFY(ok != nullptr);
+        QSignalSpy spy(ok, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(5000));
+        QVERIFY(!ok->isError());
+        QCOMPARE(ok->value().toString(), QStringLiteral("i"));
+        delete ok;
+        delete proxy;
+    }
+
+    void testClientCallPoisonNestedMapAndList() {
+        QObject poison;
+        DBusProxy *proxy = clientGuardProxy();
+
+        DBusPendingReply *inMap =
+            proxy->call(QStringLiteral("Any"),
+                        {QVariantMap{{QStringLiteral("k"), QVariant::fromValue(&poison)}}});
+        QVERIFY(inMap->isFinished());
+        QVERIFY(inMap->isError());
+        QVERIFY(inMap->error().message().contains(QStringLiteral("not marshalable")));
+        delete inMap;
+
+        DBusPendingReply *inList =
+            proxy->call(QStringLiteral("Any"), {QVariantList{QVariant::fromValue(&poison)}});
+        QVERIFY(inList->isFinished());
+        QVERIFY(inList->isError());
+        QCOMPARE(inList->error().message(), QStringLiteral("argument 0 is not marshalable"));
+        delete inList;
+        delete proxy;
+    }
+
+    void testClientAsyncCallPoisonFailsLocally() {
+        QObject poison;
+        SessionBusConnection bus;
+
+        DBusMessage msg;
+        msg.setService(QStringLiteral("org.dbusqml.SigEcho"));
+        msg.setPath(QStringLiteral("/"));
+        msg.setIface(QStringLiteral("org.dbusqml.ClientGuard"));
+        msg.setMember(QStringLiteral("Any"));
+        msg.setArguments({QVariant::fromValue(&poison)});
+
+        DBusPendingReply *r = bus.asyncCall(msg);
+        QVERIFY(r != nullptr);
+        QVERIFY(r->isFinished());
+        QVERIFY(r->isError());
+        QCOMPARE(r->error().name(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+        QVERIFY(r->error().message().contains(QStringLiteral("argument 0 is not marshalable")));
+        delete r;
+
+        // Alive: good async call still works.
+        DBusMessage good;
+        good.setService(QStringLiteral("org.dbusqml.SigEcho"));
+        good.setPath(QStringLiteral("/"));
+        good.setIface(QStringLiteral("org.dbusqml.ClientGuard"));
+        good.setMember(QStringLiteral("Any"));
+        good.setArguments({7});
+        DBusPendingReply *ok = bus.asyncCall(good);
+        QVERIFY(ok != nullptr);
+        QSignalSpy spy(ok, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(5000));
+        QVERIFY(!ok->isError());
+        QCOMPARE(ok->value().toString(), QStringLiteral("i"));
+        delete ok;
+    }
+
+    void testClientSetPropertyPoisonDropped() {
+        QObject poison;
+        DBusProxy *proxy = clientGuardProxy();
+
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression(QStringLiteral(
+                                 "dbusqml: value for property anything is not marshalable")));
+        proxy->setProperty(QStringLiteral("anything"), QVariant::fromValue(&poison));
+
+        // updateValue path (QQmlPropertyMap insert) is guarded the same way.
+        // Note: the updateValue guard serves QML binding writes; QQmlPropertyMap
+        // does not route C++ insert() through updateValue, so there is nothing
+        // to observe for it here (probed and recorded in the execution report).
+
+        // Alive.
+        DBusPendingReply *ok = proxy->call(QStringLiteral("Any"), {1});
+        QVERIFY(ok != nullptr);
+        QSignalSpy spy(ok, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(5000));
+        QVERIFY(!ok->isError());
+        delete ok;
+        delete proxy;
+    }
 };
 
 int main(int argc, char *argv[]) {

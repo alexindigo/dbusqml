@@ -88,6 +88,20 @@ QVariantList DBusPendingReply::values() const {
     return args;
 }
 
+void DBusPendingReply::completeLocalError(const QString &name, const QString &message) {
+    m_isError = true;
+    m_isValid = false;
+    m_error = DBusError(name, message);
+    m_cached = true;
+    m_finished = true;
+    // Same delivery convention as onFinished: queued when an engine may be
+    // listening, direct otherwise.
+    if (m_engine)
+        QMetaObject::invokeMethod(this, "finished", Qt::QueuedConnection);
+    else
+        emit finished();
+}
+
 void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
     if (m_watcher && !m_cached) {
         m_isError = watcher->isError();

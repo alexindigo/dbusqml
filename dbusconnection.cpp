@@ -1,6 +1,8 @@
 #include "dbusconnection.h"
 #include "dbustypes.h"
 
+#include <QDBusMetaType>
+
 #include <QAtomicInt>
 #include <QDBusArgument>
 #include <QDBusMessage>
@@ -14,6 +16,40 @@
 #include <QMap>
 #include <QPointer>
 #include <QQmlEngine>
+
+bool wireMarshalable(const QVariant &v) {
+    if (!v.isValid())
+        return false;
+    const int t = v.userType();
+
+    // Containers recurse — a single unmarshalable element poisons the whole.
+    if (t == qMetaTypeId<QVariantMap>()) {
+        const QVariantMap map = v.toMap();
+        for (auto it = map.constBegin(); it != map.constEnd(); ++it) {
+            if (!wireMarshalable(it.value()))
+                return false;
+        }
+        return true;
+    }
+    if (t == qMetaTypeId<QVariantList>()) {
+        const QVariantList list = v.toList();
+        for (const QVariant &e : list) {
+            if (!wireMarshalable(e))
+                return false;
+        }
+        return true;
+    }
+    if (t == qMetaTypeId<QDBusVariant>())
+        return wireMarshalable(v.value<QDBusVariant>().variant());
+    // QDBusArgument carries its own signature — always marshalable.
+    if (t == qMetaTypeId<QDBusArgument>())
+        return true;
+
+    // Anything QtDBus knows a wire signature for (basics, QString, QByteArray,
+    // QStringList, QDBusObjectPath, QDBusSignature, registered types). QJSValue,
+    // QObject*, and unregistered gadgets return null → false.
+    return QDBusMetaType::typeToSignature(QMetaType(t)) != nullptr;
+}
 
 // Convert a QVariant into a native JS value, recursively unwrapping lists
 // and maps so the JS side receives real Array / Object instances (with a
@@ -858,6 +894,22 @@ DBusConnection *DBusConnection::connectToBus(const QString &address) {
 
 DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message) {
     auto qmsg = toQDBusMessage(message);
+    // Client-exit guard: an argument with no wire representation would abort
+    // inside QtDBus marshaling — the caller-side analogue of the 0.5.2
+    // property crash. Fail the call LOCALLY instead; never send garbage.
+    for (int i = 0; i < qmsg.arguments().size(); ++i) {
+        if (!wireMarshalable(qmsg.arguments().at(i))) {
+            qWarning("dbusqml: argument %d of %s is not marshalable (type %s) — failing call "
+                     "locally",
+                     i, qPrintable(message.member()),
+                     QMetaType(qmsg.arguments().at(i).userType()).name());
+            auto *fail = new DBusPendingReply(this);
+            fail->setEngine(qmlEngine(this));
+            fail->completeLocalError(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                                     QStringLiteral("argument %1 is not marshalable").arg(i));
+            return fail;
+        }
+    }
     auto pending = m_connection.asyncCall(qmsg);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);

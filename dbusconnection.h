@@ -43,6 +43,14 @@ QVariant writeBySignature(const QString &sig, const QVariant &value);
 // JavaScript objects. Handles nested a{sv}, a{ss}, av, as, ao, etc.
 QVariant unwrapDbus(const QVariant &v);
 
+// Determine whether a QVariant can be handed to QtDBus for wire marshaling
+// without corrupting the connection. Catches the unregistered/invalid class
+// (QJSValue, QObject*, unregistered gadgets) that QtDBus reports as "not
+// registered with D-Bus". Containers recurse — one unmarshalable element
+// poisons the whole. Shared by the adaptor (reply/signal/property) and the
+// client (call/message/set) exits.
+bool wireMarshalable(const QVariant &v);
+
 // Convert a QVariant into a native JS value, recursively unwrapping lists
 // and maps so the JS side receives real Array / Object instances (with a
 // working Array.isArray and iterable/spread semantics), not the array-like

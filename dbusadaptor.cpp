@@ -1,6 +1,6 @@
 #include "dbusadaptor.h"
 #include "dbuscatalog.h"
-#include "dbusconnection.h"
+#include "dbusconnection.h" // wireMarshalable — shared marshal-boundary guard
 #include "dbusheldreply.h"
 #include "dbuspathdispatcher.h"
 #include "dbustypes.h"
@@ -33,46 +33,6 @@ static QString dbusMemberToQml(const QString &name) {
 // via generateXml or Properties.Get/GetAll/Set.
 static bool isPrivateProperty(const QString &name) {
     return name.startsWith(QLatin1Char('_'));
-}
-
-// Determine whether a QVariant can be handed to QtDBus for wire marshaling
-// without corrupting the connection. Catches the unregistered/invalid class
-// (QJSValue, QObject*, unregistered gadgets) that QtDBus reports as "not
-// registered with D-Bus" and then drops the connection over. Registered-but-
-// broken types (a raw DBus::Struct gadget) no longer reach this point —
-// toDbusVariant emits the writable-QDBusArgument form instead.
-static bool wireMarshalable(const QVariant &v) {
-    if (!v.isValid())
-        return false;
-    const int t = v.userType();
-
-    // Containers recurse — a single unmarshalable element poisons the whole.
-    if (t == qMetaTypeId<QVariantMap>()) {
-        const QVariantMap map = v.toMap();
-        for (auto it = map.constBegin(); it != map.constEnd(); ++it) {
-            if (!wireMarshalable(it.value()))
-                return false;
-        }
-        return true;
-    }
-    if (t == qMetaTypeId<QVariantList>()) {
-        const QVariantList list = v.toList();
-        for (const QVariant &e : list) {
-            if (!wireMarshalable(e))
-                return false;
-        }
-        return true;
-    }
-    if (t == qMetaTypeId<QDBusVariant>())
-        return wireMarshalable(v.value<QDBusVariant>().variant());
-    // QDBusArgument carries its own signature — always marshalable.
-    if (t == qMetaTypeId<QDBusArgument>())
-        return true;
-
-    // Anything QtDBus knows a wire signature for (basics, QString, QByteArray,
-    // QStringList, QDBusObjectPath, QDBusSignature, registered types). QJSValue,
-    // QObject*, and unregistered gadgets return null → false.
-    return QDBusMetaType::typeToSignature(QMetaType(t)) != nullptr;
 }
 
 // Helper: forwards QML signal emissions to D-Bus.

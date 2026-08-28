@@ -30,6 +30,12 @@ public:
     void setWatcher(QDBusPendingCallWatcher *watcher);
     void setEngine(QQmlEngine *engine) { m_engine = engine; }
 
+    // Complete LOCALLY with a D-Bus error — no wire round-trip. The
+    // client-exit guard path: a call whose arguments cannot be marshaled
+    // fails here (with org.freedesktop.DBus.Error.Failed, "argument N is not
+    // marshalable") instead of sending garbage or aborting the caller.
+    void completeLocalError(const QString &name, const QString &message);
+
     bool isFinished() const { return m_finished; }
     bool isError() const;
     bool isValid() const;
