@@ -68,6 +68,23 @@ public slots:
     QVariant echo(const QVariant &v) { return v; }
 };
 
+// Typed C++ returns — the invokeMethod fallback must capture any
+// default-constructible return (0.5.0–0.5.2 captured QVariant only, sending
+// a silent EMPTY reply for typed returns).
+class TypedReturnAdaptor : public DBusAdaptor {
+    Q_OBJECT
+
+public:
+    explicit TypedReturnAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+
+    Q_INVOKABLE QString hi() { return QStringLiteral("hi"); }
+    Q_INVOKABLE int five() { return 5; }
+    Q_INVOKABLE QByteArray bytes() { return QByteArrayLiteral("xy"); }
+    Q_INVOKABLE int many(int, int, int, int, int, int) { return 1; }
+
+    Q_INVOKABLE QVariant ping() { return QStringLiteral("pong"); }
+};
+
 // P1/P2/P5 fixture: one healthy + one unmarshalable property. The QObject*
 // poison has no D-Bus wire signature — before the 0.5.2 property guard this
 // aborted the process inside QtDBus container writing when served.
@@ -260,6 +277,10 @@ private slots:
     // {value:} heuristic removal pins (0.6.0 wire change).
     void testValueKeyDictIsRealDict();
     void testValueKeyStructListIsRealDict();
+
+    // Typed C++ return capture (0.6.0).
+    void testTypedCppReturnsRoundTrip();
+    void testTypedCppOverArgCapWarns();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -2392,6 +2413,69 @@ void TestDBusAdaptor::testValueKeyStructListIsRealDict() {
     QCOMPARE(l.size(), 2);
     QCOMPARE(l.at(0).toDouble(), 0.1);
     QCOMPARE(l.at(1).toDouble(), 0.2);
+}
+
+// QString/int/QByteArray-returning C++ Q_INVOKABLEs round-trip with
+// wire-literal signatures (pre-0.6.0: silent empty replies).
+void TestDBusAdaptor::testTypedCppReturnsRoundTrip() {
+    TypedReturnAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.TypedRet"));
+    adaptor.setPath(QStringLiteral("/TypedRet"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.TypedRet"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    auto call = [&](const QString &member, const QVariantList &args) {
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.TypedRet"), QStringLiteral("/TypedRet"),
+            QStringLiteral("org.dbusqml.TypedRet"), member);
+        if (!args.isEmpty())
+            m.setArguments(args);
+        return bus.call(m, QDBus::Block, 3000);
+    };
+
+    QDBusMessage r = call(QStringLiteral("hi"), {});
+    QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r.signature(), QStringLiteral("s"));
+    QCOMPARE(r.arguments().first().toString(), QStringLiteral("hi"));
+
+    r = call(QStringLiteral("five"), {});
+    QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r.signature(), QStringLiteral("i"));
+    QCOMPARE(r.arguments().first().toInt(), 5);
+
+    r = call(QStringLiteral("bytes"), {});
+    if (r.type() == QDBusMessage::ErrorMessage)
+        std::fprintf(stderr, "BYTES-DBG err=%s msg=%s\n", qPrintable(r.errorName()),
+                     qPrintable(r.errorMessage()));
+    QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r.signature(), QStringLiteral("ay"));
+    QCOMPARE(r.arguments().first().toByteArray(), QByteArrayLiteral("xy"));
+
+    // QVariant return unchanged (the pre-0.6.0 captured path).
+    r = call(QStringLiteral("ping"), {});
+    QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r.arguments().first().toString(), QStringLiteral("pong"));
+}
+
+// A C++ method beyond the 5-arg cap warns loudly and errors (no silent drop).
+void TestDBusAdaptor::testTypedCppOverArgCapWarns() {
+    TypedReturnAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.TypedCap"));
+    adaptor.setPath(QStringLiteral("/TypedCap"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.TypedCap"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QTest::ignoreMessage(
+        QtWarningMsg, QRegularExpression(QStringLiteral("dbusqml: method many takes 6 arguments")));
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.TypedCap"), QStringLiteral("/TypedCap"),
+        QStringLiteral("org.dbusqml.TypedCap"), QStringLiteral("many"));
+    m.setArguments({1, 2, 3, 4, 5, 6});
+    QDBusMessage r = QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+    QCOMPARE(r.type(), QDBusMessage::ErrorMessage);
 }
 
 int main(int argc, char *argv[]) {

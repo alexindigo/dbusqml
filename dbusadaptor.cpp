@@ -589,79 +589,112 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         if (!invoked) {
             QByteArray methodName = matchedName.toLatin1();
             // C++ Q_INVOKABLEs take QVariant args (matching the Q_ARG dispatch
-            // below); QVariant-returning methods have their value captured.
-            const bool captureReturn = method.returnType() == QMetaType::QVariant;
+            // below). ANY default-constructible return type is captured via a
+            // generic return argument and round-trips into the reply — an
+            // uncapturable typed return used to silently send an EMPTY reply
+            // (0.5.0–0.5.2 captured QVariant only).
+            const QMetaType rt = method.returnMetaType();
+            bool captureReturn = false;
+            // QMetaMethod::invoke is the type-erased entry point (runtime
+            // return types cannot use the Q_RETURN_ARG macro). For QVariant
+            // returns the argument addresses retVal itself — a data()
+            // -addressed return writes a nested QVariant slot and leaves
+            // retVal QVariant-typed, which the reply tail rejects.
+            QGenericReturnArgument retArg(nullptr, nullptr);
+            if (rt.id() == QMetaType::QVariant) {
+                captureReturn = true;
+                retArg = QGenericReturnArgument(rt.name(), &retVal);
+            } else if (rt.id() != QMetaType::UnknownType && rt.id() != QMetaType::Void &&
+                       rt.isDefaultConstructible()) {
+                retVal = QVariant(rt);
+                retArg = QGenericReturnArgument(rt.name(), retVal.data());
+                captureReturn = true;
+            } else if (rt.id() != QMetaType::UnknownType && rt.id() != QMetaType::Void) {
+                qWarning("dbusqml: method %s returns non-default-constructible %s — declare a "
+                         "QVariant return for wire-callable C++ methods",
+                         qPrintable(matchedName), rt.name());
+            }
             switch (dbusArgs.size()) {
             case 0:
                 if (captureReturn)
-                    invoked = QMetaObject::invokeMethod(this, methodName.constData(),
-                                                        Qt::DirectConnection,
-                                                        Q_RETURN_ARG(QVariant, retVal));
+                    invoked = method.invoke(this, Qt::DirectConnection, retArg);
                 else
-                    invoked = QMetaObject::invokeMethod(this, methodName.constData(),
-                                                        Qt::DirectConnection);
+                    invoked = method.invoke(this, Qt::DirectConnection);
                 break;
             case 1:
                 if (captureReturn)
-                    invoked = QMetaObject::invokeMethod(
-                        this, methodName.constData(), Qt::DirectConnection,
-                        Q_RETURN_ARG(QVariant, retVal), Q_ARG(QVariant, dbusArgs.at(0)));
+                    invoked = method.invoke(
+                        this, Qt::DirectConnection, retArg,
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(0))));
                 else
-                    invoked = QMetaObject::invokeMethod(this, methodName.constData(),
-                                                        Qt::DirectConnection,
-                                                        Q_ARG(QVariant, dbusArgs.at(0)));
+                    invoked = method.invoke(
+                        this, Qt::DirectConnection,
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(0))));
                 break;
             case 2:
                 if (captureReturn)
-                    invoked = QMetaObject::invokeMethod(
-                        this, methodName.constData(), Qt::DirectConnection,
-                        Q_RETURN_ARG(QVariant, retVal), Q_ARG(QVariant, dbusArgs.at(0)),
-                        Q_ARG(QVariant, dbusArgs.at(1)));
+                    invoked = method.invoke(
+                        this, Qt::DirectConnection, retArg,
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(0))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(1))));
                 else
-                    invoked = QMetaObject::invokeMethod(
-                        this, methodName.constData(), Qt::DirectConnection,
-                        Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)));
+                    invoked = method.invoke(
+                        this, Qt::DirectConnection,
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(0))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(1))));
                 break;
             case 3:
                 if (captureReturn)
-                    invoked = QMetaObject::invokeMethod(
-                        this, methodName.constData(), Qt::DirectConnection,
-                        Q_RETURN_ARG(QVariant, retVal), Q_ARG(QVariant, dbusArgs.at(0)),
-                        Q_ARG(QVariant, dbusArgs.at(1)), Q_ARG(QVariant, dbusArgs.at(2)));
+                    invoked = method.invoke(
+                        this, Qt::DirectConnection, retArg,
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(0))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(1))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(2))));
                 else
-                    invoked = QMetaObject::invokeMethod(
-                        this, methodName.constData(), Qt::DirectConnection,
-                        Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)),
-                        Q_ARG(QVariant, dbusArgs.at(2)));
+                    invoked = method.invoke(
+                        this, Qt::DirectConnection,
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(0))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(1))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(2))));
                 break;
             case 4:
                 if (captureReturn)
-                    invoked = QMetaObject::invokeMethod(
-                        this, methodName.constData(), Qt::DirectConnection,
-                        Q_RETURN_ARG(QVariant, retVal), Q_ARG(QVariant, dbusArgs.at(0)),
-                        Q_ARG(QVariant, dbusArgs.at(1)), Q_ARG(QVariant, dbusArgs.at(2)),
-                        Q_ARG(QVariant, dbusArgs.at(3)));
+                    invoked = method.invoke(
+                        this, Qt::DirectConnection, retArg,
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(0))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(1))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(2))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(3))));
                 else
-                    invoked = QMetaObject::invokeMethod(
-                        this, methodName.constData(), Qt::DirectConnection,
-                        Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)),
-                        Q_ARG(QVariant, dbusArgs.at(2)), Q_ARG(QVariant, dbusArgs.at(3)));
+                    invoked = method.invoke(
+                        this, Qt::DirectConnection,
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(0))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(1))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(2))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(3))));
                 break;
             case 5:
                 if (captureReturn)
-                    invoked = QMetaObject::invokeMethod(
-                        this, methodName.constData(), Qt::DirectConnection,
-                        Q_RETURN_ARG(QVariant, retVal), Q_ARG(QVariant, dbusArgs.at(0)),
-                        Q_ARG(QVariant, dbusArgs.at(1)), Q_ARG(QVariant, dbusArgs.at(2)),
-                        Q_ARG(QVariant, dbusArgs.at(3)), Q_ARG(QVariant, dbusArgs.at(4)));
+                    invoked = method.invoke(
+                        this, Qt::DirectConnection, retArg,
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(0))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(1))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(2))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(3))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(4))));
                 else
-                    invoked = QMetaObject::invokeMethod(
-                        this, methodName.constData(), Qt::DirectConnection,
-                        Q_ARG(QVariant, dbusArgs.at(0)), Q_ARG(QVariant, dbusArgs.at(1)),
-                        Q_ARG(QVariant, dbusArgs.at(2)), Q_ARG(QVariant, dbusArgs.at(3)),
-                        Q_ARG(QVariant, dbusArgs.at(4)));
+                    invoked = method.invoke(
+                        this, Qt::DirectConnection,
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(0))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(1))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(2))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(3))),
+                        QGenericArgument("QVariant", const_cast<QVariant *>(&dbusArgs.at(4))));
                 break;
             default:
+                qWarning("dbusqml: method %s takes %d arguments — the C++ dispatch path supports "
+                         "at most 5; declare fewer parameters",
+                         qPrintable(matchedName), int(dbusArgs.size()));
                 m_inDispatch = false;
                 return false;
             }
