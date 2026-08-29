@@ -4,6 +4,48 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-08-28
+
+### Changed
+
+- **The `{value:}` flattening heuristic is removed.** `qjsValueToVariant`
+  guessed that any map with a single `value` key was a flattened gadget (and
+  an all-doubles payload a struct), silently marshaling a legitimate
+  `{value: 42}` dict as `v(i)` and `{value: [0.1, 0.2]}` as `(dd)`. Such
+  values now marshal as the real dicts they are (`a{sv}`). **Migration:** if
+  you relied on the guess, write the value type explicitly —
+  `new DBusQML.variant(x)` / `new DBusQML.struct_([...])` — the documented
+  contract since 0.3.x/0.4.0. Gadgets themselves were never affected (they
+  survive `QJSValue` conversion intact).
+
+### Fixed
+
+- **Client-side marshal exits are guarded.** `proxy.call`,
+  `DBusConnection.asyncCall`, property writes and proxy signal sends validate
+  converted arguments: an argument with no wire representation (a `QObject*`
+  in a map, a JS function) fails the call **locally** (`DBusPendingReply`
+  completes with `org.freedesktop.DBus.Error.Failed`, "argument N is not
+  marshalable") instead of aborting the caller inside QtDBus marshaling.
+  Property writes and signals warn and drop.
+- **Typed C++ method returns round-trip.** The adaptor's C++ dispatch path
+  captured `QVariant` returns only — a `QString`/`int`/`QByteArray`-returning
+  `Q_INVOKABLE` silently sent an EMPTY reply. Any default-constructible
+  return type is now captured and served with its wire type; the >5-argument
+  C++ dispatch cap warns by name.
+- **Malformed declared signatures can no longer abort the process.**
+  `variant(x, "(")` (or any unbalanced/empty container signature reaching the
+  signature-driven marshaller) built a `QDBusArgument` that libdbus rejects
+  with an assertion abort. Malformed signatures are rejected before building
+  and loud-fail to inference; unparseable `_signatures` values warn instead
+  of being silently inert.
+
+### Added
+
+- **Adversarial input matrix** — hostile value classes (null, objects,
+  functions, NaN/±Infinity, embedded-NUL and 1 MB strings, empty and deeply
+  nested containers, cyclic objects/arrays, malformed signatures) swept
+  across every marshal exit and pinned as permanent regression tests.
+
 ## [0.5.2] — 2026-08-28
 
 ### Fixed

@@ -103,6 +103,15 @@ Properties auto-update via `PropertiesChanged` signals. Property names follow QM
 | `emitSignal(name, args)` | `string name`, `list args` | — | Emit a D-Bus signal from this proxy's path/interface. |
 | `connectToBus(address)` | `string address` | `DBusConnection` | (static) Connect to a custom D-Bus address. Returns null on failure. |
 
+**Boundary errors (0.6.0+):** arguments that cannot be marshaled (a
+`QObject*` in a map, a JS function, an unregistered type) fail the call
+**locally** — the returned `DBusPendingReply` completes with
+`org.freedesktop.DBus.Error.Failed` and "argument N is not marshalable"
+instead of the process aborting inside QtDBus. Property writes with
+unmarshalable values are dropped with a warning; `emitSignal` skips the send.
+A malformed `_signatures` value warns ("unparseable declared signature") and
+falls back to inference.
+
 #### Configuration Signals
 
 | Signal | Arguments | Description |
@@ -244,6 +253,12 @@ character when dispatching — a D-Bus call to `ReadOne` invokes the QML
 function `readOne`. This is the same convention the proxy side uses for
 property names (`dbusPropToQml`). Exact-name matches still work for C++
 `Q_INVOKABLE`s.
+
+**C++ typed returns (0.6.0+):** a C++ `Q_INVOKABLE` whose return type is any
+default-constructible type (`QString`, `int`, `QByteArray`, …) round-trips
+into the D-Bus reply with its wire signature. Non-default-constructible
+returns cannot be captured — declare a `QVariant` return (the C++ dispatch
+path also caps at 5 parameters and warns beyond that).
 
 **Return-value marshaling (0.3.1+):** return values are marshaled through
 `toDbusVariant`, so `DBusQML.variant(x)` produces a real D-Bus variant
@@ -416,7 +431,9 @@ Routing:
 - **`Properties.Get/GetAll/Set`** route by the interface *argument*, so
   `GetAll("…Settings")` returns only the Settings adaptor's properties.
 - **Empty-interface calls** (which D-Bus allows) route by member name across
-  the attached adaptors in attach order.
+  the attached adaptors in attach order. `Properties.GetAll` with an **empty
+  interface argument** degenerates the same way: the first attached adaptor
+  answers with its own properties.
 - **Introspection** of a shared path merges every attached adaptor's interface
   block, so callers see all interfaces at once.
 
