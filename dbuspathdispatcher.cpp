@@ -106,6 +106,11 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
     }
 }
 
+int DBusPathDispatcher::liveCount() {
+    QMutexLocker locker(&registryMutex());
+    return dispatchers().size();
+}
+
 void DBusPathDispatcher::attachAdaptor(DBusAdaptor *adaptor) {
     // Duplicate iface at one path: warn, keep attaching — first-attached wins
     // for iface-scoped calls (attach order is the routing order).

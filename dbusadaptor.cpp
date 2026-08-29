@@ -311,10 +311,11 @@ QString DBusAdaptor::generateXml() const {
         if (method.methodType() != QMetaMethod::Method && method.methodType() != QMetaMethod::Slot)
             continue;
         QString name = QString::fromLatin1(method.name());
-        // Skip internal Qt methods
+        // Skip internal Qt methods and library mechanisms
         if (name.startsWith(QStringLiteral("qml")) || name == QStringLiteral("emitSignal") ||
-            name == QStringLiteral("holdReply") || name == QStringLiteral("deleteLater") ||
-            name == QStringLiteral("destroyed") || name == QStringLiteral("objectNameChanged"))
+            name == QStringLiteral("holdReply") || name == QStringLiteral("unregister") ||
+            name == QStringLiteral("deleteLater") || name == QStringLiteral("destroyed") ||
+            name == QStringLiteral("objectNameChanged"))
             continue;
 
         xml += QStringLiteral("    <method name=\"%1\">\n").arg(name);
@@ -535,9 +536,9 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         if (method.methodType() != QMetaMethod::Method && method.methodType() != QMetaMethod::Slot)
             continue;
         const QString methodName = QString::fromLatin1(method.name());
-        // holdReply() is a library mechanism for the handler, not a D-Bus
-        // method — never dispatch to it over the wire.
-        if (methodName == QStringLiteral("holdReply"))
+        // holdReply() and unregister() are library mechanisms for the
+        // handler, not D-Bus methods — never dispatch to them over the wire.
+        if (methodName == QStringLiteral("holdReply") || methodName == QStringLiteral("unregister"))
             continue;
         if (methodName == member) {
             matchedName = member;
@@ -564,13 +565,30 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
         QQmlEngine *engine = qmlEngine(this);
         if (engine) {
-            // Wrap the adaptor as a QJSValue and invoke the method through
+            // Ownership lifecycle (0.7.0): protecting the adaptor from the JS
+            // GC is scoped to the dispatch only. Record the pre-dispatch
+            // ownership, flip to CppOwnership for the call (protection against
+            // the JS GC collecting the adaptor while it is wrapped as a
+            // QJSValue and invoked), and restore afterwards — deferred while
+            // any DBusHeldReply is outstanding (the adaptor is the only object
+            // that can settle callers; restore happens at the last settle,
+            // notified by DBusHeldReply::settle()). Effect matrix: declarative
+            // adaptors report CppOwnership → flip+restore are no-ops (QML
+            // forbids destroy() on them anyway); dynamically created
+            // adaptors (Component.createObject — the portal Request pattern)
+            // report JavaScriptOwnership → restored → QML destroy()/GC work
+            // again after dispatch. JS-owned QObjects still referenced from JS
+            // are never collected; parented ones are not collected either.
+            //
+            // The adaptor is wrapped as a QJSValue and invoked through
             // callWithInstance. This avoids building a JS source string
             // (which mishandles arrays/dicts and stringifies numeric args
             // without escaping) and works cleanly for multiple adaptor
             // instances sharing one engine.
-            QJSValue thisObj = engine->newQObject(this);
+            m_savedOwnership = QQmlEngine::objectOwnership(this);
+            m_ownershipPendingRestore = true;
             QQmlEngine::setObjectOwnership(this, QQmlEngine::CppOwnership);
+            QJSValue thisObj = engine->newQObject(this);
             QJSValue fn = thisObj.property(member);
             if (!fn.isCallable() && qmlMember != member)
                 fn = thisObj.property(qmlMember);
@@ -695,10 +713,16 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 qWarning("dbusqml: method %s takes %d arguments — the C++ dispatch path supports "
                          "at most 5; declare fewer parameters",
                          qPrintable(matchedName), int(dbusArgs.size()));
+                maybeRestoreOwnership();
                 m_inDispatch = false;
                 return false;
             }
         }
+
+        // Ownership lifecycle: the JS-GC protection is scoped to the dispatch.
+        // Restore now unless held replies are still outstanding (no-op when
+        // the engine path did not flip) — the last settle restores otherwise.
+        maybeRestoreOwnership();
 
         m_inDispatch = false;
 
@@ -726,9 +750,59 @@ DBusHeldReply *DBusAdaptor::holdReply() {
     }
     auto *reply = new DBusHeldReply(this);
     reply->setContext(this, m_currentCall.msg, m_currentCall.conn, m_currentCall.member);
+    // Ownership audit (0.7.0): CppOwnership while pending — the held reply is
+    // the only handle that can answer the caller and must not be GC-collected
+    // mid-flight. After settle() it is handed to the JS GC (0.5.0 design,
+    // intended); it stays parented to this adaptor, so a parented JS-owned
+    // object is never collected and it is destroyed with the adaptor.
     QQmlEngine::setObjectOwnership(reply, QQmlEngine::CppOwnership);
     m_currentCall.held = true;
     return reply;
+}
+
+void DBusAdaptor::unregister() {
+    if (!m_attached) {
+        qWarning("dbusqml: unregister() on an already detached adaptor (path %s) — ignored",
+                 qPrintable(m_path));
+        return;
+    }
+
+    // Same tail as the destructor: a deferred reply can never be answered
+    // once the path is gone — error it rather than leaving the caller to
+    // time out.
+    const auto heldReplies = findChildren<DBusHeldReply *>();
+    for (DBusHeldReply *reply : heldReplies) {
+        if (!reply->isSettled()) {
+            reply->sendError(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                             QStringLiteral("adaptor unregistered with reply pending"));
+        }
+    }
+
+    // Detach the path + service reference via the dispatcher registry
+    // (idempotent tail). One-way: re-registration is not supported. The
+    // QObject stays alive for QML to drop whenever.
+    DBusPathDispatcher::detach(bus(), m_path, m_service, this);
+    m_attached = false;
+}
+
+// Restore the pre-dispatch QML ownership unless held replies are still
+// outstanding — the adaptor is the only object that can settle callers, so it
+// must stay GC-protected until the last settle (notified by
+// DBusHeldReply::settle() → heldReplySettled()).
+void DBusAdaptor::maybeRestoreOwnership() {
+    if (!m_ownershipPendingRestore)
+        return;
+    const auto heldReplies = findChildren<DBusHeldReply *>(Qt::FindDirectChildrenOnly);
+    for (DBusHeldReply *reply : heldReplies) {
+        if (!reply->isSettled())
+            return;
+    }
+    QQmlEngine::setObjectOwnership(this, m_savedOwnership);
+    m_ownershipPendingRestore = false;
+}
+
+void DBusAdaptor::heldReplySettled() {
+    maybeRestoreOwnership();
 }
 
 void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessage &msg,

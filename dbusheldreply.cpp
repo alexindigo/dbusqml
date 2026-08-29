@@ -45,5 +45,11 @@ void DBusHeldReply::sendError(const QString &name, const QString &message) {
 
 void DBusHeldReply::settle() {
     m_settled = true;
+    // Ownership audit (0.7.0): CppOwnership while pending → JavaScriptOwnership
+    // after settle (0.5.0 design — intended). The adaptor defers its
+    // post-dispatch ownership restore while any held reply is outstanding;
+    // notify it that one just settled (the last settle triggers the restore).
     QQmlEngine::setObjectOwnership(this, QQmlEngine::JavaScriptOwnership);
+    if (m_adaptor)
+        m_adaptor->heldReplySettled();
 }

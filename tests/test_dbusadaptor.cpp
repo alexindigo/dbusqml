@@ -22,6 +22,7 @@
 #include "dbusadaptor.h"
 #include "dbusconnection.h"
 #include "dbus.h"
+#include "dbuspathdispatcher.h"
 #include "dbustypes.h"
 
 // Test adaptor with QML-exposed properties (simulates QML usage)
@@ -290,6 +291,15 @@ private slots:
     void testMatrixReplyValues();
     void testMatrixGetAllValues();
     void testMatrixSignalValues();
+
+    // Adaptor lifecycle (0.7.0) — the QML-ownership axis.
+    void testLifecycleDestroyAfterDispatch();
+    void testLifecycleGCCollectsAfterDispatch();
+    void testLifecycleHeldReplyBlocksDestroyUntilSettled();
+    void testLifecycleDeclarativeAdaptorUnchanged();
+    void testLifecycleUnregister();
+    void testLifecycleUnregisterErrorsHeldReply();
+    void testLifecycleLeakRegression();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -2578,6 +2588,474 @@ void TestDBusAdaptor::testMalformedVariantSigSignalSafe() {
     QCOMPARE(catcher.lastSignal.signature(), QStringLiteral("v"));
 
     delete adaptor;
+}
+
+// ==================== Adaptor lifecycle (L1–L7, 0.7.0) ====================
+//
+// The LIFECYCLE axis (QML ownership/GC/destroy across dispatch). 0.6.0's JS
+// dispatch path flipped the adaptor to CppOwnership unconditionally and
+// permanently, making dynamically created per-call adaptors (the portal
+// Request pattern — Component.createObject at a caller-chosen handle path)
+// indestructible from QML and leaking one bus registration per call. The
+// fixtures are deliberately QML-shaped: a QQmlEngine-hosted stage creating
+// adaptors via Component.createObject — NOT C++ delete, which ignores QML
+// ownership and is exactly why the 0.6.0 adversarial matrix (C++-shaped)
+// could not see this bug.
+
+// Capture Qt messages: the QML destroy() refusal ("Invalid attempt to
+// destroy() an indestructible object") is a qmlError/qWarning, not a JS
+// exception — try/catch in QML cannot see it. Messages are also forwarded to
+// stderr for debugging.
+class LifecycleMessageCapture {
+public:
+    LifecycleMessageCapture() : m_prior(qInstallMessageHandler(record)) { s_active = this; }
+    ~LifecycleMessageCapture() {
+        s_active = nullptr;
+        qInstallMessageHandler(m_prior);
+    }
+
+    bool contains(const QString &needle) const {
+        for (const QString &m : std::as_const(messages))
+            if (m.contains(needle))
+                return true;
+        return false;
+    }
+    void clear() { messages.clear(); }
+
+    QStringList messages;
+
+private:
+    static LifecycleMessageCapture *s_active;
+    QtMessageHandler m_prior;
+    static void record(QtMsgType, const QMessageLogContext &, const QString &msg) {
+        if (s_active)
+            s_active->messages.append(msg);
+        std::fprintf(stderr, "%s\n", qPrintable(msg));
+    }
+};
+LifecycleMessageCapture *LifecycleMessageCapture::s_active = nullptr;
+
+// The lifecycle fixture stage: creates Request-style adaptors dynamically
+// (initial properties applied before componentComplete, so attachment happens
+// at the caller-chosen service/path — the portal pattern).
+static const char kLifecycleStage[] = R"QML(
+import DBus 1.0
+import QtQml
+QtObject {
+    id: root
+    property var last: null
+    property Component reqComp: Component {
+        DBusAdaptor {
+            property var lastCall: ""
+            function close() { lastCall = "close"; return 0 }
+            function kill() { destroy() }
+        }
+    }
+    property Component heldComp: Component {
+        DBusAdaptor {
+            property var held: null
+            function openFile(handle, appId, parentWindow, title, options) {
+                held = holdReply()
+                var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: 300; running: true; repeat: false }', this)
+                t.triggered.connect(function() { held.send([0, {}]) })
+            }
+            function kill() { destroy() }
+        }
+    }
+    property Component pendingComp: Component {
+        DBusAdaptor {
+            property bool opened: false
+            function openFile(handle, appId, parentWindow, title, options) {
+                holdReply()
+                opened = true
+            }
+            function kill() { destroy() }
+        }
+    }
+    function spawn(service, path) {
+        var a = reqComp.createObject(null, { service: service, path: path, iface: service })
+        root.last = a
+        return a
+    }
+    function spawnHeld(service, path) {
+        var a = heldComp.createObject(null, {
+            service: service, path: path,
+            iface: 'org.freedesktop.impl.portal.FileChooser'
+        })
+        root.last = a
+        return a
+    }
+    function spawnPending(service, path) {
+        var a = pendingComp.createObject(null, {
+            service: service, path: path,
+            iface: 'org.freedesktop.impl.portal.FileChooser'
+        })
+        root.last = a
+        return a
+    }
+}
+)QML";
+
+static QObject *createLifecycleStage(QQmlEngine &engine) {
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    QQmlComponent component(&engine);
+    component.setData(QByteArray(kLifecycleStage), QUrl());
+    if (!component.isReady()) {
+        qWarning() << "lifecycle stage errors:" << component.errorString();
+        return nullptr;
+    }
+    return component.create();
+}
+
+static DBusAdaptor *lifecycleSpawn(QObject *stage, const QString &fn, const QString &service,
+                                   const QString &path) {
+    QMetaObject::invokeMethod(stage, fn.toLatin1().constData(), Q_ARG(QVariant, service),
+                              Q_ARG(QVariant, path));
+    return qobject_cast<DBusAdaptor *>(stage->property("last").value<QObject *>());
+}
+
+// Pump deferred deletes + event-loop turns (GC finalization, DBus delivery).
+static void pumpLifecycle(int turns = 25) {
+    for (int i = 0; i < turns; ++i) {
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QCoreApplication::processEvents();
+        QTest::qWait(20);
+    }
+}
+
+static QDBusMessage lifecycleCall(const QString &service, const QString &path,
+                                  const QString &member, const QVariantList &args = {}) {
+    QDBusMessage m = QDBusMessage::createMethodCall(service, path, service, member);
+    if (!args.isEmpty())
+        m.setArguments(args);
+    return QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+}
+
+// The path is FREED: a subsequent wire call errors with an Unknown*-class
+// error (UnknownObject / ServiceUnknown / UnknownMethod) and the service name
+// is released.
+static void assertPathFreed(const QString &service, const QString &path) {
+    QDBusMessage r = lifecycleCall(service, path, QStringLiteral("close"));
+    QVERIFY2(r.type() == QDBusMessage::ErrorMessage,
+             qPrintable(QStringLiteral("path %1 is still serving (type %2, sig '%3')")
+                            .arg(path)
+                            .arg(int(r.type()))
+                            .arg(r.signature())));
+    QVERIFY2(r.errorName().contains(QStringLiteral("Unknown")), qPrintable(r.errorName()));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !QDBusConnection::sessionBus().interface()->isServiceRegistered(service), 3000);
+}
+
+// L1 — napkin repro: dynamically create a Request-style adaptor at a unique
+// path, dispatch one method (remote caller), then QML destroy(). Must
+// succeed (no "indestructible" error) and the path must be FREED (wire assert
+// + service release + dispatcher registry back to baseline). 0.6.0:
+// destroy() is refused and the path keeps serving — one leaked bus
+// registration per call.
+void TestDBusAdaptor::testLifecycleDestroyAfterDispatch() {
+    const int baseline = DBusPathDispatcher::liveCount();
+    QQmlEngine engine;
+    QObject *stage = createLifecycleStage(engine);
+    QVERIFY(stage != nullptr);
+
+    QPointer<DBusAdaptor> guard =
+        lifecycleSpawn(stage, QStringLiteral("spawn"), QStringLiteral("org.dbusqml.LifecycleL1"),
+                       QStringLiteral("/LifecycleL1"));
+    QVERIFY(guard != nullptr);
+
+    LifecycleMessageCapture capture;
+
+    // One dispatch through the JS path (remote caller).
+    QDBusMessage reply = lifecycleCall(QStringLiteral("org.dbusqml.LifecycleL1"),
+                                       QStringLiteral("/LifecycleL1"), QStringLiteral("close"));
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.arguments().first().toInt(), 0);
+
+    // QML-side destroy().
+    QMetaObject::invokeMethod(guard.data(), "kill");
+    pumpLifecycle();
+
+    QVERIFY2(guard.isNull(),
+             "destroy() after dispatch must succeed — 0.6.0 refuses (indestructible object)");
+    QVERIFY2(!capture.contains(QStringLiteral("indestructible")),
+             "no destroy() refusal is acceptable after dispatch");
+
+    assertPathFreed(QStringLiteral("org.dbusqml.LifecycleL1"), QStringLiteral("/LifecycleL1"));
+    QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
+
+    delete stage;
+}
+
+// L2 — GC path: create dynamically, dispatch, drop all JS references, force
+// gc() (+ event-loop turns) → adaptor collected → path freed (same wire
+// asserts). 0.6.0: leaks forever.
+void TestDBusAdaptor::testLifecycleGCCollectsAfterDispatch() {
+    const int baseline = DBusPathDispatcher::liveCount();
+    QQmlEngine engine;
+    QObject *stage = createLifecycleStage(engine);
+    QVERIFY(stage != nullptr);
+
+    QPointer<DBusAdaptor> guard =
+        lifecycleSpawn(stage, QStringLiteral("spawn"), QStringLiteral("org.dbusqml.LifecycleL2"),
+                       QStringLiteral("/LifecycleL2"));
+    QVERIFY(guard != nullptr);
+
+    QDBusMessage reply = lifecycleCall(QStringLiteral("org.dbusqml.LifecycleL2"),
+                                       QStringLiteral("/LifecycleL2"), QStringLiteral("close"));
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+
+    // Drop every JS reference (including the stage's `last` stash) and force
+    // collection with event-loop turns.
+    stage->setProperty("last", QVariant());
+    for (int i = 0; i < 20 && guard != nullptr; ++i) {
+        engine.collectGarbage();
+        pumpLifecycle(4);
+    }
+
+    QVERIFY2(guard.isNull(),
+             "GC must collect a dispatched dynamic adaptor — 0.6.0 leaks it forever");
+
+    assertPathFreed(QStringLiteral("org.dbusqml.LifecycleL2"), QStringLiteral("/LifecycleL2"));
+    QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
+
+    delete stage;
+}
+
+// L3 — held-reply interplay: dispatch a holdReply() method → while pending,
+// destroy()/GC must NOT collect the adaptor (ownership still Cpp; the QML
+// destroy() refusal here is CORRECT and asserted) → settle → restore happens
+// → destroy() now works.
+void TestDBusAdaptor::testLifecycleHeldReplyBlocksDestroyUntilSettled() {
+    QQmlEngine engine;
+    QObject *stage = createLifecycleStage(engine);
+    QVERIFY(stage != nullptr);
+
+    QPointer<DBusAdaptor> guard =
+        lifecycleSpawn(stage, QStringLiteral("spawnHeld"),
+                       QStringLiteral("org.dbusqml.LifecycleL3"), QStringLiteral("/LifecycleL3"));
+    QVERIFY(guard != nullptr);
+
+    LifecycleMessageCapture capture;
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.LifecycleL3"), QStringLiteral("/LifecycleL3"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+
+    // The handler ran and is holding the reply.
+    QTRY_VERIFY_WITH_TIMEOUT(guard->property("held").value<QObject *>() != nullptr, 3000);
+
+    // While pending: QML destroy() must be REFUSED (GC protection) and the
+    // adaptor must stay alive.
+    QMetaObject::invokeMethod(guard.data(), "kill");
+    pumpLifecycle();
+    QVERIFY2(guard != nullptr, "adaptor must survive while a held reply is pending");
+    QVERIFY2(capture.contains(QStringLiteral("indestructible")),
+             "destroy() refusal while a reply is held is the correct behavior");
+
+    // Settle: the handler's timer sends the reply; the last settle restores
+    // the pre-dispatch ownership. (The timer may fire during the pump above —
+    // poll the spy rather than waiting for a fresh signal.)
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    QVERIFY(!watcher->isError());
+    QCOMPARE(watcher->reply().signature(), QStringLiteral("ua{sv}"));
+
+    // After settle: destroy() works again.
+    capture.clear();
+    QMetaObject::invokeMethod(guard.data(), "kill");
+    pumpLifecycle();
+    QVERIFY2(guard.isNull(), "destroy() must succeed after the last held reply settled");
+    QVERIFY2(!capture.contains(QStringLiteral("indestructible")), "no refusal after settle");
+
+    assertPathFreed(QStringLiteral("org.dbusqml.LifecycleL3"), QStringLiteral("/LifecycleL3"));
+    delete watcher;
+    delete stage;
+}
+
+// L4 — declarative pin: a declaratively-declared adaptor behaves exactly as
+// today through repeated dispatch — ownership stays CppOwnership (flip+restore
+// are no-ops), repeated calls answer, QML destroy() stays forbidden (unchanged
+// pin), and C++ delete still tears the path down.
+void TestDBusAdaptor::testLifecycleDeclarativeAdaptorUnchanged() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    LifecycleMessageCapture capture;
+
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.LifecycleL4'\n"
+                      "  path: '/LifecycleL4'\n"
+                      "  iface: 'org.dbusqml.LifecycleL4'\n"
+                      "  function close() { return 0 }\n"
+                      "  function kill() { destroy() }\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    QPointer<DBusAdaptor> guard = qobject_cast<DBusAdaptor *>(component.create());
+    QVERIFY(guard != nullptr);
+    QCOMPARE(QQmlEngine::objectOwnership(guard), QQmlEngine::CppOwnership);
+
+    for (int i = 0; i < 3; ++i) {
+        QDBusMessage reply = lifecycleCall(QStringLiteral("org.dbusqml.LifecycleL4"),
+                                           QStringLiteral("/LifecycleL4"), QStringLiteral("close"));
+        QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(reply.arguments().first().toInt(), 0);
+    }
+    QCOMPARE(QQmlEngine::objectOwnership(guard), QQmlEngine::CppOwnership);
+
+    // QML destroy() on a declarative object stays forbidden (unchanged).
+    QMetaObject::invokeMethod(guard.data(), "kill");
+    pumpLifecycle();
+    QVERIFY2(guard != nullptr, "declarative adaptors are not QML-destroyable (unchanged)");
+    QVERIFY2(capture.contains(QStringLiteral("indestructible")),
+             "declarative destroy() refusal is the unchanged pin");
+
+    delete guard.data();
+    pumpLifecycle();
+    QVERIFY(guard.isNull());
+    assertPathFreed(QStringLiteral("org.dbusqml.LifecycleL4"), QStringLiteral("/LifecycleL4"));
+}
+
+// L5 — unregister(): deterministic retirement independent of GC timing. The
+// path is freed immediately (wire assert), the object stays alive and inert,
+// a second unregister() is a warned no-op, and GC afterwards collects
+// cleanly.
+void TestDBusAdaptor::testLifecycleUnregister() {
+    const int baseline = DBusPathDispatcher::liveCount();
+    QQmlEngine engine;
+    QObject *stage = createLifecycleStage(engine);
+    QVERIFY(stage != nullptr);
+
+    QPointer<DBusAdaptor> guard =
+        lifecycleSpawn(stage, QStringLiteral("spawn"), QStringLiteral("org.dbusqml.LifecycleL5"),
+                       QStringLiteral("/LifecycleL5"));
+    QVERIFY(guard != nullptr);
+
+    LifecycleMessageCapture capture;
+
+    QDBusMessage reply = lifecycleCall(QStringLiteral("org.dbusqml.LifecycleL5"),
+                                       QStringLiteral("/LifecycleL5"), QStringLiteral("close"));
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+
+    QMetaObject::invokeMethod(guard.data(), "unregister");
+
+    // Path freed immediately.
+    assertPathFreed(QStringLiteral("org.dbusqml.LifecycleL5"), QStringLiteral("/LifecycleL5"));
+    QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
+
+    // The QObject is left alive for QML to drop whenever.
+    QVERIFY2(guard != nullptr, "unregister() must leave the QObject alive");
+
+    // Second unregister() is a warned no-op.
+    capture.clear();
+    QMetaObject::invokeMethod(guard.data(), "unregister");
+    QVERIFY2(capture.contains(QStringLiteral("already detached")), "second unregister() must warn");
+    QVERIFY(guard != nullptr);
+
+    // GC afterwards collects cleanly (ownership was restored after dispatch).
+    stage->setProperty("last", QVariant());
+    for (int i = 0; i < 20 && guard != nullptr; ++i) {
+        engine.collectGarbage();
+        pumpLifecycle(4);
+    }
+    QVERIFY2(guard.isNull(), "GC must collect an unregistered adaptor");
+
+    delete stage;
+}
+
+// L5 (held-reply interplay): unregister() with an outstanding held reply
+// errors the caller with the same code the destructor uses, and the object is
+// GC-collectable afterwards.
+void TestDBusAdaptor::testLifecycleUnregisterErrorsHeldReply() {
+    const int baseline = DBusPathDispatcher::liveCount();
+    QQmlEngine engine;
+    QObject *stage = createLifecycleStage(engine);
+    QVERIFY(stage != nullptr);
+
+    QPointer<DBusAdaptor> guard =
+        lifecycleSpawn(stage, QStringLiteral("spawnPending"),
+                       QStringLiteral("org.dbusqml.LifecycleL5H"), QStringLiteral("/LifecycleL5H"));
+    QVERIFY(guard != nullptr);
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.LifecycleL5H"), QStringLiteral("/LifecycleL5H"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QTRY_VERIFY_WITH_TIMEOUT(guard->property("opened").toBool(), 3000);
+
+    QMetaObject::invokeMethod(guard.data(), "unregister");
+
+    // The outstanding held reply is errored, not left to time out.
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    QVERIFY(watcher->isError());
+    QCOMPARE(watcher->reply().type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(watcher->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+    QCOMPARE(watcher->reply().errorMessage(),
+             QStringLiteral("adaptor unregistered with reply pending"));
+
+    assertPathFreed(QStringLiteral("org.dbusqml.LifecycleL5H"), QStringLiteral("/LifecycleL5H"));
+    QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
+
+    QVERIFY(guard != nullptr);
+    stage->setProperty("last", QVariant());
+    for (int i = 0; i < 20 && guard != nullptr; ++i) {
+        engine.collectGarbage();
+        pumpLifecycle(4);
+    }
+    QVERIFY2(guard.isNull(), "GC must collect an unregistered adaptor with no pending replies");
+
+    delete watcher;
+    delete stage;
+}
+
+// L6 — leak-count regression: N create→dispatch→destroy cycles at distinct
+// paths → the dispatcher registry returns to its baseline (no accumulation).
+void TestDBusAdaptor::testLifecycleLeakRegression() {
+    const int baseline = DBusPathDispatcher::liveCount();
+    QQmlEngine engine;
+    QObject *stage = createLifecycleStage(engine);
+    QVERIFY(stage != nullptr);
+
+    LifecycleMessageCapture capture;
+
+    const int cycles = 5;
+    for (int i = 0; i < cycles; ++i) {
+        const QString service = QStringLiteral("org.dbusqml.LifecycleL6%1").arg(i);
+        const QString path = QStringLiteral("/LifecycleL6/%1").arg(i);
+        QPointer<DBusAdaptor> guard = lifecycleSpawn(stage, QStringLiteral("spawn"), service, path);
+        QVERIFY(guard != nullptr);
+
+        QDBusMessage reply = lifecycleCall(service, path, QStringLiteral("close"));
+        QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+
+        QMetaObject::invokeMethod(guard.data(), "kill");
+        pumpLifecycle();
+        QVERIFY2(guard.isNull(),
+                 qPrintable(QStringLiteral("cycle %1: destroy must succeed").arg(i)));
+    }
+
+    // Registry back to baseline — every path and dispatcher torn down.
+    QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
+
+    for (int i = 0; i < cycles; ++i) {
+        assertPathFreed(QStringLiteral("org.dbusqml.LifecycleL6%1").arg(i),
+                        QStringLiteral("/LifecycleL6/%1").arg(i));
+    }
+    QVERIFY2(!capture.contains(QStringLiteral("indestructible")),
+             "no destroy() refusals across the whole soak");
+
+    delete stage;
 }
 
 // ==================== Adversarial input matrix (0.6.0) ====================

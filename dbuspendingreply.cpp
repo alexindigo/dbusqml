@@ -9,6 +9,13 @@
 
 DBusPendingReply::DBusPendingReply(QObject *parent) : QObject(parent) {}
 
+// Ownership audit (0.7.0): DBusPendingReply is created C++-side (by the
+// proxy's call/getProperty and DbusMethodHelper::callMethod, and by
+// DBusConnection::asyncCall) parented to its creator — parented ⇒ never
+// JS-GC collected, destroyed with its owner. No ownership flip exists on
+// this path (verified by the 0.7.0 sweep); the reply data survives past
+// finished() via caching, so the QML consumer can read it at leisure.
+
 DBusPendingReply::~DBusPendingReply() {}
 
 void DBusPendingReply::setWatcher(QDBusPendingCallWatcher *watcher) {

@@ -573,6 +573,10 @@ void DBusProxy::setupDynamicMethods(const QStringList &methodNames) {
         return;
     }
 
+    // Ownership audit (0.7.0): the helper is parented to the proxy. A parented
+    // QObject is never collected by the JS GC, so the dynamic method wrappers
+    // keep a live helper for the proxy's lifetime — no explicit ownership
+    // flip is needed here (parented ⇒ GC-safe).
     auto *helper = new DbusMethodHelper(this, this);
     QJSValue helperObj = engine->newQObject(helper);
 

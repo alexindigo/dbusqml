@@ -29,6 +29,11 @@ public:
     static void detach(QDBusConnection conn, const QString &path, const QString &service,
                        DBusAdaptor *adaptor);
 
+    // Library-private diagnostics: number of live path dispatchers. Used by
+    // the lifecycle tests to assert teardown returns the registry to its
+    // baseline (no leaked bus registrations).
+    static int liveCount();
+
     // QDBusVirtualObject
     QString introspect(const QString &path) const override;
     bool handleMessage(const QDBusMessage &message, const QDBusConnection &connection) override;
