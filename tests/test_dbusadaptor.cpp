@@ -285,6 +285,11 @@ private slots:
     // Malformed-signature crash fix (0.6.0): variant(x, "(") loud-fails.
     void testMalformedVariantSigLoudFails();
     void testMalformedVariantSigSignalSafe();
+
+    // Adversarial input matrix (0.6.0) — data-driven pins per exit.
+    void testMatrixReplyValues();
+    void testMatrixGetAllValues();
+    void testMatrixSignalValues();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -2573,6 +2578,246 @@ void TestDBusAdaptor::testMalformedVariantSigSignalSafe() {
     QCOMPARE(catcher.lastSignal.signature(), QStringLiteral("v"));
 
     delete adaptor;
+}
+
+// ==================== Adversarial input matrix (0.6.0) ====================
+//
+// Hostile values at the adaptor's marshal exits (reply / properties /
+// signals), pinned from the Phase 1 probe matrix. Outcome contract per cell:
+// correct wire type, OR loud-fail + safe fallback, OR error reply / skip —
+// never a crash, hang, or silent wrong type.
+
+class MatrixCatcher : public QObject {
+    Q_OBJECT
+public:
+    QDBusMessage last;
+    int count = 0;
+public slots:
+    void onSignal(const QDBusMessage &msg) {
+        last = msg;
+        ++count;
+    }
+};
+
+static const char kMatrixStage[] = R"QML(
+import DBus 1.0
+import QtQml
+QtObject {
+    id: root
+    property var adv: DBusAdaptor {
+        id: adv
+        service: "org.dbusqml.AMatrix"
+        path: "/AMatrix"
+        iface: "org.dbusqml.AMatrix"
+        property var pv: null
+        function makeValue(id) {
+            if (id === "null") return null
+            if (id === "undefined") return undefined
+            if (id === "qobject") return Qt.createQmlObject("import QtQml; QtObject {}", adv)
+            if (id === "func") return (function() {})
+            if (id === "date") return new Date()
+            if (id === "qobject-map") return { k: Qt.createQmlObject("import QtQml; QtObject {}", adv) }
+            if (id === "qobject-list") return [Qt.createQmlObject("import QtQml; QtObject {}", adv)]
+            if (id === "func-map") return { k: (function() {}) }
+            if (id === "cycle-obj") { var a = {}; a.self = a; return a }
+            if (id === "cycle-arr") { var b = []; b.push(b); return b }
+            if (id === "nan") return NaN
+            if (id === "inf") return Infinity
+            if (id === "neginf") return -Infinity
+            if (id === "nul-str") return "a\u0000b"
+            if (id === "big-str") { var s = "x"; for (var i = 0; i < 20; i++) s = s + s; return s }
+            if (id === "empty-map") return ({})
+            if (id === "empty-list") return []
+            if (id === "deep12") {
+                var d = 1
+                for (var j = 0; j < 12; j++) d = [d]
+                return d
+            }
+            if (id === "mixed") return [1, "a", {}]
+            if (id === "date-list") return [new Date()]
+            if (id === "value-dict") return { value: 42 }
+            if (id === "value-struct") return { value: [0.1, 0.2] }
+            return null
+        }
+        function replyM(id) { return makeValue(id) }
+        function stashP(id) { pv = makeValue(id) }
+        function emitM(id) { emitSignal("Sig", [makeValue(id)]) }
+    }
+}
+)QML";
+
+static QObject *matrixStage = nullptr;
+static QObject *matrixAdaptor = nullptr;
+
+static void ensureMatrixStage() {
+    if (matrixStage)
+        return;
+    static QQmlEngine *engine = nullptr;
+    if (!engine) {
+        engine = new QQmlEngine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine->addImportPath(binDir.path());
+        engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    }
+    QQmlComponent component(engine);
+    component.setData(QByteArray(kMatrixStage), QUrl());
+    if (!component.isReady())
+        QFAIL(qPrintable(component.errorString()));
+    matrixStage = component.create();
+    QVERIFY(matrixStage != nullptr);
+    for (QObject *ch : matrixStage->findChildren<QObject *>()) {
+        if (ch->inherits("DBusAdaptor")) {
+            matrixAdaptor = ch;
+            break;
+        }
+    }
+    QVERIFY(matrixAdaptor != nullptr);
+    QTest::qWait(300);
+}
+
+static QDBusMessage matrixCall(const QString &member, const QVariantList &args = {}) {
+    // GetAll/Get are Properties-interface calls; everything else targets the
+    // adaptor's own interface.
+    const QString iface = (member == QStringLiteral("GetAll") || member == QStringLiteral("Get"))
+                              ? QStringLiteral("org.freedesktop.DBus.Properties")
+                              : QStringLiteral("org.dbusqml.AMatrix");
+    QDBusMessage m = QDBusMessage::createMethodCall(QStringLiteral("org.dbusqml.AMatrix"),
+                                                    QStringLiteral("/AMatrix"), iface, member);
+    if (!args.isEmpty())
+        m.setArguments(args);
+    return QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+}
+
+// E1 — the reply exit across the value classes.
+void TestDBusAdaptor::testMatrixReplyValues() {
+    ensureMatrixStage();
+    struct Cell {
+        const char *id;
+        bool error;      // ErrorMessage (guard) vs ReplyMessage
+        const char *sig; // expected reply signature (Void → "")
+    };
+    const Cell cells[] = {
+        {"null", true, ""},
+        {"undefined", false, ""},
+        {"qobject", true, ""},
+        {"func", true, ""},
+        {"qobject-map", true, ""},
+        {"func-map", true, ""},
+        {"nan", false, "d"},
+        {"inf", false, "d"},
+        {"neginf", false, "d"},
+        {"nul-str", false, "s"},
+        {"big-str", false, "s"},
+        {"empty-map", false, "a{sv}"},
+        {"empty-list", false, "av"},
+        {"deep12", false, "av"},
+        {"mixed", false, "av"},
+        {"cycle-obj", false, "a{sv}"},
+        {"cycle-arr", false, "av"},
+        {"date", false, "((iii)(iiii)i)"},
+        {"value-dict", false, "a{sv}"},
+        {"value-struct", false, "a{sv}"},
+    };
+    for (const Cell &c : cells) {
+        QDBusMessage r = matrixCall(QStringLiteral("replyM"), {QString::fromLatin1(c.id)});
+        if (c.error) {
+            QVERIFY2(r.type() == QDBusMessage::ErrorMessage,
+                     qPrintable(QStringLiteral("cell %1").arg(c.id)));
+            QVERIFY2(r.errorName() == QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                     qPrintable(QStringLiteral("cell %1").arg(c.id)));
+        } else {
+            QVERIFY2(r.type() == QDBusMessage::ReplyMessage,
+                     qPrintable(QStringLiteral("cell %1").arg(c.id)));
+            QVERIFY2(r.signature() == QString::fromLatin1(c.sig),
+                     qPrintable(QStringLiteral("cell %1 got sig '%2' err='%3'")
+                                    .arg(c.id, r.signature(), r.errorName())));
+        }
+    }
+}
+
+// E4 — the GetAll exit: unmarshalable properties skipped, benign present.
+void TestDBusAdaptor::testMatrixGetAllValues() {
+    ensureMatrixStage();
+    const char *poison[] = {"qobject", "func", "qobject-map", "func-map", "qobject-list"};
+    const char *benign[] = {"nan",        "inf",   "nul-str",   "big-str",   "empty-map",
+                            "empty-list", "mixed", "cycle-obj", "value-dict"};
+    for (const char *id : poison) {
+        QCOMPARE(matrixCall(QStringLiteral("stashP"), {QString::fromLatin1(id)}).type(),
+                 QDBusMessage::ReplyMessage);
+        QDBusMessage r =
+            matrixCall(QStringLiteral("GetAll"), {QStringLiteral("org.dbusqml.AMatrix")});
+        QVERIFY2(r.type() == QDBusMessage::ReplyMessage,
+                 qPrintable(QStringLiteral("cell %1: %2").arg(id, r.errorName())));
+        const QVariantMap props = unwrapDbus(r.arguments().first()).toMap();
+        QVERIFY2(!props.contains(QStringLiteral("pv")),
+                 qPrintable(QStringLiteral("cell %1 must be skipped").arg(id)));
+    }
+    for (const char *id : benign) {
+        QCOMPARE(matrixCall(QStringLiteral("stashP"), {QString::fromLatin1(id)}).type(),
+                 QDBusMessage::ReplyMessage);
+        QDBusMessage r =
+            matrixCall(QStringLiteral("GetAll"), {QStringLiteral("org.dbusqml.AMatrix")});
+        QVERIFY2(r.type() == QDBusMessage::ReplyMessage,
+                 qPrintable(QStringLiteral("cell %1: %2").arg(id, r.errorName())));
+        const QVariantMap props = unwrapDbus(r.arguments().first()).toMap();
+        QVERIFY2(props.contains(QStringLiteral("pv")),
+                 qPrintable(QStringLiteral("cell %1 must be present").arg(id)));
+    }
+}
+
+// E5 — the emitSignal exit: poison warned+skipped, benign delivered.
+void TestDBusAdaptor::testMatrixSignalValues() {
+    ensureMatrixStage();
+    MatrixCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.AMatrix"), QStringLiteral("/AMatrix"),
+                        QStringLiteral("org.dbusqml.AMatrix"), QStringLiteral("Sig"), &catcher,
+                        SLOT(onSignal(QDBusMessage))));
+
+    const char *skipped[] = {"null",        "undefined", "qobject",     "func",
+                             "qobject-map", "func-map",  "qobject-list"};
+    for (const char *id : skipped) {
+        int before = catcher.count;
+        QCOMPARE(matrixCall(QStringLiteral("emitM"), {QString::fromLatin1(id)}).type(),
+                 QDBusMessage::ReplyMessage);
+        QTest::qWait(200);
+        QVERIFY2(catcher.count == before,
+                 qPrintable(QStringLiteral("cell %1 must be skipped").arg(id)));
+    }
+
+    struct Cell {
+        const char *id;
+        const char *sig;
+    };
+    const Cell delivered[] = {
+        {"nan", "d"},
+        {"inf", "d"},
+        {"neginf", "d"},
+        {"nul-str", "s"},
+        {"big-str", "s"},
+        {"empty-map", "a{sv}"},
+        {"empty-list", "av"},
+        {"deep12", "av"},
+        {"mixed", "av"},
+        {"cycle-obj", "a{sv}"},
+        {"cycle-arr", "av"},
+        {"date-list", "av"},
+        {"value-dict", "a{sv}"},
+        {"value-struct", "a{sv}"},
+    };
+    for (const Cell &c : delivered) {
+        int before = catcher.count;
+        QCOMPARE(matrixCall(QStringLiteral("emitM"), {QString::fromLatin1(c.id)}).type(),
+                 QDBusMessage::ReplyMessage);
+        QTest::qWait(200);
+        QVERIFY2(catcher.count == before + 1,
+                 qPrintable(QStringLiteral("cell %1 must be delivered").arg(c.id)));
+        QVERIFY2(catcher.last.signature() == QString::fromLatin1(c.sig),
+                 qPrintable(QStringLiteral("cell %1").arg(c.id)));
+    }
+    bus.disconnect(QStringLiteral("org.dbusqml.AMatrix"), QStringLiteral("/AMatrix"),
+                   QStringLiteral("org.dbusqml.AMatrix"), QStringLiteral("Sig"), &catcher,
+                   SLOT(onSignal(QDBusMessage)));
 }
 
 int main(int argc, char *argv[]) {

@@ -298,6 +298,12 @@ QStringList DBusProxy::argTypesForMethod(const QString &method) const {
                 break;
             out << argSig;
         }
+        // A non-empty override that splits to nothing is a typo — say so
+        // instead of silently falling back to inference.
+        if (out.isEmpty() && !sig.isEmpty())
+            qWarning("dbusqml: unparseable declared signature '%s' for %s — ignoring (inference "
+                     "used)",
+                     qPrintable(sig), qPrintable(method));
         return out;
     }
     return m_methodArgTypes.value(method);

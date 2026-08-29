@@ -1778,6 +1778,23 @@ private slots:
         delete ok;
     }
 
+    void testClientMalformedSignatureFallsBack() {
+        DBusProxy *proxy = clientGuardProxy();
+        proxy->setSignatures(QVariantMap{{QStringLiteral("Any"), QStringLiteral("(")}});
+
+        QTest::ignoreMessage(
+            QtWarningMsg,
+            "dbusqml: unparseable declared signature '(' for Any — ignoring (inference used)");
+        DBusPendingReply *ok = proxy->call(QStringLiteral("Any"), {9});
+        QVERIFY(ok != nullptr);
+        QSignalSpy spy(ok, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(5000));
+        QVERIFY(!ok->isError());
+        QCOMPARE(ok->value().toString(), QStringLiteral("i"));
+        delete ok;
+        delete proxy;
+    }
+
     void testClientSetPropertyPoisonDropped() {
         QObject poison;
         DBusProxy *proxy = clientGuardProxy();
