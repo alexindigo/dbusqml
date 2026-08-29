@@ -281,6 +281,10 @@ private slots:
     // Typed C++ return capture (0.6.0).
     void testTypedCppReturnsRoundTrip();
     void testTypedCppOverArgCapWarns();
+
+    // Malformed-signature crash fix (0.6.0): variant(x, "(") loud-fails.
+    void testMalformedVariantSigLoudFails();
+    void testMalformedVariantSigSignalSafe();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -2476,6 +2480,99 @@ void TestDBusAdaptor::testTypedCppOverArgCapWarns() {
     m.setArguments({1, 2, 3, 4, 5, 6});
     QDBusMessage r = QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
     QCOMPARE(r.type(), QDBusMessage::ErrorMessage);
+}
+
+// A malformed declared signature ("(" — unbalanced struct) used to build a
+// QDBusArgument libdbus aborts on (dbus_message_iter_open_container
+// assertion). It must loud-fail to inference instead — no crash, reply still
+// served.
+void TestDBusAdaptor::testMalformedVariantSigLoudFails() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "import DBus 1.0 as DBusQML\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.BadSig'\n"
+                      "  path: '/BadSig'\n"
+                      "  iface: 'org.dbusqml.BadSig'\n"
+                      "  function get() { return new DBusQML.variant([1, 2], '(') }\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    auto *adaptor = component.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+
+    // Arm the expectation only now — engine setup warnings must not consume it.
+    QTest::ignoreMessage(QtWarningMsg,
+                         "dbusqml: cannot produce declared signature ( for value of type "
+                         "QVariantList — falling back to inference");
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.BadSig"), QStringLiteral("/BadSig"),
+        QStringLiteral("org.dbusqml.BadSig"), QStringLiteral("get"));
+    QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    // Loud-fail to inference: the variant payload falls back to an av list,
+    // still wrapped as v — no crash, no silent wrong struct.
+    QCOMPARE(reply.signature(), QStringLiteral("v"));
+    const QVariant payload = unwrapDbus(reply.arguments().first());
+    QCOMPARE(payload.toList().size(), 2);
+    QCOMPARE(payload.toList().at(0).toInt(), 1);
+    QCOMPARE(payload.toList().at(1).toInt(), 2);
+    delete adaptor;
+}
+
+// Same malformed signature on the signal path: warned and skipped, process
+// alive (signals have no error-reply channel).
+void TestDBusAdaptor::testMalformedVariantSigSignalSafe() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "import DBus 1.0 as DBusQML\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.BadSigSig'\n"
+                      "  path: '/BadSigSig'\n"
+                      "  iface: 'org.dbusqml.BadSigSig'\n"
+                      "  function fire() {\n"
+                      "    emitSignal('Sig', [new DBusQML.variant([1, 2], '(')])\n"
+                      "  }\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    auto *adaptor = component.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.BadSigSig"), QStringLiteral("/BadSigSig"),
+                        QStringLiteral("org.dbusqml.BadSigSig"), QStringLiteral("Sig"), &catcher,
+                        SLOT(onSignal(QDBusMessage))));
+
+    QTest::ignoreMessage(QtWarningMsg,
+                         "dbusqml: cannot produce declared signature ( for value of type "
+                         "QVariantList — falling back to inference");
+    QDBusMessage call = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.BadSigSig"), QStringLiteral("/BadSigSig"),
+        QStringLiteral("org.dbusqml.BadSigSig"), QStringLiteral("fire"));
+    QCOMPARE(bus.call(call, QDBus::Block, 3000).type(), QDBusMessage::ReplyMessage);
+
+    // The signal IS delivered with the inferred payload (loud-fail falls back
+    // to inference rather than skipping) — and the process is alive.
+    for (int i = 0; i < 20 && catcher.count == 0; ++i)
+        QTest::qWait(100);
+    QCOMPARE(catcher.count, 1);
+    QCOMPARE(catcher.lastSignal.signature(), QStringLiteral("v"));
+
+    delete adaptor;
 }
 
 int main(int argc, char *argv[]) {

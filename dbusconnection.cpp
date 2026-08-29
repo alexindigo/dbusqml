@@ -621,6 +621,10 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
 
     if (sig.startsWith(QLatin1Char('('))) {
         const QString inner = sig.mid(1, sig.size() - 2);
+        // "()" / "(": an empty struct is not a valid D-Bus type — writing one
+        // aborts inside libdbus. Loud-fail instead.
+        if (inner.isEmpty())
+            return false;
         arg.beginStructure();
         const QVariantList members = v.toList();
         int pos = 0;
@@ -840,6 +844,16 @@ static QVariant marshalContainerBySignature(const QString &sig, const QVariant &
 }
 
 QVariant writeBySignature(const QString &sig, const QVariant &value) {
+    // Reject malformed signatures BEFORE building anything: an unbalanced or
+    // empty container signature produces a QDBusArgument whose contained
+    // signature libdbus rejects with an assertion abort (remotely triggerable
+    // via variant(x, sig) — the 0.5.2-era crash class on the reply path).
+    // Loud-fail to the caller instead, which falls back to inference.
+    if (sig.isEmpty())
+        return QVariant();
+    int pos = 0;
+    if (firstCompleteType(sig, pos) != sig || pos != sig.size())
+        return QVariant();
     QDBusArgument arg;
     if (!writeValueBySignature(arg, sig, value))
         return QVariant();
