@@ -4,6 +4,37 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-08-28
+
+### Fixed
+
+- **Per-call adaptors are no longer indestructible after their first
+  dispatch.** The method-dispatch path flipped the adaptor to
+  `CppOwnership` unconditionally and permanently — a dynamically created
+  `DBusAdaptor` (the portal Request pattern: one instance per call via
+  `Component.createObject` at the caller-chosen handle path) could never be
+  `destroy()`ed from QML again ("Invalid attempt to destroy() an
+  indestructible object") and leaked one bus registration per call. The
+  JS-GC protection is now scoped to the dispatch itself: the pre-dispatch
+  ownership is saved and restored afterwards — deferred while any
+  `DBusHeldReply` is outstanding (the adaptor must outlive the calls it can
+  still answer; the last settle performs the restore). Declarative adaptors
+  are unaffected (their ownership was already `CppOwnership`; the flip and
+  restore are no-ops there). A lifecycle test axis (L1–L6: destroy, GC,
+  held-reply interplay, declarative pin, `unregister()`, leak-count
+  regression) now pins this dimension permanently.
+
+### Added
+
+- **`DBusAdaptor.unregister()`** — deterministic retirement of a dynamically
+  created adaptor, independent of GC timing: frees the object path and
+  releases the service reference immediately, errors out outstanding held
+  replies (same code the destructor runs), and leaves the QObject alive for
+  QML to drop whenever. One-way: re-registration after `unregister()` is not
+  supported; a second call warns and does nothing. Covers the "free the bus
+  path NOW, collect the object later" case — e.g. a caller-side `Close` on a
+  portal Request object.
+
 ## [0.6.0] — 2026-08-28
 
 ### Changed

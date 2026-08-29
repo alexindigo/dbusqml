@@ -351,6 +351,7 @@ introspection.
 | :--- | :--- | :--- |
 | `emitSignal(name, args)` | `string name`, `list args` | Emit a D-Bus signal on this adaptor's path/interface. |
 | `holdReply()` | — | Defer the current method call; returns a `DBusHeldReply` (see below). |
+| `unregister()` | — | Retire this adaptor's bus registration immediately (see *Per-call adaptor lifecycle* below). |
 
 #### Deferred replies
 
@@ -447,6 +448,57 @@ them.
 > routes to an adaptor declaring that interface. Split such an adaptor into
 > co-located adaptors (one per interface, sharing `service` and `path`), which
 > is the pattern this section enables.
+
+#### Per-call adaptor lifecycle (0.7.0)
+
+`DBusAdaptor` is safe to create dynamically — one instance per call at a
+unique object path, the shape portal backends need (a Request object per
+portal call):
+
+```qml
+// The Request pattern: create per call, retire per call.
+property Component requestComp: Component {
+    DBusAdaptor {
+        function close() { /* caller cancelled */ }
+    }
+}
+
+function newRequest(handle) {
+    return requestComp.createObject(null, {
+        service: "org.freedesktop.impl.portal.MyShell",
+        path: handle,
+        iface: "org.freedesktop.impl.portal.Request"
+    })
+}
+```
+
+Lifecycle semantics (changed in 0.7.0 — on 0.6.0 the first dispatch made such
+an adaptor indestructible and leaked its bus registration):
+
+- **`destroy()` works after dispatch.** The adaptor protects itself from the
+  JS garbage collector only for the duration of a method dispatch. Once the
+  dispatch ends (and no deferred reply is outstanding), ownership returns to
+  what it was — for dynamically created objects that means `destroy()` from
+  QML succeeds and the GC collects the object once QML drops all references.
+  Either way the destructor frees the object path and releases the service
+  name reference.
+- **GC behavior.** A dynamically created adaptor with no QML references is
+  collected on the next `gc()` and its path freed. Declaratively declared
+  adaptors are unchanged: they are engine-managed, `destroy()` is refused on
+  them, and repeated dispatch never alters that.
+- **Held replies block retirement.** While a `holdReply()` reply is
+  outstanding, the adaptor stays GC-protected and QML `destroy()` is refused
+  (this is correct — the adaptor is the only object that can answer the
+  caller). After the last held reply settles, destroy()/GC work again.
+  Destroying or unregistering the adaptor with a reply still held errors the
+  caller (`org.freedesktop.DBus.Error.Failed`) instead of hanging it.
+- **`unregister()` — deterministic retirement.** Frees the object path and
+  releases the service reference *immediately*, errors out outstanding held
+  replies, and leaves the QObject alive for QML to drop whenever (destroy()
+  and GC then work normally). One-way: re-registration after `unregister()`
+  is not supported; a second `unregister()` warns and does nothing. Use it
+  when the bus path must go away now — e.g. a caller-side `Close` on a portal
+  Request — without waiting for GC timing.
 
 ---
 
