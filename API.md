@@ -103,7 +103,7 @@ Properties auto-update via `PropertiesChanged` signals. Property names follow QM
 | `emitSignal(name, args)` | `string name`, `list args` | — | Emit a D-Bus signal from this proxy's path/interface. |
 | `connectToBus(address)` | `string address` | `DBusConnection` | (static) Connect to a custom D-Bus address. Returns null on failure. |
 
-**Boundary errors (0.6.0+):** arguments that cannot be marshaled (a
+**Boundary errors:** arguments that cannot be marshaled (a
 `QObject*` in a map, a JS function, an unregistered type) fail the call
 **locally** — the returned `DBusPendingReply` completes with
 `org.freedesktop.DBus.Error.Failed` and "argument N is not marshalable"
@@ -254,13 +254,13 @@ function `readOne`. This is the same convention the proxy side uses for
 property names (`dbusPropToQml`). Exact-name matches still work for C++
 `Q_INVOKABLE`s.
 
-**C++ typed returns (0.6.0+):** a C++ `Q_INVOKABLE` whose return type is any
+**C++ typed returns:** a C++ `Q_INVOKABLE` whose return type is any
 default-constructible type (`QString`, `int`, `QByteArray`, …) round-trips
 into the D-Bus reply with its wire signature. Non-default-constructible
 returns cannot be captured — declare a `QVariant` return (the C++ dispatch
 path also caps at 5 parameters and warns beyond that).
 
-**Return-value marshaling (0.3.1+):** return values are marshaled through
+**Return-value marshaling:** return values are marshaled through
 `toDbusVariant`, so `DBusQML.variant(x)` produces a real D-Bus variant
 (`v`), and `DBusQML.dict(...)` produces `a{sv}`. A function that returns
 nothing sends an empty reply. Nested object literals with gadget values
@@ -307,7 +307,7 @@ DBusAdaptor {
 - Static `DBus.emitSignal(service, path, iface, name, args)` always uses the session bus
 - Instance `emitSignal(name, args)` intentionally attempts `registerService(service)` so the signal appears to originate from that name (portal-style signals)
 - `emitSignal(name, args)` arguments are marshaled through `toDbusVariant` — use `DBusQML.variant(x)` for variant-typed signal args (e.g. the portal `SettingChanged` `(ssv)` signature)
-- A struct **inside** a variant (`DBusQML.variant(DBusQML.struct_(...))`) marshals as a real `v` with a struct payload (lifted in 0.4.0); return the struct directly when you need a bare `(...)` signature.
+- A struct **inside** a variant (`DBusQML.variant(DBusQML.struct_(...))`) marshals as a real `v` with a struct payload; return the struct directly when you need a bare `(...)` signature.
 
 #### Properties
 
@@ -334,12 +334,10 @@ literal, with no override needed.
 returned JS function) produces a D-Bus `org.freedesktop.DBus.Error.Failed`
 error reply — never a dropped bus connection. An unmarshalable signal arg is
 warned about and skipped (signals have no error-reply channel). The same
-guard covers **properties** (0.5.2+): a property whose value cannot be
+guard covers **properties**: a property whose value cannot be
 marshaled (e.g. a `var` holding a `QObject*`, such as a stashed
 `DBusHeldReply`) produces `InvalidArgs` on `Properties.Get` and is skipped
-with a warning in `GetAll` — never an aborted process (before 0.5.2 such a
-value killed the hosting process inside QtDBus marshaling, remotely
-triggerable via routine introspection). Gadget-valued properties
+with a warning in `GetAll` — never an aborted process. Gadget-valued properties
 (`DBusQML.variant`/`bytes`/`struct_`) marshal like method replies do — served
 as a single-wrapped `v` carrying the gadget's payload — and properties with
 no possible D-Bus representation (`QObject*`-derived) are never advertised in
@@ -423,10 +421,10 @@ DBusAdaptor {
 
 Routing:
 
-- **Interface-scoped calls** (0.5.1+) route only to the adaptor whose `iface`
+- **Interface-scoped calls** route only to the adaptor whose `iface`
   matches the message's interface. A call that carries an interface name
-  reaches a matching adaptor and no other — it is no longer answered by a
-  member-name match on an adaptor that declares a *different* interface. A
+  reaches a matching adaptor and no other; a member-name match on an
+  adaptor that declares a *different* interface does not answer. A
   duplicate `iface` on one path warns at load time and the first-attached
   adaptor wins.
 - **`Properties.Get/GetAll/Set`** route by the interface *argument*, so
@@ -441,13 +439,6 @@ Routing:
 Destroying any co-located adaptor leaves the path and the service name
 registered for the survivors; only the last adaptor to be destroyed releases
 them.
-
-> **Migration from the 0.5.0 workaround:** on 0.5.0, a single adaptor could
-> serve members of *several* interfaces because dispatch ignored the message
-> interface. That no longer holds — with the interface name set, each call now
-> routes to an adaptor declaring that interface. Split such an adaptor into
-> co-located adaptors (one per interface, sharing `service` and `path`), which
-> is the pattern this section enables.
 
 #### Per-call adaptor lifecycle
 
@@ -660,9 +651,9 @@ A `variant` nested inside a dict or list value is the value's payload (the
 container supplies the `v`); `variant(variant(x))` produces an explicit inner
 variant.
 | `DBus::Bytes` | `bytes` | Byte array (`ay`). |
-| `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. Since 0.4.0 it works in every position — variant payloads, map/list values, signal args, call args. The outermost struct carries the wire signature; inner structs compose naturally. |
+| `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. It works in every position — variant payloads, map/list values, signal args, call args. The outermost struct carries the wire signature; inner structs compose naturally. |
 
-Since v0.3.0, when the method signature is known (from introspection or
+When the method signature is known (from introspection or
 catalog), plain JS values are marshaled correctly — no wrapper types needed.
 Value types remain as explicit overrides for signature-less calls.
 
