@@ -295,7 +295,10 @@ private slots:
     // Adaptor lifecycle (0.7.0) — the QML-ownership axis.
     void testLifecycleDestroyAfterDispatch();
     void testLifecycleGCCollectsAfterDispatch();
-    void testLifecycleHeldReplyBlocksDestroyUntilSettled();
+    void testLifecycleInHandlerDestroy();
+    void testLifecycleDestroyWhilePendingErrorsCallers();
+    void testLifecycleAbandonedWhilePendingCollected();
+    void testLifecycleGcInsideHandler();
     void testLifecycleDeclarativeAdaptorUnchanged();
     void testLifecycleUnregister();
     void testLifecycleUnregisterErrorsHeldReply();
@@ -2651,15 +2654,25 @@ QtObject {
             function kill() { destroy() }
         }
     }
-    property Component heldComp: Component {
+    // N1 fixture: the handler destroys the adaptor DIRECTLY (no Qt.callLater).
+    property Component closeKillComp: Component {
         DBusAdaptor {
-            property var held: null
-            function openFile(handle, appId, parentWindow, title, options) {
-                held = holdReply()
-                var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: 300; running: true; repeat: false }', this)
-                t.triggered.connect(function() { held.send([0, {}]) })
+            function close() { destroy(); return 0 }
+        }
+    }
+    // N4 fixture: the handler stresses the JS GC during its own dispatch —
+    // the only JS reference to the adaptor is the dispatch's thisObj.
+    property Component gcComp: Component {
+        DBusAdaptor {
+            function gcProbe() {
+                var sink = []
+                for (var i = 0; i < 100; i++) { sink.push({ n: i, s: "x" + i }) }
+                gc()
+                for (var j = 0; j < 500; j++) { var z = { k: j } }
+                gc()
+                gc()
+                return "survived"
             }
-            function kill() { destroy() }
         }
     }
     property Component pendingComp: Component {
@@ -2677,11 +2690,13 @@ QtObject {
         root.last = a
         return a
     }
-    function spawnHeld(service, path) {
-        var a = heldComp.createObject(null, {
-            service: service, path: path,
-            iface: 'org.freedesktop.impl.portal.FileChooser'
-        })
+    function spawnCloseKill(service, path) {
+        var a = closeKillComp.createObject(null, { service: service, path: path, iface: service })
+        root.last = a
+        return a
+    }
+    function spawnGc(service, path) {
+        var a = gcComp.createObject(null, { service: service, path: path, iface: service })
         root.last = a
         return a
     }
@@ -2824,17 +2839,25 @@ void TestDBusAdaptor::testLifecycleGCCollectsAfterDispatch() {
     delete stage;
 }
 
-// L3 — held-reply interplay: dispatch a holdReply() method → while pending,
-// destroy()/GC must NOT collect the adaptor (ownership still Cpp; the QML
-// destroy() refusal here is CORRECT and asserted) → settle → restore happens
-// → destroy() now works.
-void TestDBusAdaptor::testLifecycleHeldReplyBlocksDestroyUntilSettled() {
+// N2 — L3 INVERTED (0.8.0). The 0.7.0 semantics asserted here were: destroy()
+// refused while a held reply is pending, settle first, then destroy. The
+// owner blessed the consistent-retirement semantic change in the
+// ownership-preserve-v0.8.0 plan: destroy()/GC while a reply is pending is
+// ALLOWED, and the pending caller is errored by the destructor (exactly what
+// unregister() already does — 0.7.0 shipped the inconsistency). The old
+// "held replies block retirement" behavior is gone; this test now pins the
+// new contract: destroy while pending succeeds (deferred deletion), the
+// pending caller receives `org.freedesktop.DBus.Error.Failed` ("adaptor
+// destroyed with reply pending", not a hang), the path is freed, and the
+// registry returns to baseline.
+void TestDBusAdaptor::testLifecycleDestroyWhilePendingErrorsCallers() {
+    const int baseline = DBusPathDispatcher::liveCount();
     QQmlEngine engine;
     QObject *stage = createLifecycleStage(engine);
     QVERIFY(stage != nullptr);
 
     QPointer<DBusAdaptor> guard =
-        lifecycleSpawn(stage, QStringLiteral("spawnHeld"),
+        lifecycleSpawn(stage, QStringLiteral("spawnPending"),
                        QStringLiteral("org.dbusqml.LifecycleL3"), QStringLiteral("/LifecycleL3"));
     QVERIFY(guard != nullptr);
 
@@ -2848,32 +2871,141 @@ void TestDBusAdaptor::testLifecycleHeldReplyBlocksDestroyUntilSettled() {
     QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
 
     // The handler ran and is holding the reply.
-    QTRY_VERIFY_WITH_TIMEOUT(guard->property("held").value<QObject *>() != nullptr, 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(guard->property("opened").toBool(), 3000);
 
-    // While pending: QML destroy() must be REFUSED (GC protection) and the
-    // adaptor must stay alive.
+    // While pending: QML destroy() SUCCEEDS (deferred deletion).
     QMetaObject::invokeMethod(guard.data(), "kill");
     pumpLifecycle();
-    QVERIFY2(guard != nullptr, "adaptor must survive while a held reply is pending");
-    QVERIFY2(capture.contains(QStringLiteral("indestructible")),
-             "destroy() refusal while a reply is held is the correct behavior");
+    QVERIFY2(guard.isNull(), "destroy() while a reply is held must succeed (0.8.0)");
+    QVERIFY2(!capture.contains(QStringLiteral("indestructible")),
+             "no destroy() refusal is acceptable");
 
-    // Settle: the handler's timer sends the reply; the last settle restores
-    // the pre-dispatch ownership. (The timer may fire during the pump above —
-    // poll the spy rather than waiting for a fresh signal.)
+    // The pending caller is errored, not hung and not answered normally.
     QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
-    QVERIFY(!watcher->isError());
-    QCOMPARE(watcher->reply().signature(), QStringLiteral("ua{sv}"));
-
-    // After settle: destroy() works again.
-    capture.clear();
-    QMetaObject::invokeMethod(guard.data(), "kill");
-    pumpLifecycle();
-    QVERIFY2(guard.isNull(), "destroy() must succeed after the last held reply settled");
-    QVERIFY2(!capture.contains(QStringLiteral("indestructible")), "no refusal after settle");
+    if (spy.count() == 1) {
+        QVERIFY(watcher->isError());
+        QCOMPARE(watcher->reply().type(), QDBusMessage::ErrorMessage);
+        QCOMPARE(watcher->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+        QCOMPARE(watcher->reply().errorMessage(),
+                 QStringLiteral("adaptor destroyed with reply pending"));
+    }
 
     assertPathFreed(QStringLiteral("org.dbusqml.LifecycleL3"), QStringLiteral("/LifecycleL3"));
+    QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
     delete watcher;
+    delete stage;
+}
+
+// N1 — in-handler destroy (the 0.7.0 smell, verbatim): the close() handler
+// destroys the adaptor DIRECTLY (no Qt.callLater) and returns → the caller
+// still gets the reply; the deferred deletion then runs; the object is gone
+// and the path freed. 0.7.0: destroy() refused ("indestructible object") and
+// the path kept serving.
+void TestDBusAdaptor::testLifecycleInHandlerDestroy() {
+    const int baseline = DBusPathDispatcher::liveCount();
+    QQmlEngine engine;
+    QObject *stage = createLifecycleStage(engine);
+    QVERIFY(stage != nullptr);
+
+    QPointer<DBusAdaptor> guard =
+        lifecycleSpawn(stage, QStringLiteral("spawnCloseKill"),
+                       QStringLiteral("org.dbusqml.LifecycleN1"), QStringLiteral("/LifecycleN1"));
+    QVERIFY(guard != nullptr);
+
+    LifecycleMessageCapture capture;
+
+    QDBusMessage reply = lifecycleCall(QStringLiteral("org.dbusqml.LifecycleN1"),
+                                       QStringLiteral("/LifecycleN1"), QStringLiteral("close"));
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    // 0.7.0: the destroy() refusal aborts the JS handler mid-function — the
+    // `return 0` never executes and the reply comes back EMPTY. The 0.8.0
+    // contract: the handler completes and the reply carries the value.
+    QCOMPARE(reply.arguments().size(), 1);
+    if (reply.arguments().size() == 1)
+        QCOMPARE(reply.arguments().first().toInt(), 0);
+
+    pumpLifecycle();
+    QVERIFY2(guard.isNull(), "in-handler destroy() must take effect after the dispatch (0.8.0)");
+    QVERIFY2(!capture.contains(QStringLiteral("indestructible")),
+             "no destroy() refusal is acceptable");
+
+    assertPathFreed(QStringLiteral("org.dbusqml.LifecycleN1"), QStringLiteral("/LifecycleN1"));
+    QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
+    delete stage;
+}
+
+// N3 — abandoned-while-pending: a dynamic adaptor with a pending held reply
+// and ZERO QML references is GC-collected; the destructor errors the pending
+// caller; the path is freed. 0.7.0: leaks until process exit (the 0.7.0
+// deferral kept CppOwnership while the reply was pending).
+void TestDBusAdaptor::testLifecycleAbandonedWhilePendingCollected() {
+    const int baseline = DBusPathDispatcher::liveCount();
+    QQmlEngine engine;
+    QObject *stage = createLifecycleStage(engine);
+    QVERIFY(stage != nullptr);
+
+    QPointer<DBusAdaptor> guard =
+        lifecycleSpawn(stage, QStringLiteral("spawnPending"),
+                       QStringLiteral("org.dbusqml.LifecycleN3"), QStringLiteral("/LifecycleN3"));
+    QVERIFY(guard != nullptr);
+
+    LifecycleMessageCapture capture;
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.LifecycleN3"), QStringLiteral("/LifecycleN3"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QTRY_VERIFY_WITH_TIMEOUT(guard->property("opened").toBool(), 3000);
+
+    // Drop every QML reference (adaptor AND reply) and force collection.
+    stage->setProperty("last", QVariant());
+    for (int i = 0; i < 20 && guard != nullptr; ++i) {
+        engine.collectGarbage();
+        pumpLifecycle(4);
+    }
+    QVERIFY2(guard.isNull(), "GC must collect an abandoned adaptor with a pending reply");
+
+    // The pending caller is errored, not hung.
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    if (spy.count() == 1) {
+        QVERIFY(watcher->isError());
+        QCOMPARE(watcher->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+        QCOMPARE(watcher->reply().errorMessage(),
+                 QStringLiteral("adaptor destroyed with reply pending"));
+    }
+    QVERIFY2(!capture.contains(QStringLiteral("indestructible")), "GC retirement must not warn");
+
+    assertPathFreed(QStringLiteral("org.dbusqml.LifecycleN3"), QStringLiteral("/LifecycleN3"));
+    QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
+    delete watcher;
+    delete stage;
+}
+
+// N4 — gc() inside the handler (the spike-(a) scenario as a permanent pin):
+// a JS-owned adaptor whose ONLY reference during dispatch is the dispatch's
+// thisObj must survive its own dispatch under GC pressure — the QJSValue is
+// a GC root.
+void TestDBusAdaptor::testLifecycleGcInsideHandler() {
+    QQmlEngine engine;
+    QObject *stage = createLifecycleStage(engine);
+    QVERIFY(stage != nullptr);
+
+    QPointer<DBusAdaptor> guard =
+        lifecycleSpawn(stage, QStringLiteral("spawnGc"), QStringLiteral("org.dbusqml.LifecycleN4"),
+                       QStringLiteral("/LifecycleN4"));
+    QVERIFY(guard != nullptr);
+    QCOMPARE(QQmlEngine::objectOwnership(guard), QQmlEngine::JavaScriptOwnership);
+
+    QDBusMessage reply = lifecycleCall(QStringLiteral("org.dbusqml.LifecycleN4"),
+                                       QStringLiteral("/LifecycleN4"), QStringLiteral("gcProbe"));
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.arguments().first().toString(), QStringLiteral("survived"));
+
+    QVERIFY2(guard != nullptr, "adaptor collected DURING its own dispatch");
+    QCOMPARE(QQmlEngine::objectOwnership(guard), QQmlEngine::JavaScriptOwnership);
+
     delete stage;
 }
 

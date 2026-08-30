@@ -4,7 +4,6 @@
 #include <QJSValue>
 #include <QObject>
 #include <QPointer>
-#include <QQmlEngine>
 #include <QQmlParserStatus>
 #include <qqmlregistration.h>
 
@@ -83,25 +82,12 @@ private:
     QDBusConnection bus() const;
     QStringList declaredOutTypes(const QString &member) const;
 
-    // Ownership lifecycle (0.7.0): restore the pre-dispatch QML ownership
-    // unless held replies are still outstanding (the last settle restores —
-    // DBusHeldReply::settle() notifies via heldReplySettled()).
-    void maybeRestoreOwnership();
-    friend class DBusHeldReply;
-    void heldReplySettled();
-
     QString m_service;
     QString m_path;
     QString m_iface;
     QPointer<DBusConnection> m_conn;
     QVariantMap m_signatures;
     bool m_attached = false;
-
-    // Ownership lifecycle state: the pre-dispatch ownership recorded by the
-    // JS dispatch path (see dbusadaptor.cpp) and whether a restore is still
-    // pending.
-    QQmlEngine::ObjectOwnership m_savedOwnership = QQmlEngine::CppOwnership;
-    bool m_ownershipPendingRestore = false;
 
     // Dispatch context for holdReply(): the in-flight call's message,
     // connection, and member name. Set around the handler invocation, cleared

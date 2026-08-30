@@ -565,30 +565,29 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
         QQmlEngine *engine = qmlEngine(this);
         if (engine) {
-            // Ownership lifecycle (0.7.0): protecting the adaptor from the JS
-            // GC is scoped to the dispatch only. Record the pre-dispatch
-            // ownership, flip to CppOwnership for the call (protection against
-            // the JS GC collecting the adaptor while it is wrapped as a
-            // QJSValue and invoked), and restore afterwards — deferred while
-            // any DBusHeldReply is outstanding (the adaptor is the only object
-            // that can settle callers; restore happens at the last settle,
-            // notified by DBusHeldReply::settle()). Effect matrix: declarative
-            // adaptors report CppOwnership → flip+restore are no-ops (QML
-            // forbids destroy() on them anyway); dynamically created
-            // adaptors (Component.createObject — the portal Request pattern)
-            // report JavaScriptOwnership → restored → QML destroy()/GC work
-            // again after dispatch. JS-owned QObjects still referenced from JS
-            // are never collected; parented ones are not collected either.
+            // Ownership preservation (0.8.0): the only hazard is
+            // newQObject()'s side effect — it re-marks the wrapped QObject as
+            // JavaScriptOwnership. Record the current ownership, wrap, and
+            // restore immediately: the adaptor keeps its pre-dispatch
+            // ownership through the call. Declarative adaptors stay
+            // CppOwnership (no-op); dynamically created adaptors stay
+            // JavaScriptOwnership — so QML destroy() works anywhere,
+            // including inside the dispatched handler (deletion is deferred
+            // until after the current script block, i.e. after the dispatch
+            // returns), and GC collects an abandoned adaptor even while a
+            // reply it can no longer answer is pending (the destructor errors
+            // pending callers). Spike-verified: the thisObj QJSValue is a GC
+            // root for the duration of the dispatch (plans/
+            // ownership-preserve-v0.8.0/spike-findings.md).
             //
             // The adaptor is wrapped as a QJSValue and invoked through
             // callWithInstance. This avoids building a JS source string
             // (which mishandles arrays/dicts and stringifies numeric args
             // without escaping) and works cleanly for multiple adaptor
             // instances sharing one engine.
-            m_savedOwnership = QQmlEngine::objectOwnership(this);
-            m_ownershipPendingRestore = true;
-            QQmlEngine::setObjectOwnership(this, QQmlEngine::CppOwnership);
+            const QQmlEngine::ObjectOwnership priorOwnership = QQmlEngine::objectOwnership(this);
             QJSValue thisObj = engine->newQObject(this);
+            QQmlEngine::setObjectOwnership(this, priorOwnership);
             QJSValue fn = thisObj.property(member);
             if (!fn.isCallable() && qmlMember != member)
                 fn = thisObj.property(qmlMember);
@@ -713,16 +712,10 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 qWarning("dbusqml: method %s takes %d arguments — the C++ dispatch path supports "
                          "at most 5; declare fewer parameters",
                          qPrintable(matchedName), int(dbusArgs.size()));
-                maybeRestoreOwnership();
                 m_inDispatch = false;
                 return false;
             }
         }
-
-        // Ownership lifecycle: the JS-GC protection is scoped to the dispatch.
-        // Restore now unless held replies are still outstanding (no-op when
-        // the engine path did not flip) — the last settle restores otherwise.
-        maybeRestoreOwnership();
 
         m_inDispatch = false;
 
@@ -783,26 +776,6 @@ void DBusAdaptor::unregister() {
     // QObject stays alive for QML to drop whenever.
     DBusPathDispatcher::detach(bus(), m_path, m_service, this);
     m_attached = false;
-}
-
-// Restore the pre-dispatch QML ownership unless held replies are still
-// outstanding — the adaptor is the only object that can settle callers, so it
-// must stay GC-protected until the last settle (notified by
-// DBusHeldReply::settle() → heldReplySettled()).
-void DBusAdaptor::maybeRestoreOwnership() {
-    if (!m_ownershipPendingRestore)
-        return;
-    const auto heldReplies = findChildren<DBusHeldReply *>(Qt::FindDirectChildrenOnly);
-    for (DBusHeldReply *reply : heldReplies) {
-        if (!reply->isSettled())
-            return;
-    }
-    QQmlEngine::setObjectOwnership(this, m_savedOwnership);
-    m_ownershipPendingRestore = false;
-}
-
-void DBusAdaptor::heldReplySettled() {
-    maybeRestoreOwnership();
 }
 
 void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessage &msg,
