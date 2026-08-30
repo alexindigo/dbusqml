@@ -4,6 +4,29 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-08-29
+
+### Changed
+
+- **`destroy()` (and GC) now work everywhere, including inside a dispatched
+  handler, and retirement while a reply is pending is allowed.** In 0.7.0
+  the adaptor stayed GC-protected while a `holdReply()` reply was
+  outstanding — QML `destroy()` was refused until the last held reply
+  settled, and a `destroy()` attempted inside the dispatched handler had to
+  be deferred (`Qt.callLater`). Both restrictions are gone: the dispatch no
+  longer alters the adaptor's ownership (it now merely neutralizes
+  `newQObject()`'s JavaScriptOwnership side effect and restores immediately),
+  so dynamically created adaptors keep their QML ownership through dispatch.
+  Retiring an adaptor while a reply is pending — via `destroy()`, GC, or
+  `unregister()` — is consistent: the pending caller is errored
+  (`org.freedesktop.DBus.Error.Failed`, "adaptor destroyed with reply
+  pending") instead of the retirement being refused. This also closes the
+  corner where an adaptor abandoned with a pending reply and zero QML
+  references leaked until process exit. Internal: the 0.7.0
+  restore-deferral machinery (`maybeRestoreOwnership`, the held-reply
+  settle notification) is deleted; GC-rooting of the adaptor during its own
+  dispatch is spike-verified (the dispatch's `QJSValue` is a GC root).
+
 ## [0.7.0] — 2026-08-28
 
 ### Fixed

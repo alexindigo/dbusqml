@@ -449,7 +449,7 @@ them.
 > co-located adaptors (one per interface, sharing `service` and `path`), which
 > is the pattern this section enables.
 
-#### Per-call adaptor lifecycle (0.7.0)
+#### Per-call adaptor lifecycle
 
 `DBusAdaptor` is safe to create dynamically — one instance per call at a
 unique object path, the shape portal backends need (a Request object per
@@ -459,7 +459,7 @@ portal call):
 // The Request pattern: create per call, retire per call.
 property Component requestComp: Component {
     DBusAdaptor {
-        function close() { /* caller cancelled */ }
+        function close() { destroy(); /* caller cancelled */ }
     }
 }
 
@@ -472,26 +472,25 @@ function newRequest(handle) {
 }
 ```
 
-Lifecycle semantics (changed in 0.7.0 — on 0.6.0 the first dispatch made such
-an adaptor indestructible and leaked its bus registration):
+Lifecycle semantics:
 
-- **`destroy()` works after dispatch.** The adaptor protects itself from the
-  JS garbage collector only for the duration of a method dispatch. Once the
-  dispatch ends (and no deferred reply is outstanding), ownership returns to
-  what it was — for dynamically created objects that means `destroy()` from
-  QML succeeds and the GC collects the object once QML drops all references.
-  Either way the destructor frees the object path and releases the service
-  name reference.
+- **`destroy()` works anywhere** — after a dispatch, and *inside* the
+  dispatched handler itself (e.g. the `Close` handler destroying its own
+  Request). The dispatch no longer changes the adaptor's ownership at all:
+  QML's `destroy()` is deferred by design, so deletion lands after the
+  current script block returns — the reply still goes out first, then the
+  path is freed.
 - **GC behavior.** A dynamically created adaptor with no QML references is
-  collected on the next `gc()` and its path freed. Declaratively declared
-  adaptors are unchanged: they are engine-managed, `destroy()` is refused on
-  them, and repeated dispatch never alters that.
-- **Held replies block retirement.** While a `holdReply()` reply is
-  outstanding, the adaptor stays GC-protected and QML `destroy()` is refused
-  (this is correct — the adaptor is the only object that can answer the
-  caller). After the last held reply settles, destroy()/GC work again.
-  Destroying or unregistering the adaptor with a reply still held errors the
-  caller (`org.freedesktop.DBus.Error.Failed`) instead of hanging it.
+  collected on the next `gc()` and its path freed. A dispatched adaptor is
+  never collected *during* its own dispatch (the dispatch holds a GC root);
+  under GC pressure inside a handler the adaptor survives. Declaratively
+  declared adaptors are unchanged: they are engine-managed, `destroy()` is
+  refused on them, and repeated dispatch never alters that.
+- **Retirement while a reply is pending is allowed.** Destroying (or GC-
+  collecting, or unregistering) an adaptor while a `holdReply()` reply is
+  still outstanding works: the destructor errors the pending caller with
+  `org.freedesktop.DBus.Error.Failed` ("adaptor destroyed with reply
+  pending"). Callers get an error, never a hang.
 - **`unregister()` — deterministic retirement.** Frees the object path and
   releases the service reference *immediately*, errors out outstanding held
   replies, and leaves the QObject alive for QML to drop whenever (destroy()
