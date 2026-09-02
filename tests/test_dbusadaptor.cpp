@@ -23,6 +23,7 @@
 #include "dbusadaptor.h"
 #include "dbusconnection.h"
 #include "dbusmessage.h"
+#include "dbusservicewatcher.h"
 #include "dbus.h"
 #include "dbuscatalog.h"
 #include "dbuspathdispatcher.h"
@@ -331,6 +332,11 @@ private slots:
 
     // 0.9.0 service-name acquisition (S1).
     void testServiceAcquisitionTakeover();
+
+    // 0.9.0 standalone watcher elements (N1).
+    void testSignalWatcherDelivers();
+    void testSignalWatcherWildcardMember();
+    void testServiceWatcherAppearDisappear();
     void testValueKeyStructListIsRealDict();
 
     // 0.9.0 fix cycle: co-location/leak regression.
@@ -3618,6 +3624,164 @@ void TestDBusAdaptor::testServiceAcquisitionTakeover() {
     delete b;
     delete connB;
     delete a;
+}
+
+// ==================== 0.9.0 standalone watcher elements (N1) ===============
+
+class WatcherCatcher : public QObject {
+    Q_OBJECT
+public:
+    QString lastMember;
+    QVariantList lastArgs;
+    int count = 0;
+public slots:
+    void onReceived(const QString &member, const QVariantList &args) {
+        lastMember = member;
+        lastArgs = args;
+        ++count;
+    }
+};
+
+// A signal watcher delivers a test adaptor's emitted signal with no proxy and
+// no introspection requirement.
+void TestDBusAdaptor::testSignalWatcherDelivers() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.SigWatch'\n"
+                                        "  path: '/SigWatch'\n"
+                                        "  iface: 'org.dbusqml.SigWatch'\n"
+                                        "  function fire() {\n"
+                                        "    emitSignal('StateChanged', ['/session/1', 2])\n"
+                                        "  }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusSignalWatcher {\n"
+                      "  service: 'org.dbusqml.SigWatch'\n"
+                      "  path: '/SigWatch'\n"
+                      "  iface: 'org.dbusqml.SigWatch'\n"
+                      "  member: 'StateChanged'\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    QObject *watcher = component.create();
+    QVERIFY(watcher != nullptr);
+
+    WatcherCatcher catcher;
+    QVERIFY(QObject::connect(watcher, SIGNAL(received(QString, QVariantList)), &catcher,
+                             SLOT(onReceived(QString, QVariantList))));
+
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.SigWatch"), QStringLiteral("/SigWatch"),
+        QStringLiteral("org.dbusqml.SigWatch"), QStringLiteral("fire"));
+    QCOMPARE(QDBusConnection::sessionBus().call(m, QDBus::Block, 3000).type(),
+             QDBusMessage::ReplyMessage);
+
+    QTRY_COMPARE_WITH_TIMEOUT(catcher.count, 1, 5000);
+    QCOMPARE(catcher.lastMember, QStringLiteral("StateChanged"));
+    QCOMPARE(catcher.lastArgs.size(), 2);
+    QCOMPARE(catcher.lastArgs.first().toString(), QStringLiteral("/session/1"));
+    QCOMPARE(catcher.lastArgs.at(1).toInt(), 2);
+
+    delete watcher;
+}
+
+// An empty member is a wildcard: every member of the interface is delivered.
+void TestDBusAdaptor::testSignalWatcherWildcardMember() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.SigWatchW'\n"
+                                        "  path: '/SigWatchW'\n"
+                                        "  iface: 'org.dbusqml.SigWatchW'\n"
+                                        "  function fireA() { emitSignal('SigA', []) }\n"
+                                        "  function fireB() { emitSignal('SigB', []) }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusSignalWatcher {\n"
+                      "  service: 'org.dbusqml.SigWatchW'\n"
+                      "  path: '/SigWatchW'\n"
+                      "  iface: 'org.dbusqml.SigWatchW'\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    QObject *watcher = component.create();
+    QVERIFY(watcher != nullptr);
+
+    WatcherCatcher catcher;
+    QVERIFY(QObject::connect(watcher, SIGNAL(received(QString, QVariantList)), &catcher,
+                             SLOT(onReceived(QString, QVariantList))));
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    for (const char *member : {"fireA", "fireB"}) {
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.SigWatchW"), QStringLiteral("/SigWatchW"),
+            QStringLiteral("org.dbusqml.SigWatchW"), QString::fromLatin1(member));
+        QCOMPARE(bus.call(m, QDBus::Block, 3000).type(), QDBusMessage::ReplyMessage);
+    }
+
+    QTRY_COMPARE_WITH_TIMEOUT(catcher.count, 2, 5000);
+    QCOMPARE(catcher.lastMember, QStringLiteral("SigB"));
+    delete watcher;
+}
+
+// The service watcher observes a service appearing and disappearing.
+void TestDBusAdaptor::testServiceWatcherAppearDisappear() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusServiceWatcher {\n"
+                      "  service: 'org.dbusqml.SvcWatch'\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    QObject *watcher = component.create();
+    QVERIFY(watcher != nullptr);
+
+    QCOMPARE(watcher->property("registered").toBool(), false);
+
+    struct Change {
+        QString oldOwner;
+        QString newOwner;
+    };
+    QList<Change> changes;
+    QObject::connect(static_cast<DBusServiceWatcher *>(watcher), &DBusServiceWatcher::ownerChanged,
+                     watcher,
+                     [&changes](const QString &o, const QString &n) { changes.append({o, n}); });
+
+    // The adaptor appears.
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.SvcWatch'\n"
+                                        "  path: '/SvcWatch'\n"
+                                        "  iface: 'org.dbusqml.SvcWatch'\n"
+                                        "  function ping() { return 'p' }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QTRY_COMPARE_WITH_TIMEOUT(watcher->property("registered").toBool(), true, 5000);
+    QVERIFY(!changes.isEmpty());
+    QVERIFY(changes.last().newOwner.startsWith(QStringLiteral(":1.")));
+
+    // And disappears.
+    delete adaptor;
+    QTRY_COMPARE_WITH_TIMEOUT(watcher->property("registered").toBool(), false, 5000);
+    QVERIFY(changes.last().newOwner.isEmpty());
 }
 
 // ==================== Adaptor lifecycle (L1–L7, 0.7.0) ====================
