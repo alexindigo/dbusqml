@@ -81,6 +81,10 @@ public:
     Q_INVOKABLE void asyncCall(const DBusMessage &message, const QJSValue &resolve,
                                const QJSValue &reject);
 
+    // Fire-and-forget: sends the message with NO_REPLY_EXPECTED implied —
+    // nothing comes back (the OSD showText pattern).
+    Q_INVOKABLE void send(const DBusMessage &message);
+
     operator QDBusConnection() const { return m_connection; }
 
 private:

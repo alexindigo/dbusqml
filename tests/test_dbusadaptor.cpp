@@ -22,6 +22,7 @@
 
 #include "dbusadaptor.h"
 #include "dbusconnection.h"
+#include "dbusmessage.h"
 #include "dbus.h"
 #include "dbuscatalog.h"
 #include "dbuspathdispatcher.h"
@@ -317,6 +318,12 @@ private slots:
     // 0.9.0 built-in collision prevention.
     void testBuiltinShadowFailsToLoad();
     void testMemberCollisionWarns();
+
+    // 0.9.0 call options + fire-and-forget + nested-container pin.
+    void testCallTimeout();
+    void testFireAndForgetSend();
+    void testMessageGadgetCallOptions();
+    void testNestedContainerRoundTrip();
     void testValueKeyStructListIsRealDict();
 
     // 0.9.0 fix cycle: co-location/leak regression.
@@ -3272,6 +3279,196 @@ void TestDBusAdaptor::testMemberCollisionWarns() {
                                         "}");
     QVERIFY(adaptor != nullptr);
     delete adaptor;
+}
+
+// ==================== 0.9.0 call options / send / containers ================
+
+// B2 — per-call timeout: a deliberately-slow service (held reply, no settle)
+// answers the caller with NoReply at the CONFIGURED timeout, not Qt's 25 s.
+void TestDBusAdaptor::testCallTimeout() {
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.Timeout'\n"
+                         "  path: '/Timeout'\n"
+                         "  iface: 'org.freedesktop.impl.portal.FileChooser'\n"
+                         "  function openFile(handle, appId, parentWindow, title, options) {\n"
+                         "    holdReply()\n"
+                         "  }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+
+    DBusMessage m;
+    m.setService(QStringLiteral("org.dbusqml.Timeout"));
+    m.setPath(QStringLiteral("/Timeout"));
+    m.setIface(QStringLiteral("org.freedesktop.impl.portal.FileChooser"));
+    m.setMember(QStringLiteral("OpenFile"));
+    m.setArguments({QVariant::fromValue(QDBusObjectPath(QStringLiteral("/req/1"))),
+                    QVariant(QStringLiteral("app")), QVariant(QString()),
+                    QVariant(QStringLiteral("t")), QVariantMap{}});
+    m.setTimeout(500);
+
+    DBusPendingReply *reply = conn->asyncCall(m);
+    QVERIFY(reply != nullptr);
+    QSignalSpy spy(reply, &DBusPendingReply::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    QVERIFY(reply->isError());
+    QCOMPARE(reply->error().name(), QStringLiteral("org.freedesktop.DBus.Error.NoReply"));
+
+    delete reply;
+    delete conn;
+}
+
+// N2 — fire-and-forget send: the message executes server-side and nothing is
+// sent back.
+void TestDBusAdaptor::testFireAndForgetSend() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.FaF'\n"
+                                        "  path: '/FaF'\n"
+                                        "  iface: 'org.dbusqml.FaF'\n"
+                                        "  property string lastCall: ''\n"
+                                        "  function ping() { lastCall = 'pinged'; return 0 }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+
+    DBusMessage m;
+    m.setService(QStringLiteral("org.dbusqml.FaF"));
+    m.setPath(QStringLiteral("/FaF"));
+    m.setIface(QStringLiteral("org.dbusqml.FaF"));
+    m.setMember(QStringLiteral("ping"));
+    conn->send(m);
+
+    QTRY_COMPARE_WITH_TIMEOUT(adaptor->property("lastCall").toString(), QStringLiteral("pinged"),
+                              3000);
+    delete conn;
+}
+
+// The message gadget's call-option members exist with their documented
+// defaults and ride the wire without breaking anything.
+void TestDBusAdaptor::testMessageGadgetCallOptions() {
+    DBusMessage m;
+    QCOMPARE(m.timeout(), -1);
+    QVERIFY(m.autoStart());
+    QVERIFY(!m.interactiveAuthorization());
+
+    m.setTimeout(1234);
+    m.setInteractiveAuthorization(true);
+    m.setAutoStart(false);
+    QCOMPARE(m.timeout(), 1234);
+    QVERIFY(m.interactiveAuthorization());
+    QVERIFY(!m.autoStart());
+
+    // The flags survive into an actual call (a served method runs).
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.MsgFlags'\n"
+                                        "  path: '/MsgFlags'\n"
+                                        "  iface: 'org.dbusqml.MsgFlags'\n"
+                                        "  property string lastCall: ''\n"
+                                        "  function ping() { lastCall = 'pinged'; return 0 }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+    DBusMessage msg;
+    msg.setService(QStringLiteral("org.dbusqml.MsgFlags"));
+    msg.setPath(QStringLiteral("/MsgFlags"));
+    msg.setIface(QStringLiteral("org.dbusqml.MsgFlags"));
+    msg.setMember(QStringLiteral("ping"));
+    msg.setInteractiveAuthorization(true);
+    msg.setAutoStart(false);
+    msg.setTimeout(3000);
+    conn->send(msg);
+    QTRY_COMPARE_WITH_TIMEOUT(adaptor->property("lastCall").toString(), QStringLiteral("pinged"),
+                              3000);
+    delete conn;
+}
+
+// N3 — multi-element nested containers round-trip (aa{sv} and aai with ≥2
+// elements; KDE's encoder drops everything past element 0 — pinned here).
+void TestDBusAdaptor::testNestedContainerRoundTrip() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.Nested'\n"
+                                        "  path: '/Nested'\n"
+                                        "  iface: 'org.dbusqml.Nested'\n"
+                                        "  function echo(v) { return v }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+
+    // N3 pin — aa{sv} with two elements (caller-side note: pass the outer
+    // array as ONE QVariant argument — a braced {QVariantList{...}} argument
+    // copy-constructs the parameter list and flattens it).
+    {
+        DBusMessage m;
+        m.setService(QStringLiteral("org.dbusqml.Nested"));
+        m.setPath(QStringLiteral("/Nested"));
+        m.setIface(QStringLiteral("org.dbusqml.Nested"));
+        m.setMember(QStringLiteral("echo"));
+        m.setSignature(QStringLiteral("aa{sv}"));
+        QVariantMap first{{QStringLiteral("a"), 1}};
+        QVariantMap second{{QStringLiteral("b"), 2}};
+        QVariantList aasvArgs;
+        aasvArgs.append(QVariant(QVariantList{first, second}));
+        m.setArguments(aasvArgs);
+        DBusPendingReply *reply = conn->asyncCall(m);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+        QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
+        const QVariantList outer = reply->values();
+        QCOMPARE(outer.size(), 1);
+        const QVariantList arr = unwrapDbus(outer.first()).toList();
+        QCOMPARE(arr.size(), 2);
+        QCOMPARE(unwrapDbus(arr.first()).toMap().value(QStringLiteral("a")).toInt(), 1);
+        QCOMPARE(unwrapDbus(arr.at(1)).toMap().value(QStringLiteral("b")).toInt(), 2);
+        delete reply;
+    }
+
+    // aai with two rows.
+    {
+        DBusMessage m;
+        m.setService(QStringLiteral("org.dbusqml.Nested"));
+        m.setPath(QStringLiteral("/Nested"));
+        m.setIface(QStringLiteral("org.dbusqml.Nested"));
+        m.setMember(QStringLiteral("echo"));
+        m.setSignature(QStringLiteral("aai"));
+        QVariantList aaiArgs;
+        aaiArgs.append(QVariant(QVariantList{QVariantList{1, 2}, QVariantList{3, 4}}));
+        m.setArguments(aaiArgs);
+        DBusPendingReply *reply = conn->asyncCall(m);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+        QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
+        const QVariantList outer = reply->values();
+        QCOMPARE(outer.size(), 1);
+        const QVariantList arr = unwrapDbus(outer.first()).toList();
+        QCOMPARE(arr.size(), 2);
+        const QVariantList row0 = unwrapDbus(arr.first()).toList();
+        QCOMPARE(row0.size(), 2);
+        QCOMPARE(row0.at(0).toInt(), 1);
+        QCOMPARE(row0.at(1).toInt(), 2);
+        const QVariantList row1 = unwrapDbus(arr.at(1)).toList();
+        QCOMPARE(row1.at(0).toInt(), 3);
+        QCOMPARE(row1.at(1).toInt(), 4);
+        delete reply;
+    }
+
+    delete conn;
 }
 
 // ==================== Adaptor lifecycle (L1–L7, 0.7.0) ====================

@@ -64,7 +64,7 @@ public:
                                                           m_proxy->iface(), method);
         if (!converted.isEmpty())
             msg.setArguments(converted);
-        auto pending = bus.asyncCall(msg);
+        auto pending = bus.asyncCall(msg, m_proxy ? m_proxy->callTimeout() : -1);
         auto watcher = new QDBusPendingCallWatcher(pending, this);
         auto reply = new DBusPendingReply(this);
         reply->setEngine(qmlEngine(m_proxy));
@@ -177,7 +177,7 @@ void DBusProxy::doIntrospect() {
 
     QDBusMessage call = QDBusMessage::createMethodCall(
         m_service, m_path, "org.freedesktop.DBus.Introspectable", "Introspect");
-    auto pending = m_bus.asyncCall(call);
+    auto pending = m_bus.asyncCall(call, m_callTimeout);
     m_introspectWatcher = new QDBusPendingCallWatcher(pending, this);
 
     connect(m_introspectWatcher, &QDBusPendingCallWatcher::finished, this,
@@ -253,7 +253,7 @@ void DBusProxy::setWatchServiceStatus(bool v) {
             QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
             QStringLiteral("org.freedesktop.DBus"), QStringLiteral("NameHasOwner"));
         msg.setArguments({m_service});
-        QDBusPendingReply<bool> nameReply = m_bus.asyncCall(msg);
+        QDBusPendingReply<bool> nameReply = m_bus.asyncCall(msg, m_callTimeout);
         auto *watcher = new QDBusPendingCallWatcher(nameReply, this);
         connect(watcher, &QDBusPendingCallWatcher::finished, this,
                 [this](QDBusPendingCallWatcher *w) {
@@ -413,7 +413,7 @@ DBusPendingReply *DBusProxy::call(const QString &method, const QVariantList &arg
         }
         msg.setArguments(converted);
     }
-    auto pending = m_bus.asyncCall(msg);
+    auto pending = m_bus.asyncCall(msg, m_callTimeout);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
     reply->setEngine(qmlEngine(this));
@@ -429,7 +429,7 @@ DBusPendingReply *DBusProxy::getProperty(const QString &name) {
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Get");
     msg.setArguments({m_iface, name});
 
-    auto pending = m_bus.asyncCall(msg);
+    auto pending = m_bus.asyncCall(msg, m_callTimeout);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
     reply->setEngine(qmlEngine(this));
@@ -449,7 +449,34 @@ void DBusProxy::setProperty(const QString &name, const QVariant &value) {
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
     msg.setArguments({m_iface, name, QVariant::fromValue(QDBusVariant(value))});
-    m_bus.asyncCall(msg);
+    m_bus.asyncCall(msg, m_callTimeout);
+}
+
+void DBusProxy::send(const QString &method, const QVariantList &args) {
+    if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
+        return;
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(m_service, m_path, m_iface, method);
+    if (!args.isEmpty()) {
+        QStringList types = argTypesForMethod(method);
+        QVariantList converted = args;
+        for (int i = 0; i < converted.size(); ++i) {
+            QString expectedType;
+            if (i < types.size())
+                expectedType = types[i];
+            converted[i] = toTypedDbusVariant(converted[i], expectedType);
+        }
+        for (int i = 0; i < converted.size(); ++i) {
+            if (!wireMarshalable(converted.at(i))) {
+                qWarning("dbusqml: argument %d of %s is not marshalable (type %s) — dropping "
+                         "send",
+                         i, qPrintable(method), QMetaType(converted.at(i).userType()).name());
+                return;
+            }
+        }
+        msg.setArguments(converted);
+    }
+    m_bus.send(msg); // fire-and-forget: NO_REPLY_EXPECTED implied
 }
 
 QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
@@ -469,7 +496,7 @@ QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
     msg.setArguments({m_iface, dbusName, QVariant::fromValue(QDBusVariant(converted))});
-    m_bus.asyncCall(msg);
+    m_bus.asyncCall(msg, m_callTimeout);
     return input;
 }
 
@@ -498,7 +525,7 @@ void DBusProxy::fetchProperties() {
                                                       "org.freedesktop.DBus.Properties", "GetAll");
     msg.setArguments({m_iface});
 
-    auto pending = m_bus.asyncCall(msg);
+    auto pending = m_bus.asyncCall(msg, m_callTimeout);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
 
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {

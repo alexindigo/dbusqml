@@ -35,6 +35,10 @@ class DBusProxy : public QQmlPropertyMap, public QQmlParserStatus {
                    propertiesEnabledChanged)
     Q_PROPERTY(bool reactiveBindingsSupported READ hasReactiveBindings CONSTANT)
     Q_PROPERTY(QVariantMap _signatures READ signatures WRITE setSignatures NOTIFY signaturesChanged)
+    // Governs ALL proxy traffic: call(), dynamic methods, property reads and
+    // writes, and the internal Introspect/GetAll startup calls (ms; −1 =
+    // Qt default). Per-call message.timeout overrides on raw asyncCall.
+    Q_PROPERTY(int callTimeout READ callTimeout WRITE setCallTimeout NOTIFY callTimeoutChanged)
 
 public:
     enum Status { Null, Loading, Ready, Error };
@@ -72,6 +76,18 @@ public:
     Q_INVOKABLE DBusPendingReply *call(const QString &method, const QVariantList &args = {});
     Q_INVOKABLE DBusPendingReply *getProperty(const QString &name);
     Q_INVOKABLE void setProperty(const QString &name, const QVariant &value);
+    // Fire-and-forget method call: NO_REPLY_EXPECTED implied, nothing comes
+    // back.
+    Q_INVOKABLE void send(const QString &method, const QVariantList &args = {});
+
+    int callTimeout() const { return m_callTimeout; }
+    void setCallTimeout(int v) {
+        if (m_callTimeout == v)
+            return;
+        m_callTimeout = v;
+        emit callTimeoutChanged();
+    }
+
     Q_INVOKABLE void emitSignal(const QString &name, const QVariantList &args = {});
     Q_INVOKABLE static DBusConnection *connectToBus(const QString &address);
     Q_INVOKABLE static void reloadTypes();
@@ -109,6 +125,7 @@ Q_SIGNALS:
     void serviceAvailableChanged();
     void propertiesEnabledChanged();
     void signaturesChanged();
+    void callTimeoutChanged();
 
 private Q_SLOTS:
     void onPropertiesChanged(const QDBusMessage &msg);
@@ -126,9 +143,11 @@ private:
     QString m_path;
     QString m_iface;
     QPointer<DBusConnection> m_conn;
+
     QDBusConnection m_bus;
     bool m_signalsConnected = false;
     bool m_signalsEnabled = true;
+    int m_callTimeout = -1;
     bool m_watchServiceStatus = false;
     bool m_serviceAvailable = false;
     bool m_propertiesEnabled = true;

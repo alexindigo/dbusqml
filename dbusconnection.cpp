@@ -886,6 +886,10 @@ static QDBusMessage toQDBusMessage(const DBusMessage &msg) {
         qmsg.setArguments(args);
     }
 
+    // Call options carried on the gadget (0.9.0).
+    qmsg.setInteractiveAuthorizationAllowed(msg.interactiveAuthorization());
+    qmsg.setAutoStartService(msg.autoStart());
+
     return qmsg;
 }
 
@@ -924,12 +928,31 @@ DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message) {
             return fail;
         }
     }
-    auto pending = m_connection.asyncCall(qmsg);
+    // Per-call timeout: the gadget's timeout (ms) drives QtDBus's asyncCall
+    // timeout (−1 = Qt default, 25 s).
+    auto pending = m_connection.asyncCall(qmsg, message.timeout());
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
     reply->setEngine(qmlEngine(this));
     reply->setWatcher(watcher);
     return reply;
+}
+
+void DBusConnection::send(const DBusMessage &message) {
+    auto qmsg = toQDBusMessage(message);
+    // Fire-and-forget: NO_REPLY_EXPECTED is implied by send(); the message
+    // goes out and nothing comes back. The client-exit marshalability guard
+    // still applies — a bad argument warns and drops (there is no reply
+    // channel to fail locally into).
+    for (int i = 0; i < qmsg.arguments().size(); ++i) {
+        if (!wireMarshalable(qmsg.arguments().at(i))) {
+            qWarning("dbusqml: argument %d of %s is not marshalable (type %s) — dropping send", i,
+                     qPrintable(message.member()),
+                     QMetaType(qmsg.arguments().at(i).userType()).name());
+            return;
+        }
+    }
+    m_connection.send(qmsg);
 }
 
 void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resolve,
