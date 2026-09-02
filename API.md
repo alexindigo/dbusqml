@@ -43,6 +43,17 @@ Item {
 
 ### `DBus` (Proxy Element)
 
+**`callTimeout`:** the proxy's `callTimeout` property (milliseconds, `-1` =
+Qt default) governs ALL proxy traffic — `call()`, dynamic methods,
+`getProperty`/`setProperty`, and the internal `Introspect`/`GetAll` startup
+calls. Per-call `message.timeout` overrides on raw `asyncCall`. Absent-
+service hangs under long/infinite timeouts are the domain of
+`watchServiceStatus`/`status`.
+
+**Fire-and-forget:** `send(method, args)` issues the method call with
+`NO_REPLY_EXPECTED` implied — nothing comes back (the OSD `showText`
+pattern). `DBusConnection.send(message)` is the message-object form.
+
 The `DBus` element represents a D-Bus object. When `iface` is set, it introspects the remote object and discovers:
 
 **Dynamic methods** — D-Bus methods become callable directly on the element. D-Bus method names are PascalCase; the QML surface exposes them in camelCase:
@@ -222,6 +233,60 @@ SessionBus.asyncCall({
 
 ---
 
+### `DBusSignalWatcher`
+
+Subscribes to signals on any bus with no proxy and no introspection
+requirement. Empty `service`/`member` fields are wildcards (the
+dbus-monitor shape, including `NameOwnerChanged` on the daemon and
+system-bus signals).
+
+```qml
+DBusSignalWatcher {
+    connection: SystemBus          // or SessionBus / custom
+    service: ""                    // any sender
+    path: "/org/freedesktop/DBus"
+    iface: "org.freedesktop.DBus"
+    member: "NameOwnerChanged"
+    enabled: true                  // toggling re-subscribes
+    onReceived: (member, args) => console.log(member, args)
+}
+```
+
+Delivery is the `received(member, args)` signal with unwrapped args.
+
+### `DBusServiceWatcher`
+
+Watches one well-known name for appear/disappear/owner change on any bus —
+the standalone complement to the proxy's `watchServiceStatus`.
+
+```qml
+DBusServiceWatcher {
+    service: "org.bluez"
+    onOwnerChanged: (oldOwner, newOwner) => console.log("bluez:", oldOwner, "->", newOwner)
+    onRegisteredChanged: console.log("registered:", registered)
+}
+```
+
+`registered` is read-only and tracks the name's presence.
+
+### `DBusObjectManager`
+
+Client for `org.freedesktop.DBus.ObjectManager`: fetches `GetManagedObjects`
+and follows `InterfacesAdded`/`InterfacesRemoved`.
+
+```qml
+DBusObjectManager {
+    service: "org.bluez"
+    path: "/"
+    onManagedObjectsChanged: console.log(Object.keys(managedObjects))
+    onInterfacesAdded: (objectPath, ifaces) => console.log("+", objectPath, Object.keys(ifaces))
+    onInterfacesRemoved: (objectPath, ifaces) => console.log("-", objectPath, ifaces)
+}
+```
+
+`ready` turns true after the initial `GetManagedObjects` completes;
+`managedObjects` maps object path → { interface → { property → value }}.
+
 ### `DBusAdaptor` (Server Element)
 
 The `DBusAdaptor` element registers a D-Bus object on the bus and responds to incoming method calls. It is the server-side counterpart of the `DBus` proxy element.
@@ -247,12 +312,53 @@ DBusAdaptor {
 
 When the adaptor is registered on the bus, other processes can call `Get`, `GetAll`, `Set` on its properties, and invoke its QML functions as D-Bus methods.
 
-**Naming convention:** D-Bus members are PascalCase (`ReadOne`, `ReadAll`),
-but QML forbids uppercase-initial method names. The adaptor folds the first
-character when dispatching — a D-Bus call to `ReadOne` invokes the QML
-function `readOne`. This is the same convention the proxy side uses for
-property names (`dbusPropToQml`). Exact-name matches still work for C++
-`Q_INVOKABLE`s.
+**Naming: the explicit → declared → fold ladder.** D-Bus members are
+PascalCase (`ReadOne`, `ReadAll`), but QML forbids uppercase-initial names.
+The adaptor resolves names in three tiers — the first that declares a name
+wins, and the same resolution drives dispatch, served introspection XML,
+`GetAll` keys, and `PropertiesChanged` names, so the wire and the XML can
+never disagree:
+
+1. **Explicit** — a `_members` map (`{ "Delete": "doDelete" }`: wire name →
+   QML name) makes reserved-word or colliding members servable, and a
+   `_signals` map (`{ "StateChanged": "oa{sv}" }`: wire signal name →
+   concatenated arg signature) declares wire signals that are emitted via
+   `emitSignal` but not expressible as QML `signal` declarations.
+2. **Declared** — the interface's catalog XML (bundled types, the
+   freedesktop-standard `<data>/dbus-1/interfaces/` directory, or
+   user-supplied XML). Catalog method in-arg types are also served.
+3. **Stable inference** — the deterministic first-character fold
+   (`readOne` ⇄ `ReadOne`). The same fold in reverse is the advertised-name
+   fallback: an undeclared QML member is advertised wire-cased on the bus.
+
+`_signals` is introspection-only — `emitSignal` remains the send path.
+`_signatures` (reply out-signatures) is unchanged.
+
+**Property casing:** `Properties.Get`/`Set` accept both the exact QML
+property name and its wire-cased form (`Get("iface", "Version")` finds
+`property int version`). A `Set` whose value cannot be converted replies
+`InvalidArgs` with the property unchanged.
+
+**Property change notifications:** property changes emit the standard
+`org.freedesktop.DBus.Properties.PropertiesChanged` signal (with the
+advertised name; unmarshalable values report via `invalidated_properties`).
+Property notify signals are never broadcast as `fooChanged` bus signals.
+
+**Built-in names:** `service`, `path`, `iface`, and `connection` cannot be
+shadowed from QML (load-time error). A QML method folding onto a library
+mechanism name (`unregister`, `holdReply`, `emitSignal`) warns at load and
+points at `_members`.
+
+**Error replies:** a handler that throws
+`DBusQML.DBusUtils.error(name, message)` (or any value carrying the same
+`{dbusError, name, message}` shape with a dotted `name`) produces an error
+reply with exactly that name; any other thrown value produces
+`org.freedesktop.DBus.Error.Failed` with the exception message.
+
+**Name acquisition:** `allowReplacement`, `replaceExisting`, and
+`queueOnBusy` map onto the D-Bus `RequestName` flags (all default false).
+`nameAcquired`/`nameLost` signals report acquisition (including after
+queueing) and loss to another owner.
 
 **C++ typed returns:** a C++ `Q_INVOKABLE` whose return type is any
 default-constructible type (`QString`, `int`, `QByteArray`, …) round-trips
@@ -554,6 +660,10 @@ For consecutive uppercase prefixes (abbreviations), the entire prefix is lowerca
 
 ### `DBusMessage` (Structured Value)
 
+Call options ride on the message: `timeout` (ms, `-1` = Qt default — used
+by `asyncCall`), `interactiveAuthorization` and `autoStart` (message
+flags, applied on send).
+
 Represents a D-Bus message.
 
 Can be constructed from a property map: `new DBus.dbusMessage({service: "...", path: "...", ...})`.
@@ -677,7 +787,68 @@ var bytes = new DBusQML.bytes("MyWifi")
 
 ---
 
+## 64-bit integers (`x` / `t`)
+
+QML's JS engine has no BigInt, so a 64-bit value above 2^53 cannot be a JS
+number without precision loss. dbusqml delivers losslessly: 64-bit values
+that round-trip through a double (|value| ≤ 2^53) arrive as plain numbers;
+magnitudes above 2^53 arrive as **full-precision decimal strings**. The
+send path accepts decimal strings with a declared `x`/`t` signature (or
+through `DBusQML.int64(value)` / `uint64(value)`), making the round-trip
+lossless end-to-end.
+
+## Unix file descriptors (`h`)
+
+fds pass in both directions as plain integers with a declared `h`
+signature (or an `ah` array). The **receiver** closes the fd; the sender
+keeps ownership of its own end. Works over session/system/custom buses on
+unix sockets (the ScreenCast/Camera `OpenPipeWireRemote` scenario).
+
+### The fd quartet + `fdUrl` (`DBusUtils`)
+
+QML has no fd I/O — the same gap the `ay` codec hit (0.3.0 shipped
+`textFromBytes`/`bytesFromText` *with* `ay` support because QML lacked
+text codecs). The fd quartet fills it the same way, so a received fd is
+usable from the script layer, and the receiver-closes contract is
+dischargeable from QML via `closeFd`:
+
+- `DBusUtils.openFd(path, mode) → int` — fopen-style `mode` (`"r"`,
+  `"w"`, `"rw"`); −1 + warning on failure.
+- `DBusUtils.writeFd(fd, ArrayBuffer|string) → int` — bytes written;
+  −1 + warning on failure.
+- `DBusUtils.readFd(fd, maxBytes) → ArrayBuffer` — empty on error/EOF.
+- `DBusUtils.closeFd(fd)` — no-op warning on an invalid fd, never a crash.
+- `DBusUtils.fdUrl(fd) → string` — `"file:///proc/self/fd/N"`, so
+  regular-file fds flow into path-based QML consumers (`Image`,
+  Quickshell `FileView`, …) with no extra I/O code.
+
+Caveats:
+
+- **fd taxonomy.** `readFd`/`writeFd` work on any fd — regular files,
+  pipes, sockets. `fdUrl` is **regular-file-only**: pipes, sockets, and
+  anon inodes (the ScreenShot2 pipe, the `OpenPipeWireRemote` socket)
+  have no usable path — use `readFd`/`writeFd` for streams.
+- **Access mode travels with the fd.** A transferred fd keeps its access
+  mode; a receiver cannot read through a write-only fd — open `rw` when
+  the other side must read.
+- **fdUrl lifetime.** The URL is valid only while the fd stays open in
+  this process — lazy/async loaders must not outlive it. Close with
+  `closeFd` when done (that is the receiver-closes contract).
+
 ## Known Limitations
+
+Only two remain, both true language/type-system constraints — everything
+buildable is served (see the sections above for the full surface:
+truthful introspection, `PropertiesChanged`, named errors, name
+acquisition, call options, watchers, ObjectManager, fds, lossless
+64-bit).
+
+- **Dict keys are strings.** JS object keys are strings by definition, so
+  demarshaled dict keys stringify (an `i`-keyed dict arrives with string
+  keys). The declared-signature send path coerces keys back correctly.
+- **Empty container inference.** `[]` infers `av` and `{}` infers `a{sv}`
+  — stable, deterministic inference. Declared signatures are the answer
+  when a receiver needs a concrete element type.
 
 ### Signal handlers on `DBus` elements run in C++-object context
 

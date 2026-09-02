@@ -4,6 +4,98 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-09-02
+
+### Added
+
+- **fd quartet + `fdUrl` on `DBusUtils`.** QML had no fd I/O — the `ay`
+  codec gap again, this time for file descriptors. `openFd`/`writeFd`/
+  `readFd`/`closeFd` make a received `h` usable from QML (receiver-closes
+  is now dischargeable via `closeFd`), and `fdUrl` maps a regular-file fd
+  to `file:///proc/self/fd/N` for path-based consumers. Documented caveats:
+  `fdUrl` is regular-file-only (streams use `readFd`/`writeFd`); the URL is
+  valid only while the fd stays open.
+
+### Changed
+
+- **Truthful served surface — the naming ladder.** Served introspection XML,
+  `GetAll` keys, `PropertiesChanged` names, and method in-arg types now
+  resolve through explicit (`_signals`, `_members`) → declared (catalog) →
+  stable inference (the deterministic first-character fold,
+  `readOne` ⇄ `ReadOne`). **Wire change:** undeclared QML members are
+  advertised wire-cased on the bus (`ReadOne`, not `readOne`), and
+  QML-declared plain signals broadcast under their folded wire names
+  (`SomethingHappened`, not `somethingHappened`). Subscribers matching the
+  old lowercase names must update their match rules.
+- **`PropertiesChanged` replaces the accidental notify-signal relays.**
+  Property changes now emit the standard
+  `org.freedesktop.DBus.Properties.PropertiesChanged`; the `fooChanged`
+  broadcast signals are gone (unmarshalable values report via
+  `invalidated_properties`). dbusqml clients (which always subscribed to
+  `PropertiesChanged`) now see dbusqml adaptors' property changes —
+  reactivity works end-to-end; consumers that polled as a workaround can
+  stop.
+- **Shadowing a built-in property errors at load.** `service`, `path`,
+  `iface`, `connection` are `FINAL` — a QML `property string path` on an
+  adaptor is a load-time error instead of a silently broken adaptor.
+- **64-bit values above 2^53 are delivered as full-precision decimal
+  strings.** QML's JS engine has no BigInt (spike-confirmed); a qint64/
+  quint64 that doesn't round-trip through a double would silently lose
+  precision as a JS number. Values within 2^53 stay plain numbers. The
+  send path accepts decimal strings with declared `x`/`t`, making the
+  round-trip lossless end-to-end.
+
+### Added
+
+- **`_signals` / `_members`** — explicit wire-name declarations:
+  `_signals` maps wire signal names to concatenated arg signatures (served
+  in introspection; `emitSignal` remains the send path); `_members` aliases
+  wire member names to QML names, making reserved-word (`Delete`) and
+  collision (`Unregister`) members servable.
+- **Catalog-served signals and types** — the freedesktop-standard
+  `<data>/dbus-1/interfaces/` directory is scanned at lowest precedence;
+  bundled `org.freedesktop.impl.portal.Inhibit.xml`; user-supplied XML
+  (`~/.config/dbusqml/types/`, `DBUSQML_TYPES_PATH`) documented as the
+  first-class custom-interface path, highest precedence. Malformed XML
+  files in scanned directories are discarded whole.
+- **Call options** — per-call `message.timeout` (ms, `-1` = Qt default),
+  `interactiveAuthorization` and `autoStart` message flags; the proxy's
+  `callTimeout` governs all proxy traffic including the internal
+  Introspect/GetAll startup calls; `send(method, args)` and
+  `DBusConnection.send(message)` for fire-and-forget.
+- **Named error replies from handlers** — throwing
+  `DBusQML.DBusUtils.error(name, message)` produces that exact error reply;
+  other thrown values produce `org.freedesktop.DBus.Error.Failed` with the
+  exception message (previously the JS error silently re-ran the handler
+  and replied EMPTY).
+- **Service-name acquisition** — `allowReplacement`, `replaceExisting`,
+  `queueOnBusy` (RequestName flags; all default false — previous behavior
+  preserved) with `nameAcquired`/`nameLost` signals driven by daemon owner
+  changes.
+- **Standalone watcher elements** — `DBusSignalWatcher` (any-bus signal
+  subscription with wildcard fields, no proxy/introspection required) and
+  `DBusServiceWatcher` (appear/disappear/owner change for one name).
+- **`DBusObjectManager`** — ObjectManager client: `GetManagedObjects`
+  inventory plus live `InterfacesAdded`/`InterfacesRemoved` signals with
+  unwrapped args (BlueZ / KDE-Connect / Valent class).
+- **Unix fd (`h`) passing** — fds in both directions as plain integers
+  (dbus-next + Nemo shape) with the receiver-closes lifetime; send via a
+  plain int fd + declared `h`; container positions (`ah`) covered.
+
+### Fixed
+
+- **Spec-cased property dispatch** — `Properties.Get`/`Set` accept the
+  wire-cased property name (`Get("iface", "Version")` finds
+  `property int version`), mirroring the method dispatch's exact→folded
+  dual lookup.
+- **`Set` write guard** — a value that cannot be converted for the property
+  replies `InvalidArgs` with the property unchanged, instead of a silent
+  empty success.
+- **`NO_REPLY_EXPECTED` honored** — no reply (success or error) is
+  constructed or sent when the caller didn't ask for one.
+- **`signaturesChanged` no longer leaks into served introspection** (nor
+  the new `_signalsChanged`/`_membersChanged`).
+
 ## [0.8.0] — 2026-08-29
 
 ### Changed
