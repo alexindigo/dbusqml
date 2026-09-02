@@ -6,6 +6,7 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusVariant>
+#include <QXmlStreamReader>
 #include <QDir>
 #include <QEventLoop>
 #include <QProcess>
@@ -22,6 +23,7 @@
 #include "dbusadaptor.h"
 #include "dbusconnection.h"
 #include "dbus.h"
+#include "dbuscatalog.h"
 #include "dbuspathdispatcher.h"
 #include "dbustypes.h"
 
@@ -283,7 +285,21 @@ private slots:
 
     // {value:} heuristic removal pins (0.6.0 wire change).
     void testValueKeyDictIsRealDict();
+
+    // 0.9.0 served surface: truthful introspection, naming ladder, _members.
+    void testServedSignalsExplicit();
+    void testServedSignalsCatalog();
+    void testServedXmlBuiltinsFiltered();
+    void testServedMethodNameFoldFallback();
+    void testServedMethodArgTypesFromCatalog();
+    void testMembersAliasDispatch();
+    void testMembersAliasServing();
+    void testCatalogSourcesAndPrecedence();
+    void testCatalogMalformedXmlSkipped();
     void testValueKeyStructListIsRealDict();
+
+    // 0.9.0 fix cycle: co-location/leak regression.
+    void testCoLocatedIntrospectionClean();
 
     // Typed C++ return capture (0.6.0).
     void testTypedCppReturnsRoundTrip();
@@ -509,8 +525,8 @@ void TestDBusAdaptor::testGetAllExcludesInternal() {
     QVERIFY(!props.contains(QStringLiteral("path")));
     QVERIFY(!props.contains(QStringLiteral("iface")));
     QVERIFY(!props.contains(QStringLiteral("objectName")));
-    QVERIFY(props.contains(QStringLiteral("testInt")));
-    QVERIFY(props.contains(QStringLiteral("testString")));
+    QVERIFY(props.contains(QStringLiteral("TestInt")));
+    QVERIFY(props.contains(QStringLiteral("TestString")));
 }
 
 void TestDBusAdaptor::testWrongIfaceErrors() {
@@ -1987,8 +2003,8 @@ void TestDBusAdaptor::testCoLocatedPropertiesRouting() {
     QDBusMessage ra = bus.call(ga, QDBus::Block, 3000);
     QCOMPARE(ra.type(), QDBusMessage::ReplyMessage);
     const QVariantMap pa = unwrapDbus(ra.arguments().first()).toMap();
-    QVERIFY(pa.contains(QStringLiteral("alpha")));
-    QVERIFY(!pa.contains(QStringLiteral("beta")));
+    QVERIFY(pa.contains(QStringLiteral("Alpha")));
+    QVERIFY(!pa.contains(QStringLiteral("Beta")));
 
     QDBusMessage gb = QDBusMessage::createMethodCall(
         QStringLiteral("org.dbusqml.Multi3"), QStringLiteral("/Multi3"),
@@ -1997,8 +2013,8 @@ void TestDBusAdaptor::testCoLocatedPropertiesRouting() {
     QDBusMessage rb = bus.call(gb, QDBus::Block, 3000);
     QCOMPARE(rb.type(), QDBusMessage::ReplyMessage);
     const QVariantMap pb = unwrapDbus(rb.arguments().first()).toMap();
-    QVERIFY(pb.contains(QStringLiteral("beta")));
-    QVERIFY(!pb.contains(QStringLiteral("alpha")));
+    QVERIFY(pb.contains(QStringLiteral("Beta")));
+    QVERIFY(!pb.contains(QStringLiteral("Alpha")));
 
     delete a;
     delete b;
@@ -2387,9 +2403,9 @@ void TestDBusAdaptor::testPropertyGuardGetAll() {
     QDBusMessage reply = bus.call(getAll, QDBus::Block, 3000);
     QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
     const QVariantMap props = unwrapDbus(reply.arguments().first()).toMap();
-    QVERIFY(props.contains(QStringLiteral("good")));
-    QVERIFY(!props.contains(QStringLiteral("poison")));
-    QCOMPARE(props.value(QStringLiteral("good")).toInt(), 42);
+    QVERIFY(props.contains(QStringLiteral("Good")));
+    QVERIFY(!props.contains(QStringLiteral("Poison")));
+    QCOMPARE(props.value(QStringLiteral("Good")).toInt(), 42);
 }
 
 // P3 — the organic QML repro: `property var` holding a QObject. GetAll must
@@ -2419,7 +2435,7 @@ void TestDBusAdaptor::testPropertyGuardQmlStash() {
     QVERIFY(spy.wait(5000));
     QVERIFY(!w->isError());
     const QVariantMap props = unwrapDbus(w->reply().arguments().first()).toMap();
-    QVERIFY(!props.contains(QStringLiteral("stash")));
+    QVERIFY(!props.contains(QStringLiteral("Stash")));
     delete w;
 
     // Process alive — a subsequent normal call still answers.
@@ -2503,8 +2519,8 @@ void TestDBusAdaptor::testPropertyGuardIntrospection() {
     adaptor.componentComplete();
 
     const QString xml = adaptor.introspect(QString());
-    QVERIFY(!xml.contains(QStringLiteral("poison")));
-    QVERIFY(xml.contains(QStringLiteral("good")));
+    QVERIFY(!xml.contains(QStringLiteral("<property name=\"Poison\"")));
+    QVERIFY(xml.contains(QStringLiteral("<property name=\"Good\"")));
 
     // Wire Introspect (local loop, same as testCoLocatedIntrospection): the
     // XML served through the dispatcher never advertises poison either.
@@ -2515,8 +2531,10 @@ void TestDBusAdaptor::testPropertyGuardIntrospection() {
     QDBusMessage introReply = bus.call(intro, QDBus::Block, 3000);
     QCOMPARE(introReply.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(introReply.arguments().size(), 1);
-    QVERIFY(!introReply.arguments().first().toString().contains(QStringLiteral("poison")));
-    QVERIFY(introReply.arguments().first().toString().contains(QStringLiteral("good")));
+    QVERIFY(!introReply.arguments().first().toString().contains(
+        QStringLiteral("<property name=\"Poison\"")));
+    QVERIFY(introReply.arguments().first().toString().contains(
+        QStringLiteral("<property name=\"Good\"")));
 
     // Still serving methods after the guarded paths ran.
     QDBusMessage ping = QDBusMessage::createMethodCall(
@@ -2726,6 +2744,347 @@ void TestDBusAdaptor::testMalformedVariantSigSignalSafe() {
     QCOMPARE(catcher.lastSignal.signature(), QStringLiteral("v"));
 
     delete adaptor;
+}
+
+// ==================== 0.9.0 truthful served introspection ==================
+//
+// The naming ladder (owner decision Q4): explicit (_signals/_members) →
+// declared (catalog) → stable inference (the deterministic first-char-upper
+// fold, readOne → ReadOne). Wire names are never guessed from data.
+
+static QString introspectOverBus(const QString &service, const QString &path) {
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        service, path, QStringLiteral("org.freedesktop.DBus.Introspectable"),
+        QStringLiteral("Introspect"));
+    QDBusMessage reply = QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+    if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
+        return QString();
+    return reply.arguments().first().toString();
+}
+
+// A1 — a _signals-declared signal is served in introspection with its arg
+// types split from the concatenated signature. 0.8.0: _signals doesn't exist
+// (fixture fails to load).
+void TestDBusAdaptor::testServedSignalsExplicit() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.SigServe"), QStringLiteral("/SigServe"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"), {},
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.SigServe'\n"
+        "  path: '/SigServe'\n"
+        "  iface: 'org.freedesktop.impl.portal.Inhibit'\n"
+        "  _signals: ({ StateChanged: 'oa{sv}' })\n"
+        "  function inhibit(handle, appId, window, flags, options) { return 0 }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    const QString xml = reply.arguments().first().toString();
+    QVERIFY2(xml.contains(QStringLiteral("<signal name=\"StateChanged\">")), qPrintable(xml));
+    QVERIFY2(xml.contains(QStringLiteral("type=\"o\"")), qPrintable(xml));
+    QVERIFY2(xml.contains(QStringLiteral("type=\"a{sv}\"")), qPrintable(xml));
+}
+
+// A1 — catalog-declared signals are served for the adaptor's iface without
+// any QML declaration (impl.portal.Settings declares SettingChanged with
+// (ssv) args). 0.8.0: absent.
+void TestDBusAdaptor::testServedSignalsCatalog() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.SigServeCat"), QStringLiteral("/SigServeCat"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"), {},
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.SigServeCat'\n"
+        "  path: '/SigServeCat'\n"
+        "  iface: 'org.freedesktop.impl.portal.Settings'\n"
+        "  function readOne(ns, key) { return 1 }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    const QString xml = reply.arguments().first().toString();
+    QVERIFY2(xml.contains(QStringLiteral("<signal name=\"SettingChanged\">")), qPrintable(xml));
+    QVERIFY2(xml.contains(QStringLiteral("type=\"s\"")), qPrintable(xml));
+}
+
+// A4 — the library's own notify signals must never appear in served XML.
+void TestDBusAdaptor::testServedXmlBuiltinsFiltered() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.SigServeBuiltin"), QStringLiteral("/SigServeBuiltin"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"), {},
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.SigServeBuiltin'\n"
+        "  path: '/SigServeBuiltin'\n"
+        "  iface: 'org.dbusqml.SigServeBuiltin'\n"
+        "  function ping() { return 1 }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    const QString xml = reply.arguments().first().toString();
+    QVERIFY2(!xml.contains(QStringLiteral("signaturesChanged")), qPrintable(xml));
+    QVERIFY2(!xml.contains(QStringLiteral("_signalsChanged")), qPrintable(xml));
+    QVERIFY2(!xml.contains(QStringLiteral("_membersChanged")), qPrintable(xml));
+}
+
+// A3/Q4 — the advertised method name for an undeclared interface is the
+// deterministic fold of the QML name: readOne → ReadOne. 0.8.0: advertises
+// the QML name verbatim.
+void TestDBusAdaptor::testServedMethodNameFoldFallback() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.FoldServe"), QStringLiteral("/FoldServe"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"), {},
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.FoldServe'\n"
+        "  path: '/FoldServe'\n"
+        "  iface: 'org.dbusqml.FoldServe'\n"
+        "  function readOne(ns, key) { return ns + '.' + key }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    const QString xml = reply.arguments().first().toString();
+    QVERIFY2(xml.contains(QStringLiteral("<method name=\"ReadOne\">")), qPrintable(xml));
+    QVERIFY2(!xml.contains(QStringLiteral("<method name=\"readOne\">")), qPrintable(xml));
+}
+
+// The napkin's "related observation": when the catalog declares the method,
+// its advertised in-arg types replace the metaobject-derived vvvv.
+void TestDBusAdaptor::testServedMethodArgTypesFromCatalog() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.ArgServe"), QStringLiteral("/ArgServe"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"), {},
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.ArgServe'\n"
+        "  path: '/ArgServe'\n"
+        "  iface: 'org.freedesktop.impl.portal.Settings'\n"
+        "  function read(ns, key) { return 1 }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    const QString xml = reply.arguments().first().toString();
+    // Read is declared (ss in) in the bundled catalog: the served <method>
+    // advertises the wire name and the declared string in-args, not the
+    // metaobject-derived variants.
+    QVERIFY2(xml.contains(QStringLiteral("<method name=\"Read\">")), qPrintable(xml));
+    QVERIFY2(xml.contains(QStringLiteral("<arg name=\"arg0\" type=\"s\" direction=\"in\"/>")),
+             qPrintable(xml));
+    QVERIFY2(xml.contains(QStringLiteral("<arg name=\"arg1\" type=\"s\" direction=\"in\"/>")),
+             qPrintable(xml));
+}
+
+// A7/A8 — _members aliases make colliding and reserved-word members servable:
+// wire member "Delete" dispatches to QML doDelete. 0.8.0: no _members
+// property (fixture fails to load).
+void TestDBusAdaptor::testMembersAliasDispatch() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.AliasServe"), QStringLiteral("/AliasServe"),
+        QStringLiteral("org.dbusqml.AliasServe"), QStringLiteral("Delete"), {},
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.AliasServe'\n"
+        "  path: '/AliasServe'\n"
+        "  iface: 'org.dbusqml.AliasServe'\n"
+        "  _members: ({ Delete: 'doDelete' })\n"
+        "  function doDelete() { return 'deleted' }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.arguments().first().toString(), QStringLiteral("deleted"));
+}
+
+// The alias also drives the advertised name (dispatch and introspection can
+// never disagree).
+void TestDBusAdaptor::testMembersAliasServing() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.AliasServe2"), QStringLiteral("/AliasServe2"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"), {},
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.AliasServe2'\n"
+        "  path: '/AliasServe2'\n"
+        "  iface: 'org.dbusqml.AliasServe2'\n"
+        "  _members: ({ Delete: 'doDelete' })\n"
+        "  function doDelete() { return 'deleted' }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    const QString xml = reply.arguments().first().toString();
+    QVERIFY2(xml.contains(QStringLiteral("<method name=\"Delete\">")), qPrintable(xml));
+    QVERIFY2(!xml.contains(QStringLiteral("doDelete")), qPrintable(xml));
+}
+
+// Q3 — catalog sources: the freedesktop-standard <data>/dbus-1/interfaces/
+// directory is scanned at LOWEST precedence (below bundled + user dirs);
+// user-supplied XML (~/.config/dbusqml/types/, DBUSQML_TYPES_PATH) wins.
+void TestDBusAdaptor::testCatalogSourcesAndPrecedence() {
+    QTemporaryDir dataDir; // stands in for XDG_DATA_HOME (dbus-1/interfaces)
+    QTemporaryDir userDir; // DBUSQML_TYPES_PATH (highest precedence)
+    QVERIFY(dataDir.isValid() && userDir.isValid());
+    QDir(dataDir.filePath(QStringLiteral("dbus-1/interfaces"))).mkpath(QStringLiteral("."));
+    QDir(userDir.path()).mkpath(QStringLiteral("."));
+
+    const QByteArray ifaceXml = R"(<node>
+  <interface name="org.dbusqml.Precedence">
+    <method name="WhoAmI">
+      <arg type="s" direction="out"/>
+    </method>
+  </interface>
+</node>
+)";
+    const char *systemDecl = "system-tier";
+    const char *userDecl = "user-tier";
+    {
+        QFile f(dataDir.filePath(QStringLiteral("dbus-1/interfaces/org.dbusqml.Precedence.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(ifaceXml);
+    }
+    {
+        QFile f(userDir.filePath(QStringLiteral("org.dbusqml.Precedence.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(ifaceXml);
+        // Distinguish the winning tier via the method's out-arg annotation —
+        // instead we simply verify the SOURCE file through a marker interface.
+    }
+
+    // Mark the system-tier file with an extra property so the two tiers are
+    // distinguishable by content.
+    {
+        QFile f(dataDir.filePath(QStringLiteral("dbus-1/interfaces/org.dbusqml.Precedence.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        f.write(R"(<node>
+  <interface name="org.dbusqml.Precedence">
+    <method name="WhoAmI">
+      <arg type="s" direction="out"/>
+    </method>
+    <signal name="SystemTierMarker"/>
+  </interface>
+</node>
+)");
+    }
+    {
+        QFile f(userDir.filePath(QStringLiteral("org.dbusqml.Precedence.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        f.write(R"(<node>
+  <interface name="org.dbusqml.Precedence">
+    <method name="WhoAmI">
+      <arg type="s" direction="out"/>
+    </method>
+    <signal name="UserTierMarker"/>
+  </interface>
+</node>
+)");
+    }
+
+    const QByteArray savedDataHome = qgetenv("XDG_DATA_HOME");
+    qputenv("XDG_DATA_HOME", dataDir.path().toLocal8Bit());
+    qputenv("DBUSQML_TYPES_PATH", userDir.path().toLocal8Bit());
+    DBusCatalog::instance().reload();
+    auto spec = DBusCatalog::instance().lookup(QStringLiteral("org.dbusqml.Precedence"));
+    QVERIFY(spec.has_value());
+    // Highest tier wins: the user-tier marker signal is present, the
+    // system-tier one is not.
+    QVERIFY(spec->signals_.contains(QStringLiteral("UserTierMarker")));
+    QVERIFY(!spec->signals_.contains(QStringLiteral("SystemTierMarker")));
+
+    // Remove the user tier: the dbus-1/interfaces scan (lowest) takes over.
+    qunsetenv("DBUSQML_TYPES_PATH");
+    DBusCatalog::instance().reload();
+    spec = DBusCatalog::instance().lookup(QStringLiteral("org.dbusqml.Precedence"));
+    QVERIFY(spec.has_value());
+    QVERIFY2(spec->signals_.contains(QStringLiteral("SystemTierMarker")),
+             "the freedesktop-standard dbus-1/interfaces dir must be scanned");
+    QVERIFY(!spec->signals_.contains(QStringLiteral("UserTierMarker")));
+
+    // Restore the process environment and the bundled catalog.
+    if (savedDataHome.isEmpty())
+        qunsetenv("XDG_DATA_HOME");
+    else
+        qputenv("XDG_DATA_HOME", savedDataHome);
+    DBusCatalog::instance().reload();
+}
+
+// Loader robustness: a malformed XML file in a scanned directory warns and is
+// skipped — the whole file is discarded, no partial interface leaks in.
+void TestDBusAdaptor::testCatalogMalformedXmlSkipped() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    {
+        QFile f(dir.filePath(QStringLiteral("broken.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("<node><interface name=\"org.dbusqml.Broken\"><method name=\"M\">");
+        // deliberately unterminated
+    }
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("DBusCatalog: XML error")));
+    qputenv("DBUSQML_TYPES_PATH", dir.path().toLocal8Bit());
+    DBusCatalog::instance().reload();
+    QVERIFY(!DBusCatalog::instance().lookup(QStringLiteral("org.dbusqml.Broken")).has_value());
+    qunsetenv("DBUSQML_TYPES_PATH");
+    DBusCatalog::instance().reload();
+}
+
+// Co-located same-iface adaptors must introspect CLEANLY: no duplicate
+// signals (the busctl-reject class) and no library base-class member in the
+// served XML.
+void TestDBusAdaptor::testCoLocatedIntrospectionClean() {
+    const QByteArray qmlA = "import DBus 1.0\n"
+                            "DBusAdaptor {\n"
+                            "  service: 'org.dbusqml.CoClean'\n"
+                            "  path: '/CoClean'\n"
+                            "  iface: 'org.dbusqml.CoClean'\n"
+                            "  property int alpha: 1\n"
+                            "  function ping() { return 'a' }\n"
+                            "}";
+    QObject *a = createQmlAdaptor(qmlA);
+    QVERIFY(a != nullptr);
+    QObject *b = createQmlAdaptor(qmlA);
+    QVERIFY(b != nullptr);
+    QTest::qWait(300);
+
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.CoClean"), QStringLiteral("/CoClean"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"));
+    QDBusMessage reply = QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    const QString xml = reply.arguments().first().toString();
+
+    // No library base-class member may appear — by name or wire-cased fold.
+    const QStringList forbidden = {QStringLiteral("nameAcquired"),
+                                   QStringLiteral("nameLost"),
+                                   QStringLiteral("NameAcquired"),
+                                   QStringLiteral("NameLost"),
+                                   QStringLiteral("AllowReplacement"),
+                                   QStringLiteral("ReplaceExisting"),
+                                   QStringLiteral("QueueOnBusy"),
+                                   QStringLiteral("signaturesChanged"),
+                                   QStringLiteral("SignaturesChanged"),
+                                   QStringLiteral("_signalsChanged"),
+                                   QStringLiteral("_membersChanged"),
+                                   QStringLiteral("serviceChanged"),
+                                   QStringLiteral("pathChanged"),
+                                   QStringLiteral("ifaceChanged"),
+                                   QStringLiteral("connectionChanged"),
+                                   QStringLiteral("destroyed"),
+                                   QStringLiteral("objectNameChanged"),
+                                   QStringLiteral("deleteLater"),
+                                   QStringLiteral("Service"),
+                                   QStringLiteral("Path"),
+                                   QStringLiteral("Iface"),
+                                   QStringLiteral("Connection")};
+    for (const QString &bad : forbidden)
+        QVERIFY2(!xml.contains(bad), qPrintable(QStringLiteral("leaked: %1\n%2").arg(bad, xml)));
+
+    // No duplicate <signal name="..."> — the busctl-reject class.
+    QSet<QString> seen;
+    QXmlStreamReader xr(xml);
+    while (!xr.atEnd()) {
+        if (xr.readNext() == QXmlStreamReader::StartElement &&
+            xr.name() == QLatin1String("signal")) {
+            const QString n = xr.attributes().value(QStringLiteral("name")).toString();
+            QVERIFY2(!seen.contains(n),
+                     qPrintable(QStringLiteral("duplicate signal %1\n%2").arg(n, xml)));
+            seen.insert(n);
+        }
+    }
+    QVERIFY2(!xr.hasError(), qPrintable(xr.errorString()));
+    qWarning("PROBE-XML: %s", qPrintable(xml));
+
+    delete a;
+    delete b;
 }
 
 // ==================== Adaptor lifecycle (L1–L7, 0.7.0) ====================
@@ -3494,7 +3853,7 @@ void TestDBusAdaptor::testMatrixGetAllValues() {
         QVERIFY2(r.type() == QDBusMessage::ReplyMessage,
                  qPrintable(QStringLiteral("cell %1: %2").arg(id, r.errorName())));
         const QVariantMap props = unwrapDbus(r.arguments().first()).toMap();
-        QVERIFY2(!props.contains(QStringLiteral("pv")),
+        QVERIFY2(!props.contains(QStringLiteral("Pv")),
                  qPrintable(QStringLiteral("cell %1 must be skipped").arg(id)));
     }
     for (const char *id : benign) {
@@ -3505,7 +3864,7 @@ void TestDBusAdaptor::testMatrixGetAllValues() {
         QVERIFY2(r.type() == QDBusMessage::ReplyMessage,
                  qPrintable(QStringLiteral("cell %1: %2").arg(id, r.errorName())));
         const QVariantMap props = unwrapDbus(r.arguments().first()).toMap();
-        QVERIFY2(props.contains(QStringLiteral("pv")),
+        QVERIFY2(props.contains(QStringLiteral("Pv")),
                  qPrintable(QStringLiteral("cell %1 must be present").arg(id)));
     }
 }

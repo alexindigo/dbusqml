@@ -78,6 +78,7 @@ qt_add_resources(dbusqml "catalog"
         types/org.freedesktop.portal.Settings.xml
         types/org.freedesktop.impl.portal.Settings.xml
         types/org.freedesktop.impl.portal.FileChooser.xml
+        types/org.freedesktop.impl.portal.Inhibit.xml
         types/org.freedesktop.impl.portal.Request.xml
         types/org.freedesktop.portal.NetworkMonitor.xml
         types/org.freedesktop.UPower.xml

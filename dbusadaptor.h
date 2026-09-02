@@ -21,6 +21,12 @@ class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
     Q_PROPERTY(
         DBusConnection *connection READ connection WRITE setConnection NOTIFY connectionChanged)
     Q_PROPERTY(QVariantMap _signatures READ signatures WRITE setSignatures NOTIFY signaturesChanged)
+    // Explicit wire-surface declarations (the explicit tier of the naming
+    // ladder): _signals maps wire signal name → concatenated arg signature;
+    // _members maps wire member name → QML function/property name.
+    Q_PROPERTY(QVariantMap _signals READ signalSpecs WRITE setSignalSpecs NOTIFY _signalsChanged)
+    Q_PROPERTY(
+        QVariantMap _members READ memberAliases WRITE setMemberAliases NOTIFY _membersChanged)
 
 public:
     explicit DBusAdaptor(QObject *parent = nullptr);
@@ -40,6 +46,12 @@ public:
 
     QVariantMap signatures() const { return m_signatures; }
     void setSignatures(const QVariantMap &v);
+
+    QVariantMap signalSpecs() const { return m_signals; }
+    void setSignalSpecs(const QVariantMap &v);
+
+    QVariantMap memberAliases() const { return m_members; }
+    void setMemberAliases(const QVariantMap &v);
 
     // QQmlParserStatus
     void classBegin() override {}
@@ -76,17 +88,28 @@ Q_SIGNALS:
     void ifaceChanged();
     void connectionChanged();
     void signaturesChanged();
+    void _signalsChanged();
+    void _membersChanged();
 
 private:
     QString generateXml() const;
     QDBusConnection bus() const;
     QStringList declaredOutTypes(const QString &member) const;
 
+    // The naming ladder (explicit _members → catalog → first-char-upper fold):
+    // the wire name advertised for a QML member name (methods and properties).
+    QString advertisedName(const QString &qmlName) const;
+    // The incoming-wire-name → QML-name resolution used by dispatch: explicit
+    // _members alias → exact → first-char-lower fold.
+    QStringList candidateQmlNames(const QString &wireName) const;
+
     QString m_service;
     QString m_path;
     QString m_iface;
     QPointer<DBusConnection> m_conn;
     QVariantMap m_signatures;
+    QVariantMap m_signals;
+    QVariantMap m_members;
     bool m_attached = false;
 
     // Dispatch context for holdReply(): the in-flight call's message,

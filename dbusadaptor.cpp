@@ -146,6 +146,20 @@ void DBusAdaptor::setSignatures(const QVariantMap &v) {
     emit signaturesChanged();
 }
 
+void DBusAdaptor::setSignalSpecs(const QVariantMap &v) {
+    if (m_signals == v)
+        return;
+    m_signals = v;
+    emit _signalsChanged();
+}
+
+void DBusAdaptor::setMemberAliases(const QVariantMap &v) {
+    if (m_members == v)
+        return;
+    m_members = v;
+    emit _membersChanged();
+}
+
 QDBusConnection DBusAdaptor::bus() const {
     if (m_conn)
         return static_cast<QDBusConnection>(*m_conn);
@@ -165,10 +179,11 @@ void DBusAdaptor::componentComplete() {
     // Auto-connect user-defined QML signals to D-Bus
     const QMetaObject *meta = metaObject();
     static const QStringList builtInSignals = {
-        QStringLiteral("destroyed"),        QStringLiteral("objectNameChanged"),
-        QStringLiteral("serviceChanged"),   QStringLiteral("pathChanged"),
-        QStringLiteral("ifaceChanged"),     QStringLiteral("connectionChanged"),
-        QStringLiteral("signaturesChanged")};
+        QStringLiteral("destroyed"),         QStringLiteral("objectNameChanged"),
+        QStringLiteral("serviceChanged"),    QStringLiteral("pathChanged"),
+        QStringLiteral("ifaceChanged"),      QStringLiteral("connectionChanged"),
+        QStringLiteral("signaturesChanged"), QStringLiteral("_signalsChanged"),
+        QStringLiteral("_membersChanged")};
 
     for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
         QMetaMethod sig = meta->method(i);
@@ -282,15 +297,84 @@ QString DBusAdaptor::generateXml() const {
     QString xml;
     xml += QStringLiteral("  <interface name=\"%1\">\n").arg(m_iface);
 
-    // Properties
-    for (int i = 0; i < meta->propertyCount(); ++i) {
+    // Signals — the naming ladder, deduped by case-folded name across tiers:
+    // explicit _signals → catalog declaration → QML-declared (metaobject,
+    // wire-cased via the fold). First tier that declares a folded name wins.
+    QSet<QString> servedSignals; // folded names already advertised
+    auto addSignal = [&](const QString &wireName, const QStringList &argTypes,
+                         const QStringList &argNames) {
+        if (wireName.isEmpty())
+            return;
+        const QString folded = dbusMemberToQml(wireName);
+        if (servedSignals.contains(folded))
+            return;
+        servedSignals.insert(folded);
+        xml += QStringLiteral("    <signal name=\"%1\">\n").arg(wireName);
+        for (int j = 0; j < argTypes.size(); ++j) {
+            const QString argName =
+                j < argNames.size() ? argNames.at(j) : QStringLiteral("arg%1").arg(j);
+            xml += QStringLiteral("      <arg name=\"%1\" type=\"%2\"/>\n")
+                       .arg(argName, argTypes.at(j));
+        }
+        xml += QStringLiteral("    </signal>\n");
+    };
+
+    // Tier 1: explicit _signals — wire name → concatenated arg signature.
+    for (auto it = m_signals.cbegin(); it != m_signals.cend(); ++it) {
+        const QString sig = it.value().toString();
+        QStringList types;
+        int pos = 0;
+        bool ok = true;
+        while (pos < sig.size()) {
+            const QString t = firstCompleteType(sig, pos);
+            if (t.isEmpty()) {
+                ok = false;
+                break;
+            }
+            types << t;
+        }
+        if (!ok) {
+            qWarning("dbusqml: _signals entry %s has a malformed signature '%s' — skipped",
+                     qPrintable(it.key()), qPrintable(sig));
+            continue;
+        }
+        addSignal(it.key(), types, {});
+    }
+
+    // Tier 2: catalog-declared signals.
+    if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
+        for (const auto &sig : spec->signals_)
+            addSignal(sig.name, sig.argTypes, {});
+    }
+
+    // Tier 3: QML-declared signals, wire-cased via the fold (Q4 — emission
+    // and introspection can never diverge; SignalRelay emits the same name).
+    for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
+        QMetaMethod method = meta->method(i);
+        if (method.methodType() != QMetaMethod::Signal)
+            continue;
+        const QString name = QString::fromLatin1(method.name());
+        if (name.startsWith(QStringLiteral("qml")))
+            continue;
+        QStringList types;
+        const auto paramTypes = method.parameterTypes();
+        for (const auto &t : paramTypes)
+            types << metaTypeToDbusSignature(QMetaType::fromName(t).id());
+        const auto paramNames = method.parameterNames();
+        QStringList names;
+        for (const auto &n : paramNames)
+            names << QString::fromLatin1(n);
+        addSignal(advertisedName(name), types, names);
+    }
+
+    // Properties — wire-cased names via the ladder. Offset-based: the
+    // library's own base-class properties (service/path/iface/connection,
+    // objectName) sit below propertyOffset and can never appear here by
+    // construction — no name filter needed.
+    for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
         QMetaProperty prop = meta->property(i);
         QString name = QString::fromLatin1(prop.name());
         if (isPrivateProperty(name))
-            continue;
-        if (name == QStringLiteral("service") || name == QStringLiteral("path") ||
-            name == QStringLiteral("iface") || name == QStringLiteral("connection") ||
-            name == QStringLiteral("objectName"))
             continue;
         // A QObject*-derived property has no D-Bus representation — advertising
         // it (the signature fallback would promise "v") offers a value GetAll
@@ -302,31 +386,45 @@ QString DBusAdaptor::generateXml() const {
 
         QString access = prop.isWritable() ? QStringLiteral("readwrite") : QStringLiteral("read");
         xml += QStringLiteral("    <property name=\"%1\" type=\"%2\" access=\"%3\"/>\n")
-                   .arg(name, dbusType, access);
+                   .arg(advertisedName(name), dbusType, access);
     }
 
-    // Methods — iterate over Q_INVOKABLE/Q_SLOTS methods (skip inherited Qt methods)
-    for (int i = 0; i < meta->methodCount(); ++i) {
+    // Methods — iterate over Q_INVOKABLE/Q_SLOTS methods. Offset-based: the
+    // library's own Q_INVOKABLEs and Qt's methods sit below methodOffset and
+    // can never appear here by construction. The qml* prefix filter stays —
+    // a user-declared qml-prefixed method is not a library name.
+    for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
         QMetaMethod method = meta->method(i);
         if (method.methodType() != QMetaMethod::Method && method.methodType() != QMetaMethod::Slot)
             continue;
         QString name = QString::fromLatin1(method.name());
-        // Skip internal Qt methods and library mechanisms
-        if (name.startsWith(QStringLiteral("qml")) || name == QStringLiteral("emitSignal") ||
-            name == QStringLiteral("holdReply") || name == QStringLiteral("unregister") ||
-            name == QStringLiteral("deleteLater") || name == QStringLiteral("destroyed") ||
-            name == QStringLiteral("objectNameChanged"))
+        if (name.startsWith(QStringLiteral("qml")))
             continue;
 
-        xml += QStringLiteral("    <method name=\"%1\">\n").arg(name);
+        xml += QStringLiteral("    <method name=\"%1\">\n").arg(advertisedName(name));
 
-        // Emit an <arg> for EVERY parameter — typed params must be advertised
-        // so callers know the arity and types.
+        // In-args: the catalog's declared types replace the metaobject-derived
+        // variants when the folded name matches; otherwise fall back to the
+        // metaobject types (QML functions carry QVariant params → "v" each).
         const int inCount = method.parameterCount();
+        QStringList catalogArgTypes;
+        if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
+            for (const auto &m : spec->methods) {
+                if (dbusMemberToQml(m.name) == name) {
+                    catalogArgTypes = m.argTypes;
+                    break;
+                }
+            }
+        }
         const auto paramTypes = method.parameterTypes();
         for (int j = 0; j < inCount; ++j) {
-            int typeId = QMetaType::fromName(paramTypes.at(j)).id();
-            QString dbusType = metaTypeToDbusSignature(typeId);
+            QString dbusType;
+            if (j < catalogArgTypes.size()) {
+                dbusType = catalogArgTypes.at(j);
+            } else {
+                int typeId = QMetaType::fromName(paramTypes.at(j)).id();
+                dbusType = metaTypeToDbusSignature(typeId);
+            }
             xml += QStringLiteral("      <arg name=\"arg%1\" type=\"%2\" direction=\"in\"/>\n")
                        .arg(j)
                        .arg(dbusType);
@@ -339,32 +437,49 @@ QString DBusAdaptor::generateXml() const {
         xml += QStringLiteral("    </method>\n");
     }
 
-    // Signals
-    for (int i = 0; i < meta->methodCount(); ++i) {
-        QMetaMethod method = meta->method(i);
-        if (method.methodType() != QMetaMethod::Signal)
-            continue;
-        QString name = QString::fromLatin1(method.name());
-        if (name.startsWith(QStringLiteral("qml")) || name == QStringLiteral("serviceChanged") ||
-            name == QStringLiteral("pathChanged") || name == QStringLiteral("ifaceChanged") ||
-            name == QStringLiteral("connectionChanged") || name == QStringLiteral("destroyed") ||
-            name == QStringLiteral("objectNameChanged"))
-            continue;
-
-        xml += QStringLiteral("    <signal name=\"%1\">\n").arg(name);
-        const auto sigParamTypes = method.parameterTypes();
-        const auto sigParamNames = method.parameterNames();
-        for (int j = 0; j < method.parameterCount(); ++j) {
-            int typeId = QMetaType::fromName(sigParamTypes.at(j)).id();
-            QString dbusType = metaTypeToDbusSignature(typeId);
-            xml += QStringLiteral("      <arg name=\"%1\" type=\"%2\"/>\n")
-                       .arg(QString::fromLatin1(sigParamNames.at(j)), dbusType);
-        }
-        xml += QStringLiteral("    </signal>\n");
-    }
-
     xml += QStringLiteral("  </interface>\n");
     return xml;
+}
+
+// The naming ladder (explicit _members → catalog → first-char-upper fold):
+// the wire name advertised for a QML member name (methods and properties).
+// The fold is stable inference — same input, same output, forever; wire
+// names are never guessed from data.
+QString DBusAdaptor::advertisedName(const QString &qmlName) const {
+    // 1. Explicit _members alias (wire name → QML name; reverse lookup).
+    for (auto it = m_members.cbegin(); it != m_members.cend(); ++it) {
+        if (it.value().toString() == qmlName)
+            return it.key();
+    }
+    // 2. Catalog name whose fold matches the QML name.
+    if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
+        for (const auto &m : spec->methods) {
+            if (dbusMemberToQml(m.name) == qmlName)
+                return m.name;
+        }
+        for (const auto &p : spec->properties) {
+            if (dbusMemberToQml(p) == qmlName)
+                return p;
+        }
+    }
+    // 3. Stable inference: the deterministic first-char-uppercase fold.
+    if (!qmlName.isEmpty())
+        return qmlName.at(0).toUpper() + qmlName.mid(1);
+    return qmlName;
+}
+
+// Dispatch resolution: incoming wire member → QML name candidates in ladder
+// order (explicit _members alias → exact → first-char-lower fold).
+QStringList DBusAdaptor::candidateQmlNames(const QString &wireName) const {
+    QStringList candidates;
+    const QString aliased = m_members.value(wireName).toString();
+    if (!aliased.isEmpty())
+        candidates << aliased;
+    candidates << wireName;
+    const QString folded = dbusMemberToQml(wireName);
+    if (!folded.isEmpty() && folded != wireName)
+        candidates << folded;
+    return candidates;
 }
 
 // Resolve the declared out-arg signatures for a method reply, in precedence
@@ -443,11 +558,11 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             // A2: dual lookup — exact QML name, then the folded wire name
             // (Get("iface", "Version") must find `property int version`),
             // mirroring the method dispatch's exact→folded order.
-            const QString foldedPropName = dbusMemberToQml(propName);
+            const QStringList propCandidates = candidateQmlNames(propName);
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
                 const QString name = QString::fromLatin1(prop.name());
-                if (name != propName && name != foldedPropName)
+                if (!propCandidates.contains(name))
                     continue;
                 QVariant val = prop.read(this);
                 if (val.userType() == qMetaTypeId<QJSValue>())
@@ -500,7 +615,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                              qPrintable(m_iface), QMetaType(val.userType()).name());
                     continue;
                 }
-                props.insert(name, val);
+                props.insert(advertisedName(name), val);
             }
             sendReply(msg.createReply(QVariantList{props}));
             return true;
@@ -515,11 +630,11 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             }
             QVariant value = unwrapDbus(args[2]);
             // A2: same dual lookup as Get — exact QML name, then folded wire name.
-            const QString foldedPropName = dbusMemberToQml(propName);
+            const QStringList propCandidates = candidateQmlNames(propName);
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
                 const QString name = QString::fromLatin1(prop.name());
-                if ((name != propName && name != foldedPropName) || !prop.isWritable())
+                if (!propCandidates.contains(name) || !prop.isWritable())
                     continue;
                 // C1: a failed write is a caller error — reply InvalidArgs with
                 // the property unchanged, not a silent empty success (the
@@ -551,10 +666,12 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         a = unwrapDbus(a);
 
     // D-Bus members are PascalCase; QML methods are camelCase (QML
-    // forbids uppercase-initial names). Try exact match first (C++
-    // Q_INVOKABLEs can be PascalCase), then the folded name.
+    // forbids uppercase-initial names). Resolution order (the naming
+    // ladder): explicit _members alias → exact match (C++ Q_INVOKABLEs can
+    // be PascalCase) → the folded name.
     const QString qmlMember = dbusMemberToQml(member);
-    QString matchedName; // the method name that matched (exact or folded)
+    const QStringList memberCandidates = candidateQmlNames(member);
+    QString matchedName; // the QML method name that matched
 
     for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
         QMetaMethod method = meta->method(i);
@@ -565,13 +682,10 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         // handler, not D-Bus methods — never dispatch to them over the wire.
         if (methodName == QStringLiteral("holdReply") || methodName == QStringLiteral("unregister"))
             continue;
-        if (methodName == member) {
-            matchedName = member;
-        } else if (methodName == qmlMember) {
-            matchedName = qmlMember;
-        } else {
+        if (!memberCandidates.contains(methodName)) {
             continue;
         }
+        matchedName = methodName;
 
         if (method.parameterCount() != dbusArgs.size()) {
             continue;

@@ -32,6 +32,14 @@ void DBusCatalog::reload() {
 void DBusCatalog::loadPaths() {
     QStringList paths;
 
+    // 0. Lowest-precedence tier: the freedesktop-standard interface registry
+    //    <data>/dbus-1/interfaces/ — where xdg-desktop-portal and friends
+    //    install their interface descriptions. Loaded FIRST so every
+    //    dbusqml-specific tier (bundled, user config, env) can override it.
+    const auto genericData = QStandardPaths::standardLocations(QStandardPaths::GenericDataLocation);
+    for (const QString &dir : genericData)
+        paths << (dir + QStringLiteral("/dbus-1/interfaces"));
+
     // 1. Bundled Qt resource
     paths << QStringLiteral(":/dbusqml/types");
 
@@ -39,7 +47,6 @@ void DBusCatalog::loadPaths() {
     //    processed LAST (and thus win, since later inserts overwrite).
     //    standardLocations returns user-first, so reverse for
     //    system-first-then-user precedence.
-    const auto genericData = QStandardPaths::standardLocations(QStandardPaths::GenericDataLocation);
     for (auto it = genericData.crbegin(); it != genericData.crend(); ++it)
         paths << (*it + QStringLiteral("/dbusqml/types"));
 
@@ -75,6 +82,10 @@ void DBusCatalog::loadFile(const QString &filePath) {
     if (!f.open(QIODevice::ReadOnly))
         return;
 
+    // Parse into a scratch map and merge only on success: a malformed file
+    // (that directory contains arbitrary third-party content) must be
+    // discarded whole, never partially merged into the catalog.
+    QHash<QString, InterfaceSpec> parsed;
     QXmlStreamReader reader(&f);
     QString currentIface;
     InterfaceSpec spec;
@@ -127,12 +138,18 @@ void DBusCatalog::loadFile(const QString &filePath) {
                 clearArgs();
             } else if (name == QLatin1String("arg") &&
                        (!currentMethod.isEmpty() || !currentSignal.isEmpty())) {
-                const QString dir = reader.attributes().value("direction").toString();
                 const QString type = reader.attributes().value("type").toString();
-                if (dir == QLatin1String("out"))
-                    currentOutArgs << type;
-                else
+                if (!currentSignal.isEmpty()) {
+                    // Signal args are conventionally declared direction="out"
+                    // in the spec XML; they are always signal args.
                     currentArgs << type;
+                } else {
+                    const QString dir = reader.attributes().value("direction").toString();
+                    if (dir == QLatin1String("out"))
+                        currentOutArgs << type;
+                    else
+                        currentArgs << type;
+                }
             } else if (name == QLatin1String("property") && !currentIface.isEmpty()) {
                 spec.properties << reader.attributes().value("name").toString();
             }
@@ -141,7 +158,7 @@ void DBusCatalog::loadFile(const QString &filePath) {
             if (name == QLatin1String("interface")) {
                 flushMethod();
                 flushSignal();
-                m_ifaces.insert(currentIface, spec);
+                parsed.insert(currentIface, spec);
                 currentIface.clear();
                 clearArgs();
             }
@@ -149,6 +166,11 @@ void DBusCatalog::loadFile(const QString &filePath) {
     }
 
     if (reader.hasError()) {
-        qWarning() << "DBusCatalog: XML error in" << filePath << ":" << reader.errorString();
+        qWarning() << "DBusCatalog: XML error in" << filePath
+                   << "- skipping file:" << reader.errorString();
+        return;
     }
+
+    for (auto it = parsed.cbegin(); it != parsed.cend(); ++it)
+        m_ifaces.insert(it.key(), it.value());
 }

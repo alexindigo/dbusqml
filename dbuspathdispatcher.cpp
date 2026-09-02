@@ -148,10 +148,22 @@ void DBusPathDispatcher::detachAdaptor(DBusAdaptor *adaptor) {
 }
 
 QString DBusPathDispatcher::introspect(const QString &) const {
+    // Merge per-adaptor interface blocks cleanly: for co-located same-iface
+    // adaptors, first-attached wins for dispatch — the advertised surface
+    // mirrors that exactly. Naive concatenation would emit duplicate
+    // members (duplicate signals/methods), which busctl/GDBus reject.
     QString xml;
+    QSet<QString> servedIfaces;
     for (const auto &a : m_adaptors) {
-        if (a)
-            xml += a->introspect(QString());
+        if (!a)
+            continue;
+        const QString iface = a->iface();
+        if (!iface.isEmpty()) {
+            if (servedIfaces.contains(iface))
+                continue;
+            servedIfaces.insert(iface);
+        }
+        xml += a->introspect(QString());
     }
     return xml;
 }
