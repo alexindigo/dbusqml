@@ -15,11 +15,14 @@ class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
     Q_INTERFACES(QQmlParserStatus)
     QML_NAMED_ELEMENT(DBusAdaptor)
 
-    Q_PROPERTY(QString service READ service WRITE setService NOTIFY serviceChanged)
-    Q_PROPERTY(QString path READ path WRITE setPath NOTIFY pathChanged)
-    Q_PROPERTY(QString iface READ iface WRITE setIface NOTIFY ifaceChanged)
-    Q_PROPERTY(
-        DBusConnection *connection READ connection WRITE setConnection NOTIFY connectionChanged)
+    // FINAL: shadowing a built-in from QML is a load-time error, not a
+    // silently broken adaptor (the shadow used to swallow the registration
+    // config AND leak through Properties.Get).
+    Q_PROPERTY(QString service READ service WRITE setService NOTIFY serviceChanged FINAL)
+    Q_PROPERTY(QString path READ path WRITE setPath NOTIFY pathChanged FINAL)
+    Q_PROPERTY(QString iface READ iface WRITE setIface NOTIFY ifaceChanged FINAL)
+    Q_PROPERTY(DBusConnection *connection READ connection WRITE setConnection NOTIFY
+                   connectionChanged FINAL)
     Q_PROPERTY(QVariantMap _signatures READ signatures WRITE setSignatures NOTIFY signaturesChanged)
     // Explicit wire-surface declarations (the explicit tier of the naming
     // ladder): _signals maps wire signal name → concatenated arg signature;

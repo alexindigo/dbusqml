@@ -313,6 +313,10 @@ private slots:
     void testPropertiesChangedReachesProxy();
     void testNotifyRelaysRemoved();
     void testPlainSignalFoldsOnWire();
+
+    // 0.9.0 built-in collision prevention.
+    void testBuiltinShadowFailsToLoad();
+    void testMemberCollisionWarns();
     void testValueKeyStructListIsRealDict();
 
     // 0.9.0 fix cycle: co-location/leak regression.
@@ -3227,6 +3231,47 @@ void TestDBusAdaptor::testCoLocatedIntrospectionClean() {
 
     delete a;
     delete b;
+}
+
+// ==================== 0.9.0 built-in collision prevention ==================
+
+// Q1 — shadowing a built-in property (service/path/iface/connection) is a
+// load-time error (FINAL), not a silently broken adaptor. 0.8.0: loads fine.
+void TestDBusAdaptor::testBuiltinShadowFailsToLoad() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.Shadow'\n"
+                      "  iface: 'org.dbusqml.Shadow'\n"
+                      "  property string path\n"
+                      "  function ping() { return 'p' }\n"
+                      "}",
+                      QUrl());
+    QObject *adaptor = component.create();
+    QVERIFY2(adaptor == nullptr, "shadowing a built-in property must fail to load");
+    QVERIFY2(component.errorString().contains(QStringLiteral("FINAL")),
+             qPrintable(component.errorString()));
+}
+
+// A7a — a method folding onto a library mechanism name warns at load time and
+// points at the _members escape hatch. 0.8.0: silent.
+void TestDBusAdaptor::testMemberCollisionWarns() {
+    QTest::ignoreMessage(
+        QtInfoMsg, QRegularExpression(QStringLiteral(
+                       "member cannot be served under this name.*declare an alias in `_members`")));
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.Collide'\n"
+                                        "  path: '/Collide'\n"
+                                        "  iface: 'org.dbusqml.Collide'\n"
+                                        "  function unregister() { return 'x' }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    delete adaptor;
 }
 
 // ==================== Adaptor lifecycle (L1–L7, 0.7.0) ====================

@@ -205,6 +205,21 @@ void DBusAdaptor::componentComplete() {
         QStringLiteral("signaturesChanged"), QStringLiteral("_signalsChanged"),
         QStringLiteral("_membersChanged")};
 
+    // A7a: warn when a QML method folds onto a library mechanism name — the
+    // dispatch skip list would silently turn wire calls into UnknownMethod.
+    for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
+        QMetaMethod m = meta->method(i);
+        if (m.methodType() != QMetaMethod::Method && m.methodType() != QMetaMethod::Slot)
+            continue;
+        const QString mname = QString::fromLatin1(m.name());
+        if (mname == QStringLiteral("unregister") || mname == QStringLiteral("holdReply") ||
+            mname == QStringLiteral("emitSignal")) {
+            qmlInfo(this) << mname
+                          << "member cannot be served under this name — declare an "
+                             "alias in `_members`";
+        }
+    }
+
     // Property notify signals are NOT relayed as broadcast signals (A5 → A6):
     // they drive org.freedesktop.DBus.Properties.PropertiesChanged instead.
     QSet<int> notifyIndexes;
@@ -688,9 +703,10 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 QString name = QString::fromLatin1(prop.name());
                 if (isPrivateProperty(name))
                     continue;
-                if (name == QStringLiteral("service") || name == QStringLiteral("path") ||
-                    name == QStringLiteral("iface") || name == QStringLiteral("connection") ||
-                    name == QStringLiteral("objectName"))
+                // The service/path/iface/connection built-ins are FINAL and
+                // cannot be shadowed, so no name filter is needed for them;
+                // QObject's objectName still needs the manual exclusion.
+                if (name == QStringLiteral("objectName"))
                     continue;
                 QVariant val = prop.read(this);
                 if (val.userType() == qMetaTypeId<QJSValue>())
