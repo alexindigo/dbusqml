@@ -25,4 +25,9 @@ public:
     // The result can be passed directly to ay-typed D-Bus arguments
     // (the marshaller also accepts plain strings, but this is explicit).
     Q_INVOKABLE QJSValue bytesFromText(const QString &text);
+
+    // Build a D-Bus error value to THROW from a served method handler: the
+    // caller receives an error reply carrying exactly this name and message.
+    // Any other thrown value becomes org.freedesktop.DBus.Error.Failed.
+    Q_INVOKABLE QVariantMap error(const QString &name, const QString &message);
 };

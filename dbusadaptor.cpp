@@ -844,6 +844,45 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 for (const QVariant &arg : std::as_const(dbusArgs))
                     jsArgs << engine->toScriptValue(arg);
                 QJSValue result = fn.callWithInstance(thisObj, jsArgs);
+                // S2: a thrown DBusQML.DBusUtils.error(name, message) value
+                // surfaces as an object carrying the dbusError marker (QV4
+                // does not flag thrown non-Error objects via isError()).
+                const bool thrownErrorShape = [&result] {
+                    if (!result.isObject() && !result.isVariant())
+                        return false;
+                    const QJSValue marker = result.property(QStringLiteral("dbusError"));
+                    if (marker.isUndefined() || marker.isNull() || !marker.toBool())
+                        return false;
+                    const QJSValue n = result.property(QStringLiteral("name"));
+                    return n.isString() && n.toString().contains(QLatin1Char('.'));
+                }();
+                if (result.isError() || thrownErrorShape) {
+                    // S2: named error replies from handlers. A thrown value
+                    // with a D-Bus error shape (DBusQML.DBusUtils.error() —
+                    // a map carrying a dotted `name` and a `message`) becomes
+                    // that exact error reply; any other JS exception becomes
+                    // org.freedesktop.DBus.Error.Failed with the exception
+                    // message. Never a silent empty reply, and the handler is
+                    // never re-run through the C++ invoke path.
+                    QString errorName = QStringLiteral("org.freedesktop.DBus.Error.Failed");
+                    QString errorMessage = result.toString();
+                    const QJSValue nameVal = result.property(QStringLiteral("name"));
+                    const QJSValue msgVal = result.property(QStringLiteral("message"));
+                    if (nameVal.isString()) {
+                        const QString n = nameVal.toString();
+                        if (n.contains(QLatin1Char('.'))) {
+                            errorName = n;
+                            if (msgVal.isString())
+                                errorMessage = msgVal.toString();
+                        }
+                    }
+                    qWarning("dbusqml: handler for %s threw %s: %s", qPrintable(member),
+                             qPrintable(errorName), qPrintable(errorMessage));
+                    if (msg.isReplyRequired())
+                        conn.send(msg.createErrorReply(errorName, errorMessage));
+                    m_inDispatch = false;
+                    return true;
+                }
                 if (!result.isError()) {
                     retVal = result.isUndefined() ? QVariant() : qjsValueToVariant(result);
                     invoked = true;

@@ -75,3 +75,9 @@ QJSValue DBusUtils::bytesFromText(const QString &text) {
     engine->globalObject().deleteProperty(QStringLiteral("__dbus_target"));
     return buf;
 }
+
+QVariantMap DBusUtils::error(const QString &name, const QString &message) {
+    return QVariantMap{{QStringLiteral("dbusError"), true},
+                       {QStringLiteral("name"), name},
+                       {QStringLiteral("message"), message}};
+}

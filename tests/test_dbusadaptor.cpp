@@ -324,6 +324,10 @@ private slots:
     void testFireAndForgetSend();
     void testMessageGadgetCallOptions();
     void testNestedContainerRoundTrip();
+
+    // 0.9.0 named error replies from handlers (S2).
+    void testNamedErrorReply();
+    void testPlainExceptionFailedReply();
     void testValueKeyStructListIsRealDict();
 
     // 0.9.0 fix cycle: co-location/leak regression.
@@ -3469,6 +3473,68 @@ void TestDBusAdaptor::testNestedContainerRoundTrip() {
     }
 
     delete conn;
+}
+
+// ==================== 0.9.0 named error replies (S2) =======================
+
+// A handler throwing DBusQML.DBusUtils.error(name, message) produces an error
+// reply carrying exactly that name and message. Pre-change: silent empty reply
+// (the JS error fell through to the C++ invoke path, which re-ran the
+// handler).
+void TestDBusAdaptor::testNamedErrorReply() {
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "import DBus 1.0 as DBusQML\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.NamedErr'\n"
+                         "  path: '/NamedErr'\n"
+                         "  iface: 'org.dbusqml.NamedErr'\n"
+                         "  function boom() {\n"
+                         "    throw DBusQML.DBusUtils.error('org.dbusqml.TestError', 'nope')\n"
+                         "  }\n"
+                         "  property string afterThrow: 'untouched'\n"
+                         "  function ping() { afterThrow = 'pinged'; return 'pong' }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.NamedErr"), QStringLiteral("/NamedErr"),
+        QStringLiteral("org.dbusqml.NamedErr"), QStringLiteral("boom"));
+    QDBusMessage reply = bus.call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.dbusqml.TestError"));
+    QCOMPARE(reply.errorMessage(), QStringLiteral("nope"));
+
+    // The service is alive and dispatch is not corrupted by the throw.
+    QDBusMessage ping = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.NamedErr"), QStringLiteral("/NamedErr"),
+        QStringLiteral("org.dbusqml.NamedErr"), QStringLiteral("ping"));
+    QDBusMessage pr = bus.call(ping, QDBus::Block, 3000);
+    QCOMPARE(pr.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(pr.arguments().first().toString(), QStringLiteral("pong"));
+}
+
+// Any other thrown value becomes org.freedesktop.DBus.Error.Failed with the
+// exception message.
+void TestDBusAdaptor::testPlainExceptionFailedReply() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.PlainErr'\n"
+                                        "  path: '/PlainErr'\n"
+                                        "  iface: 'org.dbusqml.PlainErr'\n"
+                                        "  function boom() { throw new Error('broken') }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.PlainErr"), QStringLiteral("/PlainErr"),
+        QStringLiteral("org.dbusqml.PlainErr"), QStringLiteral("boom"));
+    QDBusMessage reply = QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+    QVERIFY2(reply.errorMessage().contains(QStringLiteral("broken")),
+             qPrintable(reply.errorMessage()));
 }
 
 // ==================== Adaptor lifecycle (L1–L7, 0.7.0) ====================
