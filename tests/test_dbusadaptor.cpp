@@ -209,6 +209,12 @@ private slots:
 
     void testGetReturnsVariant();
     void testSetCompletesAndWrites();
+
+    // 0.9.0 served-surface: spec-cased property dispatch, Set guard, NO_REPLY.
+    void testPropertyCasedGet();
+    void testPropertyCasedSet();
+    void testPropertySetInconvertibleErrors();
+    void testNoReplyExpectedServed();
     void testGetAllExcludesInternal();
     void testWrongIfaceErrors();
     void testUnknownPropertyGetErrors();
@@ -313,6 +319,135 @@ QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString 
     if (!args.isEmpty())
         msg.setArguments(args);
     return bus.call(msg);
+}
+
+// ==================== 0.9.0 served surface: property dispatch ===============
+
+// Served test adaptor with a PascalCase-conventional property layout that a
+// spec caller would address as "Version" (MPRIS-style).
+class CasedPropAdaptor : public DBusAdaptor {
+    Q_OBJECT
+    Q_PROPERTY(int version READ version WRITE setVersion NOTIFY versionChanged)
+
+public:
+    explicit CasedPropAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+
+    // Server-side record of what the wire delivered (B4 observability).
+    bool lastReplyRequired = true;
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &c) override {
+        lastReplyRequired = msg.isReplyRequired();
+        return DBusAdaptor::handleMessage(msg, c);
+    }
+    int version() const { return m_version; }
+    void setVersion(int v) {
+        m_version = v;
+        emit versionChanged();
+    }
+
+public slots:
+    QVariant bump() {
+        ++m_version;
+        return m_version;
+    }
+
+signals:
+    void versionChanged();
+
+private:
+    int m_version = 7;
+};
+
+// A2 — Properties.Get with the PascalCase wire name must find the camelCase
+// QML property (mirror of the 0.3.1 method dual lookup). 0.8.0: InvalidArgs.
+void TestDBusAdaptor::testPropertyCasedGet() {
+    CasedPropAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.CasedProp"));
+    adaptor.setPath(QStringLiteral("/CasedProp"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.CasedProp"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+
+    // Exact camelCase still works (unchanged).
+    QDBusMessage exact = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.CasedProp"), QStringLiteral("/CasedProp"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    exact.setArguments({QStringLiteral("org.dbusqml.CasedProp"), QStringLiteral("version")});
+    exact = bus.call(exact, QDBus::Block, 3000);
+    QCOMPARE(exact.type(), QDBusMessage::ReplyMessage);
+
+    // PascalCase wire name folds.
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.CasedProp"), QStringLiteral("/CasedProp"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    m.setArguments({QStringLiteral("org.dbusqml.CasedProp"), QStringLiteral("Version")});
+    QDBusMessage reply = bus.call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(!reply.arguments().isEmpty());
+    QCOMPARE(reply.arguments().first().value<QDBusVariant>().variant().toInt(), 7);
+}
+
+// A2 — Properties.Set with the PascalCase wire name must write the camelCase
+// QML property. 0.8.0: InvalidArgs, property unchanged.
+void TestDBusAdaptor::testPropertyCasedSet() {
+    CasedPropAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.CasedProp"));
+    adaptor.setPath(QStringLiteral("/CasedProp"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.CasedProp"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.CasedProp"), QStringLiteral("/CasedProp"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Set"));
+    m.setArguments({QVariant(QStringLiteral("org.dbusqml.CasedProp")),
+                    QVariant(QStringLiteral("Version")), QVariant::fromValue(QDBusVariant(42))});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(adaptor.version(), 42);
+}
+
+// C1 — a Set whose value cannot be converted must reply InvalidArgs (with the
+// property unchanged), not a silent empty success. 0.8.0: silent success.
+void TestDBusAdaptor::testPropertySetInconvertibleErrors() {
+    CasedPropAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.CasedProp"));
+    adaptor.setPath(QStringLiteral("/CasedProp"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.CasedProp"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.CasedProp"), QStringLiteral("/CasedProp"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Set"));
+    m.setArguments({QVariant(QStringLiteral("org.dbusqml.CasedProp")),
+                    QVariant(QStringLiteral("version")),
+                    QVariant::fromValue(QDBusVariant(QStringLiteral("not-a-number")))});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    QCOMPARE(adaptor.version(), 7); // unchanged
+}
+
+// B4 — NO_REPLY_EXPECTED: the method executes, but no reply is constructed or
+// sent (spec conformance; the caller used send(), not a reply-waiting call).
+void TestDBusAdaptor::testNoReplyExpectedServed() {
+    CasedPropAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.CasedProp"));
+    adaptor.setPath(QStringLiteral("/CasedProp"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.CasedProp"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.CasedProp"), QStringLiteral("/CasedProp"),
+        QStringLiteral("org.dbusqml.CasedProp"), QStringLiteral("bump"));
+    QVERIFY(QDBusConnection::sessionBus().send(m));
+
+    // The handler must run (side effect observable), with or without a reply.
+    QTRY_VERIFY_WITH_TIMEOUT(adaptor.version() == 8, 3000);
+    qWarning("PROBE-B4: server saw isReplyRequired=%d", int(adaptor.lastReplyRequired));
 }
 
 void TestDBusAdaptor::testGetReturnsVariant() {

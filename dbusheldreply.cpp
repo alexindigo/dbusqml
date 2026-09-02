@@ -21,7 +21,7 @@ void DBusHeldReply::send(const QJSValue &value) {
         return;
     }
     const QVariant v = value.isUndefined() ? QVariant() : qjsValueToVariant(value);
-    if (m_adaptor)
+    if (m_adaptor && m_msg.isReplyRequired()) // B4: NO_REPLY_EXPECTED — send nothing
         m_adaptor->sendMethodReply(m_conn, m_msg, m_member, v);
     settle();
 }
@@ -39,7 +39,8 @@ void DBusHeldReply::sendError(const QString &name, const QString &message) {
         errorName = QStringLiteral("org.freedesktop.DBus.Error.Failed");
         errorMessage = name;
     }
-    m_conn.send(m_msg.createErrorReply(errorName, errorMessage));
+    if (m_msg.isReplyRequired()) // B4: NO_REPLY_EXPECTED — send nothing
+        m_conn.send(m_msg.createErrorReply(errorName, errorMessage));
     settle();
 }
 

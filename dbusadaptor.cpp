@@ -407,6 +407,14 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
     const QString member = msg.member();
     const QVariantList args = msg.arguments();
     const QMetaObject *meta = metaObject();
+    const bool replyRequired = msg.isReplyRequired();
+    // B4: honor NO_REPLY_EXPECTED — the handler runs, but no reply (success
+    // or error) is ever constructed or sent when the caller didn't ask for
+    // one. All Properties-interface sends below go through this guard.
+    auto sendReply = [&](const QDBusMessage &reply) {
+        if (replyRequired)
+            conn.send(reply);
+    };
 
     // Properties interface
     if (interface == QStringLiteral("org.freedesktop.DBus.Introspectable"))
@@ -417,7 +425,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         if (!args.isEmpty()) {
             QString reqIface = args[0].toString();
             if (!reqIface.isEmpty() && reqIface != m_iface) {
-                conn.send(
+                sendReply(
                     msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
                                          QStringLiteral("No such interface: %1").arg(reqIface)));
                 return true;
@@ -427,14 +435,19 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         if (member == QStringLiteral("Get") && args.size() >= 2) {
             QString propName = args[1].toString();
             if (isPrivateProperty(propName)) {
-                conn.send(
+                sendReply(
                     msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
                                          QStringLiteral("No such property: %1").arg(propName)));
                 return true;
             }
+            // A2: dual lookup — exact QML name, then the folded wire name
+            // (Get("iface", "Version") must find `property int version`),
+            // mirroring the method dispatch's exact→folded order.
+            const QString foldedPropName = dbusMemberToQml(propName);
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
-                if (QString::fromLatin1(prop.name()) != propName)
+                const QString name = QString::fromLatin1(prop.name());
+                if (name != propName && name != foldedPropName)
                     continue;
                 QVariant val = prop.read(this);
                 if (val.userType() == qMetaTypeId<QJSValue>())
@@ -447,17 +460,17 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                              "replying InvalidArgs",
                              qPrintable(propName), qPrintable(m_iface),
                              QMetaType(val.userType()).name());
-                    conn.send(msg.createErrorReply(
+                    sendReply(msg.createErrorReply(
                         QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
                         QStringLiteral("Property not marshalable: %1").arg(propName)));
                     return true;
                 }
                 // D-Bus spec: Get returns a variant (signature "v")
-                conn.send(msg.createReply(QVariantList{QVariant::fromValue(QDBusVariant(val))}));
+                sendReply(msg.createReply(QVariantList{QVariant::fromValue(QDBusVariant(val))}));
                 return true;
             }
             // Unknown property
-            conn.send(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+            sendReply(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
                                            QStringLiteral("No such property: %1").arg(propName)));
             return true;
         }
@@ -489,29 +502,41 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 }
                 props.insert(name, val);
             }
-            conn.send(msg.createReply(QVariantList{props}));
+            sendReply(msg.createReply(QVariantList{props}));
             return true;
         }
         if (member == QStringLiteral("Set") && args.size() >= 3) {
             QString propName = args[1].toString();
             if (isPrivateProperty(propName)) {
-                conn.send(
+                sendReply(
                     msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
                                          QStringLiteral("No such property: %1").arg(propName)));
                 return true;
             }
             QVariant value = unwrapDbus(args[2]);
+            // A2: same dual lookup as Get — exact QML name, then folded wire name.
+            const QString foldedPropName = dbusMemberToQml(propName);
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
-                if (QString::fromLatin1(prop.name()) != propName || !prop.isWritable())
+                const QString name = QString::fromLatin1(prop.name());
+                if ((name != propName && name != foldedPropName) || !prop.isWritable())
                     continue;
-                prop.write(this, value);
+                // C1: a failed write is a caller error — reply InvalidArgs with
+                // the property unchanged, not a silent empty success (the
+                // 0.5.2 Get/GetAll guard precedent, on the last unguarded
+                // Properties path).
+                if (!prop.write(this, value)) {
+                    sendReply(msg.createErrorReply(
+                        QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                        QStringLiteral("Cannot convert value for property %1").arg(propName)));
+                    return true;
+                }
                 // D-Bus spec: Set must send an empty reply
-                conn.send(msg.createReply());
+                sendReply(msg.createReply());
                 return true;
             }
             // Unknown property
-            conn.send(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+            sendReply(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
                                            QStringLiteral("No such property: %1").arg(propName)));
             return true;
         }
@@ -780,6 +805,10 @@ void DBusAdaptor::unregister() {
 
 void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessage &msg,
                                   const QString &member, const QVariant &retVal) {
+    // B4: NO_REPLY_EXPECTED — never construct or send a reply (success or
+    // error) when the caller didn't ask for one.
+    if (!msg.isReplyRequired())
+        return;
     const QVariant value = toDbusVariant(retVal);
     if (value.isValid()) {
         // Robustness guard: an unmarshalable payload (e.g. a returned JS
