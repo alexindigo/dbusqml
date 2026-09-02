@@ -7,6 +7,7 @@
 #include <QDBusArgument>
 #include <QDBusMessage>
 #include <QDBusMetaType>
+#include <QDBusUnixFileDescriptor>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusVariant>
@@ -44,6 +45,11 @@ bool wireMarshalable(const QVariant &v) {
     // QDBusArgument carries its own signature — always marshalable.
     if (t == qMetaTypeId<QDBusArgument>())
         return true;
+    // Unix fds (plain ints after the walker round-trip) are marshalable.
+    if (t == qMetaTypeId<QDBusUnixFileDescriptor>())
+        return true;
+    if (t == QMetaType::Int)
+        return true;
 
     // Anything QtDBus knows a wire signature for (basics, QString, QByteArray,
     // QStringList, QDBusObjectPath, QDBusSignature, registered types). QJSValue,
@@ -55,6 +61,24 @@ bool wireMarshalable(const QVariant &v) {
 // and maps so the JS side receives real Array / Object instances (with a
 // working Array.isArray and iterable/spread semantics), not the array-like
 // QVariantList wrappers QQmlEngine::toScriptValue produces by default.
+// Precision-safe QVariant → QJSValue: 64-bit ints that don't round-trip
+// through a double (|v| above 2^53) are delivered as full-precision decimal
+// strings — the C2 contract (QML's JS engine has no BigInt). variantToJs is
+// the reply path; this variant is used for dispatch args.
+QJSValue precisionSafeToScriptValue(QQmlEngine *engine, const QVariant &v) {
+    if (v.userType() == QMetaType::LongLong) {
+        const qint64 value = v.toLongLong();
+        if (static_cast<qint64>(static_cast<double>(value)) != value)
+            return engine->toScriptValue(QVariant(QString::number(value)));
+    }
+    if (v.userType() == QMetaType::ULongLong) {
+        const quint64 value = v.toULongLong();
+        if (static_cast<quint64>(static_cast<double>(value)) != value)
+            return engine->toScriptValue(QVariant(QString::number(value)));
+    }
+    return engine->toScriptValue(v);
+}
+
 QJSValue variantToJs(QQmlEngine *engine, const QVariant &v) {
     const int t = v.userType();
     if (t == qMetaTypeId<QVariantList>() || t == qMetaTypeId<QStringList>()) {
@@ -71,7 +95,8 @@ QJSValue variantToJs(QQmlEngine *engine, const QVariant &v) {
             obj.setProperty(it.key(), variantToJs(engine, it.value()));
         return obj;
     }
-    return engine->toScriptValue(v);
+    // C2 — lossless 64-bit delivery (see precisionSafeToScriptValue above).
+    return precisionSafeToScriptValue(engine, v);
 }
 
 // Read a single element from a QDBusArgument using the correct type
@@ -195,6 +220,18 @@ static QVariant readBySignature(const QDBusArgument &arg) {
                 out.append(v);
             return out;
         }
+        if (elemType == QLatin1Char('h')) {
+            // Unix fds — delivered as plain ints (receiver closes).
+            QVariantList out;
+            arg.beginArray();
+            while (!arg.atEnd()) {
+                QDBusUnixFileDescriptor fd;
+                arg >> fd;
+                out.append(fd.isValid() ? fd.takeFileDescriptor() : -1);
+            }
+            arg.endArray();
+            return out;
+        }
         if (elemType == QLatin1Char('i')) {
             QList<int> l;
             arg >> l;
@@ -292,6 +329,16 @@ static QVariant readBySignature(const QDBusArgument &arg) {
         return members;
     }
 
+    if (sig == QLatin1String("h")) {
+        // Unix fd — delivered as a plain int (dbus-next + Nemo double
+        // precedent). The RECEIVER closes the fd.
+        QDBusUnixFileDescriptor fd;
+        arg >> fd;
+        if (!fd.isValid())
+            return {};
+        return QVariant::fromValue(fd.takeFileDescriptor());
+    }
+
     // Unrecognized signature — make the gap visible in logs.
     qWarning("DBus: readBySignature: unsupported signature %s", qPrintable(sig));
     return {};
@@ -303,6 +350,15 @@ static QVariant readBySignature(const QDBusArgument &arg) {
 QVariant unwrapDbus(const QVariant &v) {
     if (v.userType() == qMetaTypeId<QDBusVariant>())
         return unwrapDbus(v.value<QDBusVariant>().variant());
+
+    if (v.userType() == qMetaTypeId<QDBusUnixFileDescriptor>()) {
+        // Unix fd delivered as a plain int (dbus-next + Nemo shape). The
+        // RECEIVER closes the fd — takeFileDescriptor() transfers ownership.
+        QDBusUnixFileDescriptor fd = v.value<QDBusUnixFileDescriptor>();
+        if (!fd.isValid())
+            return {};
+        return QVariant::fromValue(fd.takeFileDescriptor());
+    }
 
     if (v.userType() == qMetaTypeId<QDBusArgument>()) {
         const QDBusArgument arg = v.value<QDBusArgument>();
@@ -542,6 +598,8 @@ static QMetaType metaTypeForSignature(const QString &sig) {
         return QMetaType::fromType<QMap<QString, QVariantMap>>();
     if (sig == QLatin1String("aa{sv}"))
         return QMetaType::fromType<QList<QVariantMap>>();
+    if (sig == QLatin1String("h"))
+        return QMetaType::fromType<QDBusUnixFileDescriptor>();
     return QMetaType();
 }
 
@@ -581,6 +639,17 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
     }
     if (sig == QLatin1String("x")) {
         arg << static_cast<qint64>(v.toLongLong());
+        return true;
+    }
+    if (sig == QLatin1String("h")) {
+        // Unix fd: a plain int fd is wrapped into QDBusUnixFileDescriptor
+        // (which dup()s it — the SENDER keeps ownership of its fd).
+        if (!v.canConvert<int>())
+            return false;
+        QDBusUnixFileDescriptor fd(v.toInt());
+        if (!fd.isValid())
+            return false;
+        arg << fd;
         return true;
     }
     if (sig == QLatin1String("t")) {
@@ -720,6 +789,10 @@ QVariant marshalBySignature(const QString &sig, const QVariant &value) {
         return QVariant::fromValue(value.toInt());
     if (sig == QLatin1String("u"))
         return QVariant::fromValue(value.toUInt());
+    if (sig == QLatin1String("h"))
+        // Unix fd: a plain int fd is wrapped into QDBusUnixFileDescriptor
+        // (which dup()s it — the SENDER keeps ownership of its fd).
+        return QVariant::fromValue(QDBusUnixFileDescriptor(value.toInt()));
     if (sig == QLatin1String("x"))
         return QVariant::fromValue(static_cast<qint64>(value.toLongLong()));
     if (sig == QLatin1String("t"))

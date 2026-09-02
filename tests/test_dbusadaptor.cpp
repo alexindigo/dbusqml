@@ -25,6 +25,11 @@
 #include "dbusmessage.h"
 #include "dbusservicewatcher.h"
 #include "dbusobjectmanager.h"
+#include <QFile>
+#include <fcntl.h>
+#include <cstring>
+#include <cerrno>
+#include <unistd.h>
 #include "dbus.h"
 #include "dbuscatalog.h"
 #include "dbuspathdispatcher.h"
@@ -341,6 +346,18 @@ private slots:
 
     // 0.9.0 ObjectManager client (B6).
     void testObjectManagerClient();
+
+    // 0.9.0 unix fd (h) passing (B1/S3).
+    void testFdRoundTripSend();
+    void testFdRoundTripReceive();
+    void testFdContainerPosition();
+
+    // 0.9.0 lossless 64-bit delivery (C2).
+    void testInt64StringRoundTrip();
+    void testInt64SmallValueStaysNumber();
+
+    // 0.9.0 fix cycle: cross-process fd transfer.
+    void testFdCrossProcess();
     void testValueKeyStructListIsRealDict();
 
     // 0.9.0 fix cycle: co-location/leak regression.
@@ -3899,6 +3916,346 @@ void TestDBusAdaptor::testObjectManagerClient() {
     QVERIFY(after.contains(QStringLiteral("/org/obj/2")));
 
     delete client;
+}
+
+// ==================== 0.9.0 lossless 64-bit delivery (C2) ==================
+
+// Lossless 64-bit round-trip: the client sends MAX_INT64 as a decimal string
+// with a declared 'x'; the adaptor echoes; the value arrives back as the same
+// full-precision decimal STRING (no double round-trip).
+void TestDBusAdaptor::testInt64StringRoundTrip() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.I64'\n"
+                                        "  path: '/I64'\n"
+                                        "  iface: 'org.dbusqml.I64'\n"
+                                        "  function echo(v) { return v }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+
+    const QString maxI64 = QStringLiteral("9223372036854775807");
+    DBusMessage m;
+    m.setService(QStringLiteral("org.dbusqml.I64"));
+    m.setPath(QStringLiteral("/I64"));
+    m.setIface(QStringLiteral("org.dbusqml.I64"));
+    m.setMember(QStringLiteral("echo"));
+    m.setSignature(QStringLiteral("x"));
+    m.setArguments({maxI64});
+    DBusPendingReply *reply = conn->asyncCall(m);
+    QSignalSpy spy(reply, &DBusPendingReply::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
+    QCOMPARE(reply->values().size(), 1);
+    // The echoed value arrives as the full-precision decimal string.
+    QCOMPARE(reply->values().first().toString(), maxI64);
+
+    delete reply;
+    delete conn;
+}
+
+// Values within 2^53 stay plain JS numbers (no churn for the common case):
+// 42 sent as declared 'x' comes back as the number 42.
+void TestDBusAdaptor::testInt64SmallValueStaysNumber() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.I64Small'\n"
+                                        "  path: '/I64Small'\n"
+                                        "  iface: 'org.dbusqml.I64Small'\n"
+                                        "  function echo(v) { return v }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+
+    DBusMessage m;
+    m.setService(QStringLiteral("org.dbusqml.I64Small"));
+    m.setPath(QStringLiteral("/I64Small"));
+    m.setIface(QStringLiteral("org.dbusqml.I64Small"));
+    m.setMember(QStringLiteral("echo"));
+    m.setSignature(QStringLiteral("x"));
+    m.setArguments({QStringLiteral("42")});
+    DBusPendingReply *reply = conn->asyncCall(m);
+    QSignalSpy spy(reply, &DBusPendingReply::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
+    QCOMPARE(reply->values().first().toInt(), 42);
+
+    delete reply;
+    delete conn;
+}
+
+// ==================== 0.9.0 unix fd passing (h; B1/S3) =====================
+
+// Test adaptor with fd-aware methods: ReceiveFd writes through the received
+// fd; GiveFd returns the held fd (declared 'h' out-signature); ReceiveFdArray
+// counts the fds in a declared 'ah' array.
+class FdAdaptor : public DBusAdaptor {
+    Q_OBJECT
+public:
+    explicit FdAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+
+    Q_INVOKABLE QString receiveFd(const QVariant &fd) {
+        const int rawFd = fd.toInt();
+        if (rawFd < 0)
+            return QStringLiteral("bad-fd");
+        QFile f;
+        if (!f.open(rawFd, QIODevice::WriteOnly))
+            return QStringLiteral("open-failed");
+        if (f.write("hello-fd") != 8)
+            return QStringLiteral("write-failed");
+        f.close(); // we wrote; the fd still belongs to the caller
+        return QStringLiteral("ok");
+    }
+
+    int heldFd = -1;
+    Q_INVOKABLE int giveFd() { return heldFd; }
+
+    Q_INVOKABLE int receiveFdArray(const QVariant &fdsV) {
+        // 'ah' — array of fds; count valid ints. (The C++ dispatch path
+        // passes call args as QVariant — convert inside.)
+        const QVariantList fds = fdsV.toList();
+        int valid = 0;
+        for (const QVariant &fd : fds)
+            if (fd.toInt() >= 0)
+                ++valid;
+        return valid;
+    }
+};
+
+// fd round-trip, send side: a pipe write-end sent as declared 'h'; the
+// adaptor writes through the received fd and the test reads the content.
+void TestDBusAdaptor::testFdRoundTripSend() {
+    FdAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.Fd"));
+    adaptor.setPath(QStringLiteral("/Fd"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.Fd"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    int fds[2];
+    QVERIFY(pipe(fds) == 0);
+
+    DBusMessage m;
+    m.setService(QStringLiteral("org.dbusqml.Fd"));
+    m.setPath(QStringLiteral("/Fd"));
+    m.setIface(QStringLiteral("org.dbusqml.Fd"));
+    m.setMember(QStringLiteral("ReceiveFd"));
+    m.setSignature(QStringLiteral("h"));
+    QVariantList args;
+    args.append(fds[1]); // int fd — the plain-int send shape
+    m.setArguments(args);
+    m.setTimeout(3000);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+    DBusPendingReply *reply = conn->asyncCall(m);
+    QSignalSpy spy(reply, &DBusPendingReply::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
+    QCOMPARE(reply->value().toString(), QStringLiteral("ok"));
+
+    // Read what the adaptor wrote through the fd.
+    close(fds[1]);
+    char buf[16] = {};
+    const ssize_t n = read(fds[0], buf, sizeof(buf) - 1);
+    QCOMPARE(int(n), 8);
+    QCOMPARE(QByteArray(buf, 8), QByteArrayLiteral("hello-fd"));
+    close(fds[0]);
+
+    delete reply;
+    delete conn;
+}
+
+// fd round-trip, receive side: the adaptor's GiveFd returns its held fd
+// (declared 'h' out via _signatures); the client reads the content through
+// the received int fd, then closes it (receiver closes — the lifetime
+// contract).
+void TestDBusAdaptor::testFdRoundTripReceive() {
+    FdAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.FdGive"));
+    adaptor.setPath(QStringLiteral("/FdGive"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.FdGive"));
+    adaptor.setSignatures(QVariantMap{{QStringLiteral("GiveFd"), QStringLiteral("h")}});
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    int fds[2];
+    QVERIFY(pipe(fds) == 0);
+    QVERIFY(write(fds[1], "give-fd", 7) == 7);
+    close(fds[1]);
+    adaptor.heldFd = fds[0]; // the adaptor "owns" the read end
+
+    DBusMessage m;
+    m.setService(QStringLiteral("org.dbusqml.FdGive"));
+    m.setPath(QStringLiteral("/FdGive"));
+    m.setIface(QStringLiteral("org.dbusqml.FdGive"));
+    m.setMember(QStringLiteral("GiveFd"));
+    m.setTimeout(3000);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+    DBusPendingReply *reply = conn->asyncCall(m);
+    QSignalSpy spy(reply, &DBusPendingReply::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
+    QCOMPARE(reply->values().size(), 1);
+    const int receivedFd = reply->values().first().toInt();
+    QVERIFY(receivedFd >= 0);
+
+    // The client reads through the received fd, then closes it.
+    char buf[16] = {};
+    const ssize_t n = read(receivedFd, buf, sizeof(buf) - 1);
+    QCOMPARE(int(n), 7);
+    QCOMPARE(QByteArray(buf, 7), QByteArrayLiteral("give-fd"));
+    close(receivedFd);
+    close(fds[0]);
+
+    delete reply;
+    delete conn;
+}
+
+// Container-position fds: a declared 'ah' array arrives as a list of ints.
+void TestDBusAdaptor::testFdContainerPosition() {
+    FdAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.FdArr"));
+    adaptor.setPath(QStringLiteral("/Fd"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.Fd"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    int fds[2];
+    QVERIFY(pipe(fds) == 0);
+
+    DBusMessage m;
+    m.setService(QStringLiteral("org.dbusqml.FdArr"));
+    m.setPath(QStringLiteral("/Fd"));
+    m.setIface(QStringLiteral("org.dbusqml.Fd"));
+    m.setMember(QStringLiteral("ReceiveFdArray"));
+    m.setSignature(QStringLiteral("ah"));
+    QVariantList fdArgs;
+    fdArgs.append(QVariant(QVariantList{fds[1], fds[1]})); // two fds
+    m.setArguments(fdArgs);
+    m.setTimeout(3000);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+    DBusPendingReply *reply = conn->asyncCall(m);
+    QSignalSpy spy(reply, &DBusPendingReply::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
+    QCOMPARE(reply->value().toInt(), 2);
+
+    close(fds[1]);
+
+    delete reply;
+    delete conn;
+}
+
+// ==================== 0.9.0 fix cycle: cross-process fd + leak ==============
+
+// Cross-process fd transfer: the helper service runs in a SEPARATE process
+// (spawned binary), so fd numbers cannot coincide — no vacuous same-process
+// pass. The test sends a pipe/file fd with a declared 'h' (client send
+// direction), the helper writes through the received fd and replies with an
+// fd of its own file (served reply direction); both directions are asserted
+// byte-exact.
+static void os_lseek_guard(int fd) {
+    ::lseek(fd, 0, SEEK_SET);
+}
+
+void TestDBusAdaptor::testFdCrossProcess() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString sendFilePath = dir.filePath(QStringLiteral("fd-send"));
+    const QString replyFilePath = dir.filePath(QStringLiteral("fd-reply"));
+
+    // The helper's reply file: created empty; the helper pre-writes the
+    // reply payload into it at startup and returns its fd.
+    {
+        QFile f(replyFilePath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+    }
+
+    const QString service = QStringLiteral("org.dbusqml.FdXfer");
+    const QString helperBin =
+        QCoreApplication::applicationDirPath() + QStringLiteral("/fd_helper_service");
+
+    QProcess helper;
+    helper.setProgram(QStringLiteral("/bin/sh"));
+    QStringList shArgs;
+    shArgs << QStringLiteral("-c")
+           << QStringLiteral("exec '%1' '%2' '%3'").arg(helperBin, replyFilePath, service);
+    helper.setArguments(shArgs);
+    helper.start();
+    QVERIFY2(helper.waitForStarted(5000), "fd helper service failed to start");
+
+    // Wait for the service to appear on the bus.
+    QTRY_VERIFY_WITH_TIMEOUT(
+        QDBusConnection::sessionBus().interface()->isServiceRegistered(service), 10000);
+
+    // Open the send-side file empty, O_RDWR — the helper writes through the
+    // fd we send.
+    {
+        QFile f(sendFilePath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+    }
+    const int sendFd = ::open(sendFilePath.toLocal8Bit().constData(), O_RDWR);
+    QVERIFY(sendFd >= 0);
+
+    DBusMessage m;
+    m.setService(service);
+    m.setPath(QStringLiteral("/FdXfer"));
+    m.setIface(service);
+    m.setMember(QStringLiteral("WriteThrough"));
+    m.setSignature(QStringLiteral("h"));
+    QVariantList args;
+    args.append(sendFd);
+    m.setArguments(args);
+    m.setTimeout(5000);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+    DBusPendingReply *reply = conn->asyncCall(m);
+    QSignalSpy spy(reply, &DBusPendingReply::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 10000);
+    QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
+    QCOMPARE(reply->values().size(), 1);
+
+    // Reply direction: the received fd IS the helper's reply fd (dup'd via
+    // the daemon) — read the payload byte-exact.
+    const int receivedFd = reply->values().first().toInt();
+    QVERIFY2(receivedFd >= 0, "reply did not carry a usable fd");
+    {
+        char buf[64] = {};
+        os_lseek_guard(receivedFd);
+        const ssize_t n = ::read(receivedFd, buf, sizeof(buf) - 1);
+        QCOMPARE(QByteArray(buf, int(n > 0 ? n : 0)), QByteArrayLiteral("fd-xfer-reply-ok\n"));
+    }
+
+    // Send direction: the helper wrote through OUR fd — read the file.
+    {
+        char buf[64] = {};
+        os_lseek_guard(sendFd);
+        const ssize_t n = ::read(sendFd, buf, sizeof(buf) - 1);
+        QCOMPARE(QByteArray(buf, int(n > 0 ? n : 0)), QByteArrayLiteral("fd-xfer-send-ok\n"));
+    }
+
+    ::close(sendFd);
+    ::close(receivedFd);
+    delete reply;
+    delete conn;
+    helper.terminate();
+    helper.waitForFinished(3000);
 }
 
 // ==================== Adaptor lifecycle (L1–L7, 0.7.0) ====================

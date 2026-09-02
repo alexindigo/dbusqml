@@ -872,7 +872,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 QJSValueList jsArgs;
                 jsArgs.reserve(dbusArgs.size());
                 for (const QVariant &arg : std::as_const(dbusArgs))
-                    jsArgs << engine->toScriptValue(arg);
+                    jsArgs << precisionSafeToScriptValue(engine, arg);
                 QJSValue result = fn.callWithInstance(thisObj, jsArgs);
                 // S2: a thrown DBusQML.DBusUtils.error(name, message) value
                 // surfaces as an object carrying the dbusError marker (QV4

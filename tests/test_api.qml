@@ -306,6 +306,48 @@ TestCase {
         verify(found, "dynamic methods should exist after introspection")
     }
 
+    // fd quartet + fdUrl (0.9.0 blocker resolution): QML-side fd I/O —
+    // open/write/read/close plus the file:///proc/self/fd/N URL form.
+    function test_fd_quartet_roundtrip() {
+        var path = "/tmp/dbusqml-fd-quartet.txt"
+        var fd = DBusQML.DBusUtils.openFd(path, "w")
+        verify(fd >= 0, "openFd w failed: " + fd)
+        compare(DBusQML.DBusUtils.writeFd(fd, "fd-quartet-ok\n"), 14, "writeFd byte count")
+        DBusQML.DBusUtils.closeFd(fd)
+        var fd2 = DBusQML.DBusUtils.openFd(path, "r")
+        verify(fd2 >= 0, "openFd r failed: " + fd2)
+        var data = DBusQML.DBusUtils.readFd(fd2, 4096)
+        verify(data instanceof ArrayBuffer, "readFd returns ArrayBuffer")
+        verify(data.byteLength === 14, "readFd byteLength: " + data.byteLength)
+        compare(DBusQML.DBusUtils.textFromBytes(data), "fd-quartet-ok\n")
+        DBusQML.DBusUtils.closeFd(fd2)
+    }
+    function test_fd_url() {
+        var path = "/tmp/dbusqml-fdurl.txt"
+        var fd = DBusQML.DBusUtils.openFd(path, "rw")
+        verify(fd >= 0, "openFd rw failed: " + fd)
+        var url = DBusQML.DBusUtils.fdUrl(fd)
+        compare(url, "file:///proc/self/fd/" + fd)
+        compare(DBusQML.DBusUtils.writeFd(fd, "FDURL-OK"), 8, "writeFd")
+        // The URL must resolve as a real filesystem path for path-based
+        // consumers: read /proc/self/fd/N back through openFd+readFd.
+        // (XHR on file:// is non-functional in this runtime — the very
+        // blocker that motivated the quartet — so it is not a valid probe.)
+        var pfd = DBusQML.DBusUtils.openFd("/proc/self/fd/" + fd, "r")
+        verify(pfd >= 0, "openFd through " + url + " failed")
+        var data = DBusQML.DBusUtils.readFd(pfd, 4096)
+        DBusQML.DBusUtils.closeFd(pfd)
+        compare(DBusQML.DBusUtils.textFromBytes(data), "FDURL-OK", "fdUrl read-through content")
+        DBusQML.DBusUtils.closeFd(fd)
+    }
+    function test_fd_error_paths() {
+        compare(DBusQML.DBusUtils.openFd("/nonexistent/dbusqml-test", "r"), -1)
+        compare(DBusQML.DBusUtils.writeFd(-1, "x"), -1)
+        var empty = DBusQML.DBusUtils.readFd(-1, 100)
+        verify(empty.byteLength === 0, "readFd invalid fd → empty buffer")
+        compare(DBusQML.DBusUtils.fdUrl(-1), "")
+        DBusQML.DBusUtils.closeFd(-1)  // must not crash
+    }
     function test_dynamic_method_call() {
         for (var i = 0; i < 10; ++i) {
             if (typeof dbusProxy.listNames === "function") break

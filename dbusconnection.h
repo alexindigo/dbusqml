@@ -42,6 +42,9 @@ QVariant writeBySignature(const QString &sig, const QVariant &value);
 // containers (QVariantMap, QVariantList) so QML can traverse them as
 // JavaScript objects. Handles nested a{sv}, a{ss}, av, as, ao, etc.
 QVariant unwrapDbus(const QVariant &v);
+class QQmlEngine;
+class QJSValue;
+QJSValue precisionSafeToScriptValue(QQmlEngine *engine, const QVariant &v);
 
 // Determine whether a QVariant can be handed to QtDBus for wire marshaling
 // without corrupting the connection. Catches the unregistered/invalid class

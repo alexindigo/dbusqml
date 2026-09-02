@@ -199,6 +199,19 @@ if(BUILD_TEST_MODE)
     target_link_libraries(test_adaptor PRIVATE Qt6::Core Qt6::Qml Qt6::Test Qt6::DBus dbusqml)
 
     enable_testing()
+    add_executable(fd_helper_service tests/fd_helper_service.cpp
+        dbusadaptor.cpp
+        dbusheldreply.cpp
+        dbusmessage.cpp
+        dbusconnection.cpp
+        dbuspathdispatcher.cpp
+        dbuspendingreply.cpp
+        dbustypes.cpp
+        dbusintrospection.cpp
+    )
+    target_include_directories(fd_helper_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(fd_helper_service PRIVATE Qt6::Core Qt6::Qml Qt6::DBus dbusqml)
+
     add_test(NAME test_types COMMAND test_types)
     add_test(NAME test_introspect COMMAND test_introspect)
     add_test(NAME test_adaptor COMMAND dbus-run-session -- $<TARGET_FILE:test_adaptor>)

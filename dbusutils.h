@@ -30,4 +30,40 @@ public:
     // caller receives an error reply carrying exactly this name and message.
     // Any other thrown value becomes org.freedesktop.DBus.Error.Failed.
     Q_INVOKABLE QVariantMap error(const QString &name, const QString &message);
+
+    // ── fd quartet + fdUrl (0.9.0) ──
+    //
+    // Unix fd (h) I/O for QML — the ay-codec precedent: ay shipped with
+    // textFromBytes/bytesFromText because QML lacked text codecs; h ships
+    // with this quartet because QML lacks fd I/O. fds arrive from D-Bus
+    // calls as plain ints (the walker's h demarshal) and these members make
+    // them USABLE: read/write/close from QML, discharging the
+    // receiver-closes contract from the script layer.
+    //
+    // openFd(path, mode) → int fd (−1 + warning on failure). mode is
+    // fopen-style: "r" (read-only), "w" (write-only, create/truncate),
+    // "rw" (read-write, create).
+    //
+    // writeFd(fd, ArrayBuffer|string) → int bytes written (−1 + warning).
+    //
+    // readFd(fd, maxBytes) → ArrayBuffer (empty on error/EOF).
+    //
+    // closeFd(fd) — discharges the receiver-closes contract from QML.
+    //
+    // fdUrl(fd) → "file:///proc/self/fd/N" — lets regular-file-backed fds
+    // flow into path-based QML consumers (Image, Quickshell FileView, …).
+    // CAVEATS (documented in API.md): works for regular-file-backed fds
+    // only — pipes/sockets/anon inodes (the ScreenShot2 pipe and
+    // OpenPipeWireRemote socket classes) have no usable path; use
+    // readFd/writeFd for streams. The URL is valid only while the fd stays
+    // open in this process — lazy/async loaders must not outlive it.
+    Q_INVOKABLE int openFd(const QString &path, const QString &mode);
+    Q_INVOKABLE int writeFd(int fd, const QJSValue &data);
+    Q_INVOKABLE QJSValue readFd(int fd, int maxBytes);
+    Q_INVOKABLE void closeFd(int fd);
+    Q_INVOKABLE QString fdUrl(int fd);
+
+private:
+    QByteArray jsToBytes(const QJSValue &data);
+    QJSValue makeArrayBuffer(const QByteArray &bytes);
 };
