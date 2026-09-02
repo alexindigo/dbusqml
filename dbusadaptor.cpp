@@ -37,6 +37,7 @@ static bool isPrivateProperty(const QString &name) {
 
 // Helper: forwards QML signal emissions to D-Bus.
 // One relay per signal, with the signal name baked in at construction.
+class PropertiesChangedRelay;
 class SignalRelay : public QObject {
     Q_OBJECT
 public:
@@ -89,6 +90,25 @@ private:
     }
     DBusAdaptor *m_adaptor;
     QString m_name;
+};
+
+// Helper: forwards a property's notify signal to a PropertiesChanged
+// emission. One relay per served property, the property index baked in.
+class PropertiesChangedRelay : public QObject {
+    Q_OBJECT
+public:
+    PropertiesChangedRelay(DBusAdaptor *adaptor, int propIndex, QObject *parent)
+        : QObject(parent), m_adaptor(adaptor), m_prop(propIndex) {}
+
+public slots:
+    void changed() {
+        if (m_adaptor)
+            m_adaptor->emitPropertiesChanged(m_prop);
+    }
+
+private:
+    QPointer<DBusAdaptor> m_adaptor;
+    int m_prop;
 };
 
 DBusAdaptor::DBusAdaptor(QObject *parent)
@@ -185,9 +205,31 @@ void DBusAdaptor::componentComplete() {
         QStringLiteral("signaturesChanged"), QStringLiteral("_signalsChanged"),
         QStringLiteral("_membersChanged")};
 
+    // Property notify signals are NOT relayed as broadcast signals (A5 → A6):
+    // they drive org.freedesktop.DBus.Properties.PropertiesChanged instead.
+    QSet<int> notifyIndexes;
+    QList<QPair<int, QMetaMethod>> notifies; // property index → notify signal
+    for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
+        QMetaProperty prop = meta->property(i);
+        const QString pname = QString::fromLatin1(prop.name());
+        if (isPrivateProperty(pname))
+            continue;
+        if (pname == QStringLiteral("objectName") || pname == QStringLiteral("service") ||
+            pname == QStringLiteral("path") || pname == QStringLiteral("iface") ||
+            pname == QStringLiteral("connection"))
+            continue;
+        if (!prop.hasNotifySignal())
+            continue;
+        const QMetaMethod ns = prop.notifySignal();
+        notifyIndexes.insert(ns.methodIndex());
+        notifies.append({i, ns});
+    }
+
     for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
         QMetaMethod sig = meta->method(i);
         if (sig.methodType() != QMetaMethod::Signal)
+            continue;
+        if (notifyIndexes.contains(sig.methodIndex()))
             continue;
         QString name = QString::fromLatin1(sig.name());
         if (builtInSignals.contains(name))
@@ -200,13 +242,52 @@ void DBusAdaptor::componentComplete() {
             continue;
         }
 
-        auto *relay = new SignalRelay(this, name, this);
+        auto *relay = new SignalRelay(this, advertisedName(name), this);
         int slotIdx = relay->metaObject()->methodOffset() + paramCount;
         QMetaMethod slot = relay->metaObject()->method(slotIdx);
         QByteArray signalSig = "2" + sig.methodSignature();
         QByteArray slotSig = "1" + QByteArray(slot.methodSignature());
         QObject::connect(this, signalSig.constData(), relay, slotSig.constData());
     }
+
+    // Property changes emit org.freedesktop.DBus.Properties.PropertiesChanged
+    // (the spec-conformant channel; the client side already subscribes to it).
+    for (const auto &n : notifies) {
+        const auto *relay = new PropertiesChangedRelay(this, n.first, this);
+        const QByteArray sigSig = "2" + n.second.methodSignature();
+        QObject::connect(this, sigSig.constData(), relay, "1changed()");
+    }
+}
+
+void DBusAdaptor::emitPropertiesChanged(int propIndex) {
+    const QMetaObject *meta = metaObject();
+    if (propIndex < 0 || propIndex >= meta->propertyCount())
+        return;
+    QMetaProperty prop = meta->property(propIndex);
+    const QString qmlName = QString::fromLatin1(prop.name());
+
+    QVariant val = prop.read(this);
+    if (val.userType() == qMetaTypeId<QJSValue>())
+        val = qjsValueToVariant(val.value<QJSValue>());
+    val = toDbusVariantNested(val);
+
+    QDBusMessage msg =
+        QDBusMessage::createSignal(m_path, QStringLiteral("org.freedesktop.DBus.Properties"),
+                                   QStringLiteral("PropertiesChanged"));
+    if (wireMarshalable(val)) {
+        msg.setArguments({m_iface, QVariantMap{{advertisedName(qmlName), val}}, QStringList()});
+    } else {
+        // A value with no wire representation goes into invalidated_properties
+        // instead of the changed dict (0.5.2 guard precedent — GetAll skips it
+        // for the same reason).
+        qWarning("dbusqml: property %s on %s is not marshalable (type %s) — reporting as "
+                 "invalidated",
+                 qPrintable(qmlName), qPrintable(m_iface), QMetaType(val.userType()).name());
+        msg.setArguments({m_iface, QVariantMap(), QStringList{advertisedName(qmlName)}});
+    }
+    QDBusConnection conn = bus();
+    if (!conn.send(msg))
+        qmlInfo(this) << conn.lastError();
 }
 
 QString DBusAdaptor::introspect(const QString &) const {
@@ -347,6 +428,15 @@ QString DBusAdaptor::generateXml() const {
             addSignal(sig.name, sig.argTypes, {});
     }
 
+    // Property notify signals are never advertised (they are emitted as
+    // org.freedesktop.DBus.Properties.PropertiesChanged instead).
+    QSet<QString> notifyNames;
+    for (int i = 0; i < meta->propertyCount(); ++i) {
+        QMetaProperty prop = meta->property(i);
+        if (prop.hasNotifySignal())
+            notifyNames.insert(QString::fromLatin1(prop.notifySignal().name()));
+    }
+
     // Tier 3: QML-declared signals, wire-cased via the fold (Q4 — emission
     // and introspection can never diverge; SignalRelay emits the same name).
     for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
@@ -355,6 +445,8 @@ QString DBusAdaptor::generateXml() const {
             continue;
         const QString name = QString::fromLatin1(method.name());
         if (name.startsWith(QStringLiteral("qml")))
+            continue;
+        if (notifyNames.contains(name))
             continue;
         QStringList types;
         const auto paramTypes = method.parameterTypes();

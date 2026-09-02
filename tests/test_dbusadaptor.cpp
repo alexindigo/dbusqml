@@ -196,6 +196,18 @@ public slots:
     }
 };
 
+class MatrixCatcher : public QObject {
+    Q_OBJECT
+public:
+    QDBusMessage last;
+    int count = 0;
+public slots:
+    void onSignal(const QDBusMessage &msg) {
+        last = msg;
+        ++count;
+    }
+};
+
 // ==================== Test ====================
 
 class TestDBusAdaptor : public QObject {
@@ -296,6 +308,11 @@ private slots:
     void testMembersAliasServing();
     void testCatalogSourcesAndPrecedence();
     void testCatalogMalformedXmlSkipped();
+
+    // 0.9.0 PropertiesChanged + relay retirement.
+    void testPropertiesChangedReachesProxy();
+    void testNotifyRelaysRemoved();
+    void testPlainSignalFoldsOnWire();
     void testValueKeyStructListIsRealDict();
 
     // 0.9.0 fix cycle: co-location/leak regression.
@@ -3017,6 +3034,132 @@ void TestDBusAdaptor::testCatalogMalformedXmlSkipped() {
     DBusCatalog::instance().reload();
 }
 
+// ==================== 0.9.0 PropertiesChanged / relay retirement ===========
+
+// A6 — the consumer-outcome test: a DBus proxy in the same process binds an
+// adaptor property; the adaptor changes it; the proxy's QML-visible value
+// updates via org.freedesktop.DBus.Properties.PropertiesChanged. 0.8.0: the
+// server never emits PropertiesChanged, so the value never updates.
+void TestDBusAdaptor::testPropertiesChangedReachesProxy() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    QQmlComponent adaptorComp(&engine);
+    adaptorComp.setData("import DBus 1.0\n"
+                        "DBusAdaptor {\n"
+                        "  service: 'org.dbusqml.Reactive'\n"
+                        "  path: '/Reactive'\n"
+                        "  iface: 'org.dbusqml.Reactive'\n"
+                        "  property int alpha: 1\n"
+                        "  function ping() { return 'p' }\n"
+                        "}",
+                        QUrl());
+    QVERIFY2(adaptorComp.isReady(), qPrintable(adaptorComp.errorString()));
+    QPointer<DBusAdaptor> adaptor = qobject_cast<DBusAdaptor *>(adaptorComp.create());
+    QVERIFY(adaptor != nullptr);
+
+    QQmlComponent proxyComp(&engine);
+    proxyComp.setData("import DBus 1.0\n"
+                      "DBus {\n"
+                      "  service: 'org.dbusqml.Reactive'\n"
+                      "  path: '/Reactive'\n"
+                      "  iface: 'org.dbusqml.Reactive'\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(proxyComp.isReady(), qPrintable(proxyComp.errorString()));
+    QObject *proxy = proxyComp.create();
+    QVERIFY(proxy != nullptr);
+
+    // Wait for the proxy to become Ready (GetAll + subscription complete).
+    QTRY_COMPARE_WITH_TIMEOUT(proxy->property("status").toInt(), 2, 5000);
+    QCOMPARE(proxy->property("alpha").toInt(), 1);
+
+    // The adaptor changes the property — the proxy must observe it.
+    adaptor->setProperty("alpha", 42);
+    QTRY_COMPARE_WITH_TIMEOUT(proxy->property("alpha").toInt(), 42, 5000);
+
+    delete proxy;
+}
+
+// A5 — property notify signals are no longer relayed onto the bus as
+// broadcast signals. 0.8.0: alphaChanged fires on the wire.
+void TestDBusAdaptor::testNotifyRelaysRemoved() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.NoRelay'\n"
+                      "  path: '/NoRelay'\n"
+                      "  iface: 'org.dbusqml.NoRelay'\n"
+                      "  property int alpha: 1\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    QObject *adaptor = component.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+
+    MatrixCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.NoRelay"), QStringLiteral("/NoRelay"),
+                        QStringLiteral("org.dbusqml.NoRelay"), QStringLiteral("alphaChanged"),
+                        &catcher, SLOT(onSignal(QDBusMessage))));
+
+    adaptor->setProperty("alpha", 42);
+    QTest::qWait(500);
+    QCOMPARE(catcher.count, 0);
+    bus.disconnect(QStringLiteral("org.dbusqml.NoRelay"), QStringLiteral("/NoRelay"),
+                   QStringLiteral("org.dbusqml.NoRelay"), QStringLiteral("alphaChanged"), &catcher,
+                   SLOT(onSignal(QDBusMessage)));
+    delete adaptor;
+}
+
+// Q4 — QML-declared plain signals broadcast under their folded wire name
+// (SomethingHappened), and introspection advertises the same. 0.8.0: the
+// lowercase QML name goes on the wire.
+void TestDBusAdaptor::testPlainSignalFoldsOnWire() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusAdaptor {\n"
+                      "  service: 'org.dbusqml.FoldSig'\n"
+                      "  path: '/FoldSig'\n"
+                      "  iface: 'org.dbusqml.FoldSig'\n"
+                      "  signal somethingHappened()\n"
+                      "  function fire() { somethingHappened() }\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    QObject *adaptor = component.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+
+    MatrixCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.FoldSig"), QStringLiteral("/FoldSig"),
+                        QStringLiteral("org.dbusqml.FoldSig"), QStringLiteral("SomethingHappened"),
+                        &catcher, SLOT(onSignal(QDBusMessage))));
+
+    QDBusMessage call = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.FoldSig"), QStringLiteral("/FoldSig"),
+        QStringLiteral("org.dbusqml.FoldSig"), QStringLiteral("fire"));
+    QCOMPARE(bus.call(call, QDBus::Block, 3000).type(), QDBusMessage::ReplyMessage);
+
+    for (int i = 0; i < 20 && catcher.count == 0; ++i)
+        QTest::qWait(100);
+    QCOMPARE(catcher.count, 1);
+    QCOMPARE(catcher.last.member(), QStringLiteral("SomethingHappened"));
+    delete adaptor;
+}
+
 // Co-located same-iface adaptors must introspect CLEANLY: no duplicate
 // signals (the busctl-reject class) and no library base-class member in the
 // served XML.
@@ -3081,7 +3224,6 @@ void TestDBusAdaptor::testCoLocatedIntrospectionClean() {
         }
     }
     QVERIFY2(!xr.hasError(), qPrintable(xr.errorString()));
-    qWarning("PROBE-XML: %s", qPrintable(xml));
 
     delete a;
     delete b;
@@ -3690,18 +3832,6 @@ void TestDBusAdaptor::testLifecycleLeakRegression() {
 // signals), pinned from the Phase 1 probe matrix. Outcome contract per cell:
 // correct wire type, OR loud-fail + safe fallback, OR error reply / skip —
 // never a crash, hang, or silent wrong type.
-
-class MatrixCatcher : public QObject {
-    Q_OBJECT
-public:
-    QDBusMessage last;
-    int count = 0;
-public slots:
-    void onSignal(const QDBusMessage &msg) {
-        last = msg;
-        ++count;
-    }
-};
 
 static const char kMatrixStage[] = R"QML(
 import DBus 1.0

@@ -92,6 +92,7 @@ Q_SIGNALS:
     void _membersChanged();
 
 private:
+    friend class PropertiesChangedRelay;
     QString generateXml() const;
     QDBusConnection bus() const;
     QStringList declaredOutTypes(const QString &member) const;
@@ -102,6 +103,9 @@ private:
     // The incoming-wire-name → QML-name resolution used by dispatch: explicit
     // _members alias → exact → first-char-lower fold.
     QStringList candidateQmlNames(const QString &wireName) const;
+    // Emits org.freedesktop.DBus.Properties.PropertiesChanged for the
+    // property at propIndex (connected to its notify signal at completion).
+    void emitPropertiesChanged(int propIndex);
 
     QString m_service;
     QString m_path;
