@@ -2,6 +2,8 @@
 
 #include "dbusadaptor.h"
 
+#include <QDBusConnectionInterface>
+
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QHash>
@@ -15,6 +17,22 @@ namespace {
 using PathKey = QPair<QString, QString>;    // (connection name, path)
 using ServiceKey = QPair<QString, QString>; // (connection name, service)
 
+// One well-known-name claim: refcount over co-located adaptors, the
+// acquisition flags of the FIRST claimant (later conflicting flag sets warn
+// and are ignored — 0.5.1 duplicate-iface precedent), and whether we
+// currently own (or are queued for) the name.
+struct ServiceClaim {
+    int refs = 0;
+    bool owned = false;
+    bool queued = false;
+    bool allowReplacement = false;
+    bool replaceExisting = false;
+    bool queueOnBusy = false;
+    QString baseService; // our unique bus name at claim time
+    QMetaObject::Connection watch;
+    QList<QPointer<DBusAdaptor>> holders;
+};
+
 QMutex &registryMutex() {
     static QMutex m;
     return m;
@@ -25,19 +43,55 @@ QHash<PathKey, DBusPathDispatcher *> &dispatchers() {
     return h;
 }
 
-QHash<ServiceKey, int> &serviceRefs() {
-    static QHash<ServiceKey, int> h;
+QHash<ServiceKey, ServiceClaim> &serviceClaims() {
+    static QHash<ServiceKey, ServiceClaim> h;
     return h;
 }
 
 } // namespace
+
+// Owner-change watch: a name we claimed was acquired (possibly after
+// queueing) or lost to another owner.
+void DBusPathDispatcher::handleServiceOwnerChange(const QString &connName, const QString &service,
+                                                  const QString &newOwner) {
+    QList<QPointer<DBusAdaptor>> holders;
+    bool acquired = false;
+    bool lost = false;
+    {
+        QMutexLocker locker(&registryMutex());
+        auto it = serviceClaims().find({connName, service});
+        if (it == serviceClaims().end())
+            return;
+        ServiceClaim &claim = it.value();
+        if (newOwner == claim.baseService && !claim.owned) {
+            claim.owned = true;
+            claim.queued = false;
+            acquired = true;
+        } else if (claim.owned && newOwner != claim.baseService) {
+            claim.owned = false;
+            lost = true;
+        } else {
+            return;
+        }
+        holders = claim.holders;
+    }
+    for (const auto &h : holders) {
+        if (!h)
+            continue;
+        if (acquired)
+            h->nameAcquiredInternal();
+        else if (lost)
+            h->nameLostInternal();
+    }
+}
 
 DBusPathDispatcher::DBusPathDispatcher(const QString &connName, const QString &path,
                                        const QDBusConnection &conn)
     : m_connName(connName), m_path(path), m_conn(conn) {}
 
 bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const QString &service,
-                                DBusAdaptor *adaptor) {
+                                DBusAdaptor *adaptor, bool allowReplacement, bool replaceExisting,
+                                bool queueOnBusy) {
     const QString connName = conn.name();
     const PathKey key{connName, path};
 
@@ -63,13 +117,70 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
     if (!service.isEmpty()) {
         const ServiceKey svcKey{connName, service};
         QMutexLocker locker(&registryMutex());
-        auto it = serviceRefs().find(svcKey);
-        const int refs = (it == serviceRefs().end()) ? 0 : it.value();
-        if (refs == 0) {
-            if (!conn.registerService(service))
-                qmlInfo(adaptor) << "Failed to register service" << service;
+        ServiceClaim &claim = serviceClaims()[svcKey];
+        const bool flagged = allowReplacement || replaceExisting || queueOnBusy;
+        // Owner-change watch (flagged claims only): nameAcquired for queued
+        // acquisitions and nameLost for takeovers are driven by the daemon's
+        // owner changes. An unflagged claim cannot be taken away and releases
+        // its name only on its own teardown, so it needs no watch.
+        if (flagged && !claim.watch) {
+            auto *iface = conn.interface();
+            const QString connNameLocal = connName;
+            claim.watch =
+                QObject::connect(iface, &QDBusConnectionInterface::serviceOwnerChanged, iface,
+                                 [connNameLocal, service](const QString &name, const QString &,
+                                                          const QString &newOwner) {
+                                     if (name == service)
+                                         DBusPathDispatcher::handleServiceOwnerChange(
+                                             connNameLocal, service, newOwner);
+                                 });
         }
-        serviceRefs().insert(svcKey, refs + 1);
+        if (claim.refs == 0) {
+            claim.baseService = conn.baseService();
+            if (!flagged) {
+                // Unflagged claim (the default): synchronous Qt registration —
+                // the name is owned by the time attach returns, so immediate
+                // wire calls (including same-connection local-loop calls)
+                // route correctly, exactly as before 0.9.0.
+                if (conn.registerService(service)) {
+                    claim.owned = true;
+                    adaptor->nameAcquiredInternal();
+                } else {
+                    qmlInfo(adaptor) << "Failed to register service" << service;
+                }
+            } else {
+                // Flagged claim: RequestName carrying the flags, sent
+                // non-blocking. Acquisition or queueing is observed through
+                // the owner-change watch — nameAcquired fires from there
+                // (consumers with flags wait for nameAcquired before
+                // relying on the name being routed).
+                const uint requestFlags = (allowReplacement ? 1u : 0u) | // ALLOW_REPLACEMENT
+                                          (replaceExisting ? 2u : 0u) |  // REPLACE_EXISTING
+                                          (queueOnBusy ? 0u : 4u);       // DO_NOT_QUEUE
+                QDBusMessage req = QDBusMessage::createMethodCall(
+                    QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+                    QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
+                req.setArguments({service, requestFlags});
+                auto pending = conn.asyncCall(req);
+                auto *watcher = new QDBusPendingCallWatcher(pending, disp);
+                QObject::connect(watcher, &QDBusPendingCallWatcher::finished, adaptor,
+                                 [service](QDBusPendingCallWatcher *w) {
+                                     QDBusPendingReply<uint> r = *w;
+                                     if (r.isError()) {
+                                         qWarning("dbusqml: Failed to register service %s: %s",
+                                                  qPrintable(service),
+                                                  qPrintable(r.error().message()));
+                                     } else if (r.value() == 0) {
+                                         qWarning("dbusqml: Failed to register service %s (in "
+                                                  "use, not queued)",
+                                                  qPrintable(service));
+                                     }
+                                     w->deleteLater();
+                                 });
+            }
+        }
+        claim.refs++;
+        claim.holders.append(adaptor);
     }
 
     return true;
@@ -92,15 +203,26 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
     if (!service.isEmpty()) {
         const ServiceKey svcKey{connName, service};
         QMutexLocker locker(&registryMutex());
-        auto it = serviceRefs().find(svcKey);
-        if (it != serviceRefs().end()) {
-            const int refs = it.value() - 1;
+        auto it = serviceClaims().find(svcKey);
+        if (it != serviceClaims().end()) {
+            ServiceClaim &claim = it.value();
+            for (int i = 0; i < claim.holders.size(); ++i) {
+                if (claim.holders.at(i).data() == adaptor) {
+                    claim.holders.removeAt(i);
+                    break;
+                }
+            }
+            const int refs = claim.refs - 1;
             if (refs <= 0) {
-                serviceRefs().erase(it);
+                if (claim.watch) {
+                    QObject::disconnect(claim.watch);
+                    claim.watch = QMetaObject::Connection();
+                }
+                serviceClaims().erase(it);
                 if (!conn.unregisterService(service))
                     qmlInfo(adaptor) << "Failed to unregister service" << service;
             } else {
-                it.value() = refs;
+                claim.refs = refs;
             }
         }
     }

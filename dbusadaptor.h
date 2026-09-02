@@ -30,6 +30,14 @@ class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
     Q_PROPERTY(QVariantMap _signals READ signalSpecs WRITE setSignalSpecs NOTIFY _signalsChanged)
     Q_PROPERTY(
         QVariantMap _members READ memberAliases WRITE setMemberAliases NOTIFY _membersChanged)
+    // Service-name acquisition options (all default false — today's behavior):
+    // allow others to take the name from us, take it from a current owner, or
+    // queue until it becomes available.
+    Q_PROPERTY(bool allowReplacement READ allowReplacement WRITE setAllowReplacement NOTIFY
+                   allowReplacementChanged)
+    Q_PROPERTY(bool replaceExisting READ replaceExisting WRITE setReplaceExisting NOTIFY
+                   replaceExistingChanged)
+    Q_PROPERTY(bool queueOnBusy READ queueOnBusy WRITE setQueueOnBusy NOTIFY queueOnBusyChanged)
 
 public:
     explicit DBusAdaptor(QObject *parent = nullptr);
@@ -55,6 +63,15 @@ public:
 
     QVariantMap memberAliases() const { return m_members; }
     void setMemberAliases(const QVariantMap &v);
+
+    bool allowReplacement() const { return m_allowReplacement; }
+    void setAllowReplacement(bool v);
+
+    bool replaceExisting() const { return m_replaceExisting; }
+    void setReplaceExisting(bool v);
+
+    bool queueOnBusy() const { return m_queueOnBusy; }
+    void setQueueOnBusy(bool v);
 
     // QQmlParserStatus
     void classBegin() override {}
@@ -93,9 +110,21 @@ Q_SIGNALS:
     void signaturesChanged();
     void _signalsChanged();
     void _membersChanged();
+    void allowReplacementChanged();
+    void replaceExistingChanged();
+    void queueOnBusyChanged();
+    // Fired when the service name acquisition state changes (claimed, queued,
+    // lost to another owner).
+    void nameAcquired();
+    void nameLost();
 
 private:
     friend class PropertiesChangedRelay;
+    friend class DBusPathDispatcher;
+    // Service-name ownership notifications (invoked by the dispatcher's
+    // owner-change watch).
+    void nameAcquiredInternal();
+    void nameLostInternal();
     QString generateXml() const;
     QDBusConnection bus() const;
     QStringList declaredOutTypes(const QString &member) const;
@@ -117,6 +146,9 @@ private:
     QVariantMap m_signatures;
     QVariantMap m_signals;
     QVariantMap m_members;
+    bool m_allowReplacement = false;
+    bool m_replaceExisting = false;
+    bool m_queueOnBusy = false;
     bool m_attached = false;
 
     // Dispatch context for holdReply(): the in-flight call's message,

@@ -328,6 +328,9 @@ private slots:
     // 0.9.0 named error replies from handlers (S2).
     void testNamedErrorReply();
     void testPlainExceptionFailedReply();
+
+    // 0.9.0 service-name acquisition (S1).
+    void testServiceAcquisitionTakeover();
     void testValueKeyStructListIsRealDict();
 
     // 0.9.0 fix cycle: co-location/leak regression.
@@ -3535,6 +3538,86 @@ void TestDBusAdaptor::testPlainExceptionFailedReply() {
     QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
     QVERIFY2(reply.errorMessage().contains(QStringLiteral("broken")),
              qPrintable(reply.errorMessage()));
+}
+
+// ==================== 0.9.0 service-name acquisition (S1) ==================
+
+// S1 — two connections contend for one well-known name: the winner's
+// nameAcquired fires, the loser's nameLost fires. A claims with
+// allowReplacement; B takes the name with replaceExisting.
+void TestDBusAdaptor::testServiceAcquisitionTakeover() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    // A: session bus, replaceable.
+    QQmlComponent compA(&engine);
+    compA.setData("import DBus 1.0\n"
+                  "DBusAdaptor {\n"
+                  "  service: 'org.dbusqml.Acquire'\n"
+                  "  path: '/AcquireA'\n"
+                  "  iface: 'org.dbusqml.Acquire'\n"
+                  "  allowReplacement: true\n"
+                  "  function ping() { return 'a' }\n"
+                  "}",
+                  QUrl());
+    QVERIFY2(compA.isReady(), qPrintable(compA.errorString()));
+    // beginCreate: the spy must be connected BEFORE completion (the flagged
+    // claim's nameAcquired fires during/just after componentComplete).
+    QObject *a = compA.beginCreate(engine.rootContext());
+    QVERIFY(a != nullptr);
+    a->setProperty("allowReplacement", true);
+
+    QSignalSpy acquiredA(a, SIGNAL(nameAcquired()));
+    QSignalSpy lostA(a, SIGNAL(nameLost()));
+    compA.completeCreate();
+    QTRY_VERIFY_WITH_TIMEOUT(acquiredA.count() >= 1, 5000); // async flagged claim
+    QCOMPARE(lostA.count(), 0);
+
+    // B: custom connection, takes the name over.
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *connB = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(connB != nullptr);
+
+    QQmlComponent compB(&engine);
+    compB.setData("import DBus 1.0\n"
+                  "DBusAdaptor {\n"
+                  "  service: 'org.dbusqml.Acquire'\n"
+                  "  path: '/AcquireB'\n"
+                  "  iface: 'org.dbusqml.Acquire'\n"
+                  "  replaceExisting: true\n"
+                  "  function ping() { return 'b' }\n"
+                  "}",
+                  QUrl());
+    QVERIFY2(compB.isReady(), qPrintable(compB.errorString()));
+    QObject *b = compB.beginCreate(engine.rootContext());
+    QVERIFY(b != nullptr);
+    b->setProperty("connection", QVariant::fromValue<DBusConnection *>(connB));
+    b->setProperty("replaceExisting", true);
+
+    QSignalSpy acquiredB(b, SIGNAL(nameAcquired()));
+    compB.completeCreate();
+    QTRY_VERIFY_WITH_TIMEOUT(acquiredB.count() >= 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(lostA.count() >= 1, 5000);
+
+    // The name now routes to B.
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Acquire"), QStringLiteral("/AcquireB"),
+        QStringLiteral("org.dbusqml.Acquire"), QStringLiteral("ping"));
+    // Async: the reply arrives on this connection while the custom
+    // connection's socket (B's adaptor) is pumped by the main loop.
+    QDBusPendingCallWatcher *route =
+        new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(m));
+    QSignalSpy routeSpy(route, &QDBusPendingCallWatcher::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(routeSpy.count(), 1, 5000);
+    QVERIFY(!route->isError());
+    QCOMPARE(route->reply().arguments().first().toString(), QStringLiteral("b"));
+    delete route;
+
+    delete b;
+    delete connB;
+    delete a;
 }
 
 // ==================== Adaptor lifecycle (L1–L7, 0.7.0) ====================

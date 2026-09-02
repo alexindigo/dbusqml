@@ -2,6 +2,7 @@
 
 #include <QDBusConnection>
 #include <QDBusVirtualObject>
+#include <QMetaObject>
 #include <QList>
 #include <QPointer>
 #include <QString>
@@ -22,7 +23,8 @@ public:
     // name on first claim; later co-located adaptors reuse both. Returns false
     // (and warns) when the path cannot be registered.
     static bool attach(QDBusConnection conn, const QString &path, const QString &service,
-                       DBusAdaptor *adaptor);
+                       DBusAdaptor *adaptor, bool allowReplacement, bool replaceExisting,
+                       bool queueOnBusy);
 
     // Detach `adaptor`; drops the path and service name only when the last
     // attached adaptor / claim goes away.
@@ -37,6 +39,10 @@ public:
     // QDBusVirtualObject
     QString introspect(const QString &path) const override;
     bool handleMessage(const QDBusMessage &message, const QDBusConnection &connection) override;
+
+    // Owner-change watch receiver (library-private; connected per claim).
+    static void handleServiceOwnerChange(const QString &connName, const QString &service,
+                                         const QString &newOwner);
 
 private:
     DBusPathDispatcher(const QString &connName, const QString &path, const QDBusConnection &conn);

@@ -180,6 +180,35 @@ void DBusAdaptor::setMemberAliases(const QVariantMap &v) {
     emit _membersChanged();
 }
 
+void DBusAdaptor::setAllowReplacement(bool v) {
+    if (m_allowReplacement == v)
+        return;
+    m_allowReplacement = v;
+    emit allowReplacementChanged();
+}
+
+void DBusAdaptor::setReplaceExisting(bool v) {
+    if (m_replaceExisting == v)
+        return;
+    m_replaceExisting = v;
+    emit replaceExistingChanged();
+}
+
+void DBusAdaptor::setQueueOnBusy(bool v) {
+    if (m_queueOnBusy == v)
+        return;
+    m_queueOnBusy = v;
+    emit queueOnBusyChanged();
+}
+
+void DBusAdaptor::nameAcquiredInternal() {
+    emit nameAcquired();
+}
+
+void DBusAdaptor::nameLostInternal() {
+    emit nameLost();
+}
+
 QDBusConnection DBusAdaptor::bus() const {
     if (m_conn)
         return static_cast<QDBusConnection>(*m_conn);
@@ -192,7 +221,8 @@ void DBusAdaptor::componentComplete() {
             << "DBusAdaptor: iface is empty — introspection XML will have an empty interface name";
 
     QDBusConnection conn = bus();
-    m_attached = DBusPathDispatcher::attach(conn, m_path, m_service, this);
+    m_attached = DBusPathDispatcher::attach(conn, m_path, m_service, this, m_allowReplacement,
+                                            m_replaceExisting, m_queueOnBusy);
     if (!m_attached)
         return;
 
