@@ -1,248 +1,231 @@
-cmake_minimum_required(VERSION 3.16) project(dbusqml VERSION 0.8.0 DESCRIPTION
-                                             "Standalone D-Bus binding for QML" LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.16)
+project(dbusqml
+    VERSION 0.8.0
+    DESCRIPTION "Standalone D-Bus binding for QML"
+    LANGUAGES CXX
+)
 
-    set(CMAKE_CXX_STANDARD 17) set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-        set(CMAKE_AUTOMOC ON) set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-            find_package(Qt6 6.8 REQUIRED COMPONENTS Core Qml DBus) qt_policy(SET QTP0001 NEW)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Qml DBus)
+qt_policy(SET QTP0001 NEW)
 
-                include(GNUInstallDirs)
+include(GNUInstallDirs)
 
-#Production sources
-                    set(DBUSQML_SOURCES dbusadaptor.cpp dbusadaptor.h dbuscatalog.cpp dbuscatalog
-                            .h dbusconnection.cpp dbusconnection.h dbuserror.h dbusheldreply
-                            .cpp dbusheldreply.h dbusmessage.cpp dbusmessage.h dbuspathdispatcher
-                            .cpp dbuspathdispatcher.h dbus.cpp dbus.h dbusintrospection
-                            .cpp dbusintrospection.h dbuspendingreply.cpp dbuspendingreply
-                            .h dbustypes.h dbustypes.cpp dbusutils.h dbusutils.cpp)
+# Production sources
+set(DBUSQML_SOURCES
+    dbusadaptor.cpp
+    dbusadaptor.h
+    dbuscatalog.cpp
+    dbuscatalog.h
+    dbusconnection.cpp
+    dbusconnection.h
+    dbuserror.h
+    dbusheldreply.cpp
+    dbusheldreply.h
+    dbusmessage.cpp
+    dbusmessage.h
+    dbuspathdispatcher.cpp
+    dbuspathdispatcher.h
+    dbus.cpp
+    dbus.h
+    dbusintrospection.cpp
+    dbusintrospection.h
+    dbuspendingreply.cpp
+    dbuspendingreply.h
+    dbustypes.h
+    dbustypes.cpp
+    dbusutils.h
+    dbusutils.cpp
+)
 
-#== == == == == == == == == == QML MODULE == == == == == == == == == ==
-                        qt_add_qml_module(dbusqml URI DBus VERSION 1.0 OUTPUT_DIRECTORY ${
-                                              CMAKE_CURRENT_BINARY_DIR} /
-                                          DBus SOURCES ${DBUSQML_SOURCES} dbusplugin
-                                              .cpp dbussignalwatcher.cpp dbussignalwatcher
-                                              .h dbusservicewatcher.cpp dbusservicewatcher.h)
+# ==================== QML MODULE ====================
+qt_add_qml_module(dbusqml
+    URI DBus
+    VERSION 1.0
+    OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/DBus
+    SOURCES
+        ${DBUSQML_SOURCES}
+        dbusplugin.cpp
+        dbussignalwatcher.cpp
+        dbussignalwatcher.h
+        dbusservicewatcher.cpp
+        dbusservicewatcher.h
+        dbusobjectmanager.cpp
+        dbusobjectmanager.h
+)
 
-                            target_link_libraries(dbusqml PRIVATE Qt6::Core Qt6::Qml Qt6::DBus)
+target_link_libraries(dbusqml PRIVATE
+    Qt6::Core Qt6::Qml Qt6::DBus
+)
 
-                                qt_add_resources(
-                                    dbusqml "catalog" PREFIX "/dbusqml" FILES types /
-                                    org.freedesktop.NetworkManager.xml types /
-                                    org.freedesktop.NetworkManager.AccessPoint.xml types /
-                                    org.freedesktop.NetworkManager.Connection.Active.xml types /
-                                    org.freedesktop.NetworkManager.Device.xml types /
-                                    org.freedesktop.NetworkManager.Device.Wired.xml types /
-                                    org.freedesktop.NetworkManager.Device.Wireless.xml types /
-                                    org.freedesktop.NetworkManager.IP4Config.xml types /
-                                    org.freedesktop.NetworkManager.IP6Config.xml types /
-                                    org.freedesktop.NetworkManager.Settings.xml types /
-                                    org.freedesktop.NetworkManager.Settings.Connection.xml types /
-                                    org.mpris.MediaPlayer2.xml types /
-                                    org.mpris.MediaPlayer2.Player.xml types /
-                                    org.freedesktop.Notifications.xml types /
-                                    org.freedesktop.ScreenSaver.xml types /
-                                    org.freedesktop.login1.Manager.xml types /
-                                    org.freedesktop.portal.Settings.xml types /
-                                    org.freedesktop.impl.portal.Settings.xml types /
-                                    org.freedesktop.impl.portal.FileChooser.xml types /
-                                    org.freedesktop.impl.portal.Inhibit.xml types /
-                                    org.freedesktop.impl.portal.Request.xml types /
-                                    org.freedesktop.portal.NetworkMonitor.xml types /
-                                    org.freedesktop.UPower.xml)
+qt_add_resources(dbusqml "catalog"
+    PREFIX "/dbusqml"
+    FILES
+        types/org.freedesktop.NetworkManager.xml
+        types/org.freedesktop.NetworkManager.AccessPoint.xml
+        types/org.freedesktop.NetworkManager.Connection.Active.xml
+        types/org.freedesktop.NetworkManager.Device.xml
+        types/org.freedesktop.NetworkManager.Device.Wired.xml
+        types/org.freedesktop.NetworkManager.Device.Wireless.xml
+        types/org.freedesktop.NetworkManager.IP4Config.xml
+        types/org.freedesktop.NetworkManager.IP6Config.xml
+        types/org.freedesktop.NetworkManager.Settings.xml
+        types/org.freedesktop.NetworkManager.Settings.Connection.xml
+        types/org.mpris.MediaPlayer2.xml
+        types/org.mpris.MediaPlayer2.Player.xml
+        types/org.freedesktop.Notifications.xml
+        types/org.freedesktop.ScreenSaver.xml
+        types/org.freedesktop.login1.Manager.xml
+        types/org.freedesktop.portal.Settings.xml
+        types/org.freedesktop.impl.portal.Settings.xml
+        types/org.freedesktop.impl.portal.FileChooser.xml
+        types/org.freedesktop.impl.portal.Inhibit.xml
+        types/org.freedesktop.impl.portal.Request.xml
+        types/org.freedesktop.portal.NetworkMonitor.xml
+        types/org.freedesktop.UPower.xml
+)
 
-#== == == == == == == == == == INSTALLATION == == == == == == == == == ==
-                                    install(
-                                        TARGETS dbusqml EXPORT dbusqmlTargets LIBRARY DESTINATION ${
-                                            CMAKE_INSTALL_LIBDIR} ARCHIVE DESTINATION ${
-                                            CMAKE_INSTALL_LIBDIR} RUNTIME DESTINATION ${
-                                            CMAKE_INSTALL_BINDIR} INCLUDES DESTINATION ${
-                                            CMAKE_INSTALL_INCLUDEDIR})
+# ==================== INSTALLATION ====================
+install(TARGETS dbusqml
+    EXPORT dbusqmlTargets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
 
-                                        install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR} / DBus /
-                                                DESTINATION ${CMAKE_INSTALL_LIBDIR} / qt6 / qml /
-                                                DBus)
+install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/DBus/
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/qt6/qml/DBus
+)
 
-                                            install(FILES dbus.h dbusconnection.h dbusmessage
-                                                        .h dbuserror.h dbuspendingreply.h dbustypes
-                                                        .h dbusutils.h DESTINATION ${
-                                                            CMAKE_INSTALL_INCLUDEDIR} /
-                                                    dbusqml)
+install(FILES
+    dbus.h
+    dbusconnection.h
+    dbusmessage.h
+    dbuserror.h
+    dbuspendingreply.h
+    dbustypes.h
+    dbusutils.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dbusqml
+)
 
-                                                install(DIRECTORY types /
-                                                        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR} /
-                                                        dbusqml / types /
-                                                        FILES_MATCHING PATTERN "*.xml")
+install(DIRECTORY types/
+        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/dbusqml/types/
+        FILES_MATCHING PATTERN "*.xml")
 
-#== == == == == == == == == == CMAKE PACKAGE CONFIG == == == == == == == == == ==
-#Lets downstream projects do:
-#find_package(dbusqml 0.1 REQUIRED)
-#target_link_libraries(app PRIVATE dbusqml::dbusqml)
+# ==================== CMAKE PACKAGE CONFIG ====================
+# Lets downstream projects do:
+#   find_package(dbusqml 0.1 REQUIRED)
+#   target_link_libraries(app PRIVATE dbusqml::dbusqml)
 
-                                                    include(CMakePackageConfigHelpers)
+include(CMakePackageConfigHelpers)
 
-                                                        set(DBUSQML_CMAKE_INSTALL_DIR ${
-                                                                CMAKE_INSTALL_LIBDIR} /
-                                                            cmake / dbusqml)
+set(DBUSQML_CMAKE_INSTALL_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/dbusqml)
 
-                                                            install(
-                                                                EXPORT dbusqmlTargets FILE
-                                                                    dbusqmlTargets.cmake NAMESPACE
-                                                                        dbusqml::DESTINATION ${
-                                                                            DBUSQML_CMAKE_INSTALL_DIR})
+install(EXPORT dbusqmlTargets
+    FILE dbusqmlTargets.cmake
+    NAMESPACE dbusqml::
+    DESTINATION ${DBUSQML_CMAKE_INSTALL_DIR}
+)
 
-                                                                configure_package_config_file(
-                                                                    ${CMAKE_CURRENT_SOURCE_DIR} /
-                                                                    dbusqmlConfig.cmake.in ${
-                                                                        CMAKE_CURRENT_BINARY_DIR} /
-                                                                    dbusqmlConfig.cmake
-                                                                        INSTALL_DESTINATION ${
-                                                                            DBUSQML_CMAKE_INSTALL_DIR})
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/dbusqmlConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/dbusqmlConfig.cmake
+    INSTALL_DESTINATION ${DBUSQML_CMAKE_INSTALL_DIR}
+)
 
-                                                                    write_basic_package_version_file(
-                                                                        ${CMAKE_CURRENT_BINARY_DIR} /
-                                                                        dbusqmlConfigVersion
-                                                                            .cmake VERSION ${
-                                                                                PROJECT_VERSION} COMPATIBILITY
-                                                                                SameMinorVersion)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/dbusqmlConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMinorVersion
+)
 
-                                                                        install(
-                                                                            FILES ${
-                                                                                CMAKE_CURRENT_BINARY_DIR} /
-                                                                            dbusqmlConfig.cmake ${
-                                                                                CMAKE_CURRENT_BINARY_DIR} /
-                                                                            dbusqmlConfigVersion
-                                                                                .cmake DESTINATION ${
-                                                                                    DBUSQML_CMAKE_INSTALL_DIR})
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/dbusqmlConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/dbusqmlConfigVersion.cmake
+    DESTINATION ${DBUSQML_CMAKE_INSTALL_DIR}
+)
 
-#== == == == == == == == == == TESTS == == == == == == == == == ==
-                                                                            option(BUILD_TEST_MODE
-                                                                                   "Build the C++ "
-                                                                                   "test "
-                                                                                   "executables" ON)
+# ==================== TESTS ====================
+option(BUILD_TEST_MODE "Build the C++ test executables" ON)
 
-                                                                                if (BUILD_TEST_MODE) find_package(
-                                                                                    Qt6 6.8 REQUIRED
-                                                                                        COMPONENTS Test)
+if(BUILD_TEST_MODE)
+    find_package(Qt6 6.8 REQUIRED COMPONENTS Test)
 
-                                                                                    add_executable(
-                                                                                        test_types
-                                                                                            tests /
-                                                                                        test_dbustypes
-                                                                                            .cpp
-                                                                                                dbusmessage
-                                                                                            .cpp
-                                                                                                dbuserror
-                                                                                            .h dbustypes
-                                                                                            .h dbustypes
-                                                                                            .cpp) target_include_directories(test_types PRIVATE ${
-                                                                                        CMAKE_CURRENT_SOURCE_DIR})
-                                                                                        target_link_libraries(
-                                                                                            test_types PRIVATE Qt6::Core
-                                                                                                Qt6::Qml Qt6::Test
-                                                                                                    Qt6::DBus)
+    add_executable(test_types
+        tests/test_dbustypes.cpp
+        dbusmessage.cpp
+        dbuserror.h
+        dbustypes.h
+        dbustypes.cpp
+    )
+    target_include_directories(test_types PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_types PRIVATE Qt6::Core Qt6::Qml Qt6::Test Qt6::DBus)
 
-                                                                                            add_executable(
-                                                                                                test_dbus
-                                                                                                    tests /
-                                                                                                test_dbusconnection
-                                                                                                    .cpp
-                                                                                                        dbusmessage
-                                                                                                    .cpp
-                                                                                                        dbusconnection
-                                                                                                    .cpp
-                                                                                                        dbuspendingreply
-                                                                                                    .cpp
-                                                                                                        dbustypes
-                                                                                                    .cpp) target_include_directories(test_dbus PRIVATE ${
-                                                                                                CMAKE_CURRENT_SOURCE_DIR})
-                                                                                                target_link_libraries(
-                                                                                                    test_dbus PRIVATE Qt6::Core
-                                                                                                        Qt6::Qml Qt6::Test
-                                                                                                            Qt6::DBus dbusqml)
+    add_executable(test_dbus
+        tests/test_dbusconnection.cpp
+        dbusmessage.cpp
+        dbusconnection.cpp
+        dbuspendingreply.cpp
+        dbustypes.cpp
+    )
+    target_include_directories(test_dbus PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_dbus PRIVATE Qt6::Core Qt6::Qml Qt6::Test Qt6::DBus dbusqml)
 
-                                                                                                    add_executable(
-                                                                                                        test_introspect
-                                                                                                            tests /
-                                                                                                        test_introspection
-                                                                                                            .cpp
-                                                                                                                dbusintrospection
-                                                                                                            .cpp) target_include_directories(test_introspect PRIVATE ${
-                                                                                                        CMAKE_CURRENT_SOURCE_DIR})
-                                                                                                        target_link_libraries(
-                                                                                                            test_introspect PRIVATE
-                                                                                                                Qt6::Core Qt6::Test)
+    add_executable(test_introspect
+        tests/test_introspection.cpp
+        dbusintrospection.cpp
+    )
+    target_include_directories(test_introspect PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_introspect PRIVATE Qt6::Core Qt6::Test)
 
-                                                                                                            add_executable(
-                                                                                                                test_adaptor tests / test_dbusadaptor
-                                                                                                                                         .cpp
-                                                                                                                                             dbusadaptor
-                                                                                                                                         .cpp
-                                                                                                                                             dbusheldreply
-                                                                                                                                         .cpp
-                                                                                                                                             dbusmessage
-                                                                                                                                         .cpp
-                                                                                                                                             dbusconnection
-                                                                                                                                         .cpp
-                                                                                                                                             dbuspathdispatcher
-                                                                                                                                         .cpp
-                                                                                                                                             dbuspendingreply
-                                                                                                                                         .cpp
-                                                                                                                                             dbustypes
-                                                                                                                                         .cpp
-                                                                                                                                             dbusintrospection
-                                                                                                                                         .cpp) target_include_directories(test_adaptor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}) target_link_libraries(test_adaptor PRIVATE
-                                                                                                                                                                                                                                                      Qt6::Core
-                                                                                                                                                                                                                                                          Qt6::Qml
-                                                                                                                                                                                                                                                              Qt6::
-                                                                                                                                                                                                                                                                  Test Qt6::DBus dbusqml)
+    add_executable(test_adaptor
+        tests/test_dbusadaptor.cpp
+        dbusadaptor.cpp
+        dbusheldreply.cpp
+        dbusmessage.cpp
+        dbusconnection.cpp
+        dbuspathdispatcher.cpp
+        dbuspendingreply.cpp
+        dbustypes.cpp
+        dbusintrospection.cpp
+    )
+    target_include_directories(test_adaptor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_adaptor PRIVATE Qt6::Core Qt6::Qml Qt6::Test Qt6::DBus dbusqml)
 
-                                                                                                                enable_testing() add_test(NAME test_types COMMAND test_types) add_test(NAME
-                                                                                                                                                                                           test_introspect COMMAND test_introspect) add_test(NAME test_adaptor
-                                                                                                                                                                                                                                                     COMMAND
-                                                                                                                                                                                                                                                         dbus -
-                                                                                                                                                                                                                                                 run -
-                                                                                                                                                                                                                                                 session-- $ <
-                                                                                                                                                                                                                                             TARGET_FILE : test_adaptor >) add_test(NAME test_dbus COMMAND dbus - run -
-                                                                                                                                                                                                                                                                                        session-- $ <
-                                                                                                                                                                                                                                                                                    TARGET_FILE : test_dbus >) set_tests_properties(test_dbus
-                                                                                                                                                                                                                                                                                                                                        PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen") endif()
+    enable_testing()
+    add_test(NAME test_types COMMAND test_types)
+    add_test(NAME test_introspect COMMAND test_introspect)
+    add_test(NAME test_adaptor COMMAND dbus-run-session -- $<TARGET_FILE:test_adaptor>)
+    add_test(NAME test_dbus COMMAND dbus-run-session -- $<TARGET_FILE:test_dbus>)
+    set_tests_properties(test_dbus PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+endif()
 
-                                                                                                                    option(
-                                                                                                                        ENABLE_COVERAGE
-                                                                                                                        "Instrument targets for code coverage collection" OFF)
+option(ENABLE_COVERAGE "Instrument targets for code coverage collection" OFF)
 
-                                                                                                                        if (ENABLE_COVERAGE) message(
-                                                                                                                            STATUS
-                                                                                                                            "Enabling code coverage flags")
+if(ENABLE_COVERAGE)
+    message(STATUS "Enabling code coverage flags")
 
-                                                                                                                            target_compile_options(
-                                                                                                                                dbusqml
-                                                                                                                                    PRIVATE-- coverage -
-                                                                                                                                fprofile -
-                                                                                                                                abs -
-                                                                                                                                path)
-                                                                                                                                target_link_options(
-                                                                                                                                    dbusqml
-                                                                                                                                        PRIVATE-- coverage -
-                                                                                                                                    fprofile -
-                                                                                                                                    abs -
-                                                                                                                                    path)
+    target_compile_options(dbusqml PRIVATE --coverage -fprofile-abs-path)
+    target_link_options(dbusqml PRIVATE --coverage -fprofile-abs-path)
 
-                                                                                                                                    if (TARGET test_types) target_compile_options(test_types
-                                                                                                                                                                                      PRIVATE-- coverage -
-                                                                                                                                                                                  fprofile - abs - path) target_link_options(test_types PRIVATE-- coverage - fprofile - abs - path) target_link_libraries(test_types PRIVATE dbusqml) endif() if (TARGET
-                                                                                                                                                                                                                                                                                                                                                      test_dbus) target_compile_options(test_dbus
-                                                                                                                                                                                                                                                                                                                                                                                            PRIVATE-- coverage -
-                                                                                                                                                                                                                                                                                                                                                                                        fprofile -
-                                                                                                                                                                                                                                                                                                                                                                                        abs -
-                                                                                                                                                                                                                                                                                                                                                                                        path) target_link_options(test_dbus
-                                                                                                                                                                                                                                                                                                                                                                                                                      PRIVATE-- coverage -
-                                                                                                                                                                                                                                                                                                                                                                                                                  fprofile -
-                                                                                                                                                                                                                                                                                                                                                                                                                  abs -
-                                                                                                                                                                                                                                                                                                                                                                                                                  path)
-                                                                                                                                        target_link_libraries(
-                                                                                                                                            test_dbus PRIVATE
-                                                                                                                                                dbusqml)
-                                                                                                                                            endif()
-                                                                                                                                                endif()
+    if(TARGET test_types)
+        target_compile_options(test_types PRIVATE --coverage -fprofile-abs-path)
+        target_link_options(test_types PRIVATE --coverage -fprofile-abs-path)
+        target_link_libraries(test_types PRIVATE dbusqml)
+    endif()
+    if(TARGET test_dbus)
+        target_compile_options(test_dbus PRIVATE --coverage -fprofile-abs-path)
+        target_link_options(test_dbus PRIVATE --coverage -fprofile-abs-path)
+        target_link_libraries(test_dbus PRIVATE dbusqml)
+    endif()
+endif()
+
+

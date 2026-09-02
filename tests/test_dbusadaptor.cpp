@@ -24,6 +24,7 @@
 #include "dbusconnection.h"
 #include "dbusmessage.h"
 #include "dbusservicewatcher.h"
+#include "dbusobjectmanager.h"
 #include "dbus.h"
 #include "dbuscatalog.h"
 #include "dbuspathdispatcher.h"
@@ -337,6 +338,9 @@ private slots:
     void testSignalWatcherDelivers();
     void testSignalWatcherWildcardMember();
     void testServiceWatcherAppearDisappear();
+
+    // 0.9.0 ObjectManager client (B6).
+    void testObjectManagerClient();
     void testValueKeyStructListIsRealDict();
 
     // 0.9.0 fix cycle: co-location/leak regression.
@@ -3782,6 +3786,119 @@ void TestDBusAdaptor::testServiceWatcherAppearDisappear() {
     delete adaptor;
     QTRY_COMPARE_WITH_TIMEOUT(watcher->property("registered").toBool(), false, 5000);
     QVERIFY(changes.last().newOwner.isEmpty());
+}
+
+// ==================== 0.9.0 ObjectManager client (B6) ======================
+
+// A test ObjectManager service built on a served adaptor: GetManagedObjects
+// returns the inventory (declared a{oa{sv}} via _signatures); live changes
+// are broadcast as InterfacesAdded/InterfacesRemoved.
+void TestDBusAdaptor::testObjectManagerClient() {
+    QObject *server = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.ObjMgr'\n"
+        "  path: '/ObjMgr'\n"
+        "  iface: 'org.freedesktop.DBus.ObjectManager'\n"
+        "  _members: ({ GetManagedObjects: 'getManagedObjects' })\n"
+        "  _signatures: ({ GetManagedObjects: 'a{oa{sv}}' })\n"
+        "  property var objects: ({ '/org/obj/1': { 'org.dbusqml.Device': { name: 'one' } } })\n"
+        "  function getManagedObjects() { return objects }\n"
+        "  function add(path, iface, props) {\n"
+        "    var next = {}\n"
+        "    for (var k in objects) next[k] = objects[k]\n"
+        "    var ifaces = {}\n"
+        "    ifaces[iface] = props\n"
+        "    next[path] = ifaces\n"
+        "    objects = next\n"
+        "    emitSignal('InterfacesAdded', [path, ifaces])\n"
+        "  }\n"
+        "  function remove(path, iface) {\n"
+        "    var next = {}\n"
+        "    for (var k in objects) if (k !== path) next[k] = objects[k]\n"
+        "    objects = next\n"
+        "    var list = [iface]\n"
+        "    emitSignal('InterfacesRemoved', [path, list])\n"
+        "  }\n"
+        "}");
+    QVERIFY(server != nullptr);
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusObjectManager {\n"
+                      "  service: 'org.dbusqml.ObjMgr'\n"
+                      "  path: '/ObjMgr'\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    QObject *client = component.create();
+    QVERIFY(client != nullptr);
+
+    // Initial inventory.
+    QTRY_COMPARE_WITH_TIMEOUT(client->property("ready").toBool(), true, 5000);
+    const QVariantMap initial = client->property("managedObjects").toMap();
+    QCOMPARE(initial.size(), 1);
+    const QVariantMap obj1 = initial.value(QStringLiteral("/org/obj/1")).toMap();
+    QVERIFY(obj1.contains(QStringLiteral("org.dbusqml.Device")));
+
+    // Live add.
+    struct Added {
+        QString path;
+        QVariantMap ifaces;
+    };
+    QList<Added> addedList;
+    QObject::connect(static_cast<DBusObjectManager *>(client), &DBusObjectManager::interfacesAdded,
+                     client, [&addedList](const QString &p, const QVariantMap &ifaces) {
+                         addedList.append({p, ifaces});
+                     });
+
+    QDBusMessage add = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.ObjMgr"), QStringLiteral("/ObjMgr"),
+        QStringLiteral("org.freedesktop.DBus.ObjectManager"), QStringLiteral("add"));
+    add.setArguments({QVariant::fromValue(QDBusObjectPath(QStringLiteral("/org/obj/2"))),
+                      QVariant(QStringLiteral("org.dbusqml.Device")),
+                      QVariant(QVariantMap{{QStringLiteral("name"), QStringLiteral("two")}})});
+    QCOMPARE(QDBusConnection::sessionBus().call(add, QDBus::Block, 3000).type(),
+             QDBusMessage::ReplyMessage);
+
+    QTRY_COMPARE_WITH_TIMEOUT(addedList.count(), 1, 5000);
+    QCOMPARE(addedList.first().path, QStringLiteral("/org/obj/2"));
+    QVERIFY(addedList.first().ifaces.contains(QStringLiteral("org.dbusqml.Device")));
+    const QVariantMap now = client->property("managedObjects").toMap();
+    QCOMPARE(now.size(), 2);
+
+    // Live remove.
+    struct Removed {
+        QString path;
+        QStringList ifaces;
+    };
+    QList<Removed> removedList;
+    QObject::connect(static_cast<DBusObjectManager *>(client),
+                     &DBusObjectManager::interfacesRemoved, client,
+                     [&removedList](const QString &p, const QStringList &ifaces) {
+                         removedList.append({p, ifaces});
+                     });
+
+    QDBusMessage rem = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.ObjMgr"), QStringLiteral("/ObjMgr"),
+        QStringLiteral("org.freedesktop.DBus.ObjectManager"), QStringLiteral("remove"));
+    rem.setArguments({QVariant::fromValue(QDBusObjectPath(QStringLiteral("/org/obj/1"))),
+                      QVariant(QStringLiteral("org.dbusqml.Device"))});
+    QCOMPARE(QDBusConnection::sessionBus().call(rem, QDBus::Block, 3000).type(),
+             QDBusMessage::ReplyMessage);
+
+    QTRY_COMPARE_WITH_TIMEOUT(removedList.count(), 1, 5000);
+    QCOMPARE(removedList.first().path, QStringLiteral("/org/obj/1"));
+    const QVariantMap after = client->property("managedObjects").toMap();
+    QCOMPARE(after.size(), 1);
+    QVERIFY(after.contains(QStringLiteral("/org/obj/2")));
+
+    delete client;
 }
 
 // ==================== Adaptor lifecycle (L1–L7, 0.7.0) ====================
