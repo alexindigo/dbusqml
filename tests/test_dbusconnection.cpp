@@ -192,6 +192,19 @@ signals:
     void signalPong(const QString &data);
 };
 
+// Late-start recovery provider: registered AFTER the proxy under test is
+// already watching for it (the service-restart scenario).
+class LateService : public QObject {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.dbusqml.LateService")
+
+public:
+    explicit LateService(QObject *parent = nullptr) : QObject(parent) {}
+
+public slots:
+    QString echoWord(const QString &w) { return w; }
+};
+
 // ==================== Private Bus Fixture ====================
 
 static QProcess *s_daemon = nullptr;
@@ -345,6 +358,98 @@ private slots:
 
         DBusError err = reply->error();
         QCOMPARE(err.isValid(), true);
+    }
+
+    // ---- Service-watcher readiness discipline (V2-feedback fix cycle) ----
+    // Pre-fix failures: (1) watcher never created on watch→service order;
+    // (2) stale serviceAvailable after a service switch; (3) stale after a
+    // connection switch (watcher stays on the old bus); (4) no
+    // re-introspection when a late-starting provider registers.
+
+    void testWatcherBindingOrderBackfill() {
+        // Deterministic binding-order repro: watchServiceStatus applied
+        // BEFORE service — the engine-order no-op from the napkin, forced
+        // programmatically. componentComplete() must backfill the watcher.
+        DBusProxy obj;
+        obj.setWatchServiceStatus(true);
+        obj.setService(QStringLiteral("org.freedesktop.DBus"));
+        obj.setPath(QStringLiteral("/"));
+        obj.setIface(QStringLiteral("org.freedesktop.DBus"));
+        obj.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(obj.serviceAvailable(), true, 5000);
+    }
+
+    void testWatcherServiceSwitchRecheck() {
+        // Runtime service switch: the initial check re-runs on change —
+        // serviceAvailable is re-checked, never stale.
+        DBusProxy obj;
+        obj.setService(QStringLiteral("org.freedesktop.DBus")); // owned first
+        obj.setWatchServiceStatus(true);                        // watcher exists pre-fix
+        QTRY_COMPARE_WITH_TIMEOUT(obj.serviceAvailable(), true, 5000);
+        obj.setService(QStringLiteral("org.dbusqml.Absent.Service")); // unowned
+        QTRY_COMPARE_WITH_TIMEOUT(obj.serviceAvailable(), false, 5000);
+        obj.setService(QStringLiteral("org.freedesktop.DBus")); // owned again
+        QTRY_COMPARE_WITH_TIMEOUT(obj.serviceAvailable(), true, 5000);
+    }
+
+    void testWatcherFollowsConnectionSwitch() {
+        // Second private bus where the watched service is NOT registered:
+        // switching connection must destroy + recreate the watcher on the
+        // new bus and re-run the initial check.
+        QProcess second;
+        second.setProcessChannelMode(QProcess::ForwardedErrorChannel);
+        second.start("dbus-daemon", {"--session", "--print-address", "--nofork"});
+        QVERIFY2(second.waitForStarted(3000), "second dbus-daemon failed to start");
+        QVERIFY2(second.waitForReadyRead(3000), "no address from second dbus-daemon");
+        const QString addr2 = QString::fromLocal8Bit(second.readLine().trimmed());
+        QVERIFY2(!addr2.isEmpty(), "empty second bus address");
+
+        DBusProxy obj;
+        obj.setService(QStringLiteral("org.dbusqml.TestService")); // on THIS bus
+        obj.setWatchServiceStatus(true);                           // watcher exists pre-fix
+        QTRY_COMPARE_WITH_TIMEOUT(obj.serviceAvailable(), true, 5000);
+
+        DBusConnection *bus2 = DBusConnection::connectToBus(addr2);
+        QVERIFY(bus2 != nullptr);
+        obj.setConnection(bus2);
+        QTRY_COMPARE_WITH_TIMEOUT(obj.serviceAvailable(), false, 5000);
+
+        obj.setConnection(nullptr);
+        delete bus2;
+        second.kill();
+        second.waitForFinished(3000);
+    }
+
+    void testWatcherLateStartRecovery() {
+        // Proxy created for a NOT-yet-registered provider; the provider
+        // appears → registered → re-introspect → Ready with a working
+        // method (serviceAvailable true, arg types populated, call works).
+        const QString name = QStringLiteral("org.dbusqml.LateService");
+        DBusProxy obj;
+        obj.setService(name);
+        obj.setPath(QStringLiteral("/LateService"));
+        obj.setIface(name);
+        obj.setWatchServiceStatus(true);
+        obj.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(obj.serviceAvailable(), false, 5000);
+        QVERIFY(obj.argTypesForMethod(QStringLiteral("echoWord")).isEmpty());
+
+        auto *svc = new LateService();
+        QVERIFY(QDBusConnection::sessionBus().registerObject(QStringLiteral("/LateService"), svc,
+                                                             QDBusConnection::ExportAllContents));
+        QVERIFY(QDBusConnection::sessionBus().registerService(name));
+
+        QTRY_COMPARE_WITH_TIMEOUT(obj.serviceAvailable(), true, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(obj.status(), DBusProxy::Ready, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(obj.argTypesForMethod(QStringLiteral("echoWord")),
+                                  QStringList{QStringLiteral("s")}, 5000);
+        DBusPendingReply *reply = obj.call(QStringLiteral("echoWord"), {"hello"});
+        QVERIFY(reply != nullptr);
+        QSignalSpy spy(reply, &DBusPendingReply::finished);
+        QVERIFY(spy.wait(5000));
+        QVERIFY2(!reply->isError(), qPrintable(reply->error().message()));
+        QCOMPARE(reply->value().toString(), QStringLiteral("hello"));
+        delete reply;
     }
 
     void testDBusProperties() {

@@ -148,6 +148,12 @@ private:
     bool m_signalsConnected = false;
     bool m_signalsEnabled = true;
     int m_callTimeout = -1;
+    // Idempotent service-watcher readiness: create-or-rewire on the CURRENT
+    // bus and (re-)run the initial NameHasOwner check. Safe from any entry
+    // point in any order — componentComplete() backfills whatever the
+    // engine's binding application order skipped.
+    void ensureServiceWatcher();
+
     bool m_watchServiceStatus = false;
     bool m_serviceAvailable = false;
     bool m_propertiesEnabled = true;

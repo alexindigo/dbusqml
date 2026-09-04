@@ -98,6 +98,7 @@ DBusProxy::~DBusProxy() {
 
 void DBusProxy::componentComplete() {
     m_componentComplete = true;
+    ensureServiceWatcher();
     if (!m_service.isEmpty() && !m_path.isEmpty() && !m_iface.isEmpty())
         doIntrospect();
 }
@@ -106,8 +107,7 @@ void DBusProxy::setService(const QString &v) {
     if (m_service == v)
         return;
     m_service = v;
-    if (m_serviceWatcher)
-        m_serviceWatcher->setWatchedServices({m_service});
+    ensureServiceWatcher();
     emit serviceChanged();
     prepopulateFromCatalog();
     if (!m_iface.isEmpty() && !m_path.isEmpty())
@@ -231,40 +231,8 @@ void DBusProxy::setWatchServiceStatus(bool v) {
         return;
     m_watchServiceStatus = v;
 
-    if (v && !m_service.isEmpty()) {
-        if (!m_serviceWatcher) {
-            m_serviceWatcher =
-                new QDBusServiceWatcher(m_service, m_bus,
-                                        QDBusServiceWatcher::WatchForRegistration |
-                                            QDBusServiceWatcher::WatchForUnregistration,
-                                        this);
-            connect(m_serviceWatcher, &QDBusServiceWatcher::serviceRegistered, this, [this]() {
-                m_serviceAvailable = true;
-                emit serviceAvailableChanged();
-            });
-            connect(m_serviceWatcher, &QDBusServiceWatcher::serviceUnregistered, this, [this]() {
-                m_serviceAvailable = false;
-                emit serviceAvailableChanged();
-            });
-        }
-
-        // Check initial state: call NameHasOwner on the bus daemon
-        QDBusMessage msg = QDBusMessage::createMethodCall(
-            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
-            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("NameHasOwner"));
-        msg.setArguments({m_service});
-        QDBusPendingReply<bool> nameReply = m_bus.asyncCall(msg, m_callTimeout);
-        auto *watcher = new QDBusPendingCallWatcher(nameReply, this);
-        connect(watcher, &QDBusPendingCallWatcher::finished, this,
-                [this](QDBusPendingCallWatcher *w) {
-                    QDBusPendingReply<bool> reply = *w;
-                    if (!reply.isError()) {
-                        m_serviceAvailable = reply.value();
-                        emit serviceAvailableChanged();
-                    }
-                    w->deleteLater();
-                });
-    }
+    if (v)
+        ensureServiceWatcher();
 
     if (!v && m_serviceWatcher) {
         m_serviceWatcher->deleteLater();
@@ -272,6 +240,56 @@ void DBusProxy::setWatchServiceStatus(bool v) {
     }
 
     emit watchServiceStatusChanged();
+}
+
+// Idempotent service-watcher readiness (Nemo-shaped): create-or-rewire on
+// the CURRENT bus, then (re-)run the initial async NameHasOwner. Guarded by
+// watchServiceStatus && service — every entry point in every order lands
+// here, and componentComplete() backfills whatever binding order skipped.
+void DBusProxy::ensureServiceWatcher() {
+    if (!m_watchServiceStatus || m_service.isEmpty())
+        return;
+
+    if (!m_serviceWatcher) {
+        m_serviceWatcher = new QDBusServiceWatcher(m_service, m_bus,
+                                                   QDBusServiceWatcher::WatchForRegistration |
+                                                       QDBusServiceWatcher::WatchForUnregistration,
+                                                   this);
+        connect(m_serviceWatcher, &QDBusServiceWatcher::serviceRegistered, this, [this]() {
+            m_serviceAvailable = true;
+            emit serviceAvailableChanged();
+            // Late-start/restart recovery: the provider is back —
+            // re-introspect and repopulate methods/properties (Nemo
+            // re-connects everything on registration).
+            scheduleIntrospect();
+        });
+        connect(m_serviceWatcher, &QDBusServiceWatcher::serviceUnregistered, this, [this]() {
+            m_serviceAvailable = false;
+            emit serviceAvailableChanged();
+        });
+    } else {
+        m_serviceWatcher->setWatchedServices({m_service});
+    }
+
+    // (Re-)check initial state: NameHasOwner on the bus daemon. Gated on
+    // the service still being ours — a queued reply from a previous
+    // identity must not overwrite the current answer.
+    const QString watched = m_service;
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("NameHasOwner"));
+    msg.setArguments({watched});
+    QDBusPendingReply<bool> nameReply = m_bus.asyncCall(msg, m_callTimeout);
+    auto *watcher = new QDBusPendingCallWatcher(nameReply, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, watched](QDBusPendingCallWatcher *w) {
+                QDBusPendingReply<bool> reply = *w;
+                if (!reply.isError() && watched == m_service) {
+                    m_serviceAvailable = reply.value();
+                    emit serviceAvailableChanged();
+                }
+                w->deleteLater();
+            });
 }
 
 void DBusProxy::setSignatures(const QVariantMap &v) {
@@ -323,6 +341,14 @@ void DBusProxy::setConnection(DBusConnection *v) {
         m_bus = QDBusConnection::sessionBus();
     }
     emit connectionChanged();
+
+    // The watcher is bound to the old bus — destroy + recreate on the new
+    // bus and re-run the initial check.
+    if (m_serviceWatcher) {
+        m_serviceWatcher->deleteLater();
+        m_serviceWatcher = nullptr;
+    }
+    ensureServiceWatcher();
 
     // Re-introspect on the new bus to re-establish signal subscriptions
     if (!m_service.isEmpty() && !m_path.isEmpty() && !m_iface.isEmpty())
