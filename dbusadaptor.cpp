@@ -870,8 +870,15 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             const QQmlEngine::ObjectOwnership priorOwnership = QQmlEngine::objectOwnership(this);
             QJSValue thisObj = engine->newQObject(this);
             QQmlEngine::setObjectOwnership(this, priorOwnership);
-            QJSValue fn = thisObj.property(member);
-            if (!fn.isCallable() && qmlMember != member)
+            // A1: the matched QML name (the _members alias) goes FIRST —
+            // aliased handlers must run through the JS path (named error
+            // replies + precision-safe 64-bit delivery), never fall to the
+            // C++ invoke fallback, which swallows thrown errors into an
+            // empty success reply and loses int64 precision to a JS Number.
+            QJSValue fn = thisObj.property(matchedName);
+            if (!fn.isCallable() && member != matchedName)
+                fn = thisObj.property(member);
+            if (!fn.isCallable() && qmlMember != member && qmlMember != matchedName)
                 fn = thisObj.property(qmlMember);
             if (fn.isCallable()) {
                 QJSValueList jsArgs;

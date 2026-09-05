@@ -317,6 +317,11 @@ private slots:
     void testServedMethodArgTypesFromCatalog();
     void testMembersAliasDispatch();
     void testMembersAliasServing();
+
+    // A1 (fix-parity): aliased handlers run through the JS path — named
+    // error replies and precision-safe 64-bit arg delivery.
+    void testAliasJsPathNamedError();
+    void testAliasJsPathPrecision64();
     void testCatalogSourcesAndPrecedence();
     void testCatalogMalformedXmlSkipped();
 
@@ -3021,6 +3026,51 @@ void TestDBusAdaptor::testMembersAliasServing() {
     const QString xml = reply.arguments().first().toString();
     QVERIFY2(xml.contains(QStringLiteral("<method name=\"Delete\">")), qPrintable(xml));
     QVERIFY2(!xml.contains(QStringLiteral("doDelete")), qPrintable(xml));
+}
+
+// A1 — an _members-aliased handler must dispatch through the JS path
+// (lookup must try the matched alias name), not the C++ invoke fallback:
+// a thrown DBusUtils.error becomes a NAMED error reply (pre-fix: the
+// C++ invoke swallowed the throw → empty success reply).
+void TestDBusAdaptor::testAliasJsPathNamedError() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.AliasErr"), QStringLiteral("/AliasErr"),
+        QStringLiteral("org.dbusqml.AliasErr"), QStringLiteral("Guard"), {},
+        "import DBus 1.0\n"
+        "import DBus 1.0 as DBusQML\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.AliasErr'\n"
+        "  path: '/AliasErr'\n"
+        "  iface: 'org.dbusqml.AliasErr'\n"
+        "  _members: ({ Guard: 'guardAction' })\n"
+        "  function guardAction() {\n"
+        "    throw DBusQML.DBusUtils.error('org.dbusqml.Denied', 'aliased throw')\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.dbusqml.Denied"));
+    QCOMPARE(reply.errorMessage(), QStringLiteral("aliased throw"));
+}
+
+// A1 (precision facet) — the JS path delivers 64-bit args precision-safe
+// (int64 > 2^53 arrives in JS as a string). Through the C++ invoke fallback
+// the QML param is a lossy Number (…4993 → …4992).
+void TestDBusAdaptor::testAliasJsPathPrecision64() {
+    QDBusMessage reply =
+        callQmlAdaptorMethod(QStringLiteral("org.dbusqml.Alias64"), QStringLiteral("/Alias64"),
+                             QStringLiteral("org.dbusqml.Alias64"), QStringLiteral("BigEcho"),
+                             {QVariant::fromValue<qlonglong>(9007199254740993LL)},
+                             "import DBus 1.0\n"
+                             "DBusAdaptor {\n"
+                             "  service: 'org.dbusqml.Alias64'\n"
+                             "  path: '/Alias64'\n"
+                             "  iface: 'org.dbusqml.Alias64'\n"
+                             "  _members: ({ BigEcho: 'doBigEcho' })\n"
+                             "  _signatures: ({ BigEcho: 'x' })\n"
+                             "  function doBigEcho(v) { return v }\n"
+                             "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.arguments().first().toString(), QStringLiteral("9007199254740993"));
 }
 
 // Q3 — catalog sources: the freedesktop-standard <data>/dbus-1/interfaces/
