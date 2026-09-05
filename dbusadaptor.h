@@ -131,7 +131,7 @@ private:
     void nameLostInternal();
     QString generateXml() const;
     QDBusConnection bus() const;
-    QStringList declaredOutTypes(const QString &member) const;
+    QStringList declaredOutTypes(const QString &member, bool *found = nullptr) const;
 
     // The naming ladder (explicit _members → catalog → first-char-upper fold):
     // the wire name advertised for a QML member name (methods and properties).

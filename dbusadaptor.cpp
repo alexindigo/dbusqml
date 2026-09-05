@@ -7,6 +7,7 @@
 
 #include <QDBusArgument>
 #include <QDBusConnection>
+#include <QDBusUnixFileDescriptor>
 #include <QDBusMessage>
 #include <QDBusMetaType>
 #include <QJSValue>
@@ -275,7 +276,7 @@ void DBusAdaptor::componentComplete() {
         if (mname == QStringLiteral("unregister") || mname == QStringLiteral("holdReply") ||
             mname == QStringLiteral("emitSignal")) {
             qmlInfo(this) << mname
-                          << "member cannot be served under this name — declare an "
+                          << " member cannot be served under this name — declare an "
                              "alias in `_members`";
         }
     }
@@ -446,7 +447,20 @@ void DBusAdaptor::emitSignal(const QString &name, const QJSValue &arguments) {
 }
 // Map a QMetaType to its D-Bus type signature.
 static QString metaTypeToDbusSignature(int typeId) {
+    // B8: gadget types name their own wire codes (o/g/h) instead of "v".
+    if (typeId == qMetaTypeId<QDBusObjectPath>())
+        return QStringLiteral("o");
+    if (typeId == qMetaTypeId<QDBusSignature>())
+        return QStringLiteral("g");
+    if (typeId == qMetaTypeId<QDBusUnixFileDescriptor>())
+        return QStringLiteral("h");
     switch (typeId) {
+    case QMetaType::UChar:
+        return QStringLiteral("y");
+    case QMetaType::Float:
+        return QStringLiteral("d");
+    case QMetaType::Long:
+        return QStringLiteral("x");
     case QMetaType::Bool:
         return QStringLiteral("b");
     case QMetaType::Int:
@@ -591,6 +605,19 @@ QString DBusAdaptor::generateXml() const {
         QString dbusType = metaTypeToDbusSignature(static_cast<int>(prop.typeId()));
 
         QString access = prop.isWritable() ? QStringLiteral("readwrite") : QStringLiteral("read");
+        // A9: the catalog's declared type/access win over the metaobject
+        // inference (a declared `u` must not serve as metaobject `i`/`v`).
+        if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
+            for (const auto &p : spec->properties) {
+                if (p.name == name || dbusMemberToQml(p.name) == name) {
+                    if (!p.type.isEmpty())
+                        dbusType = p.type;
+                    if (!p.access.isEmpty())
+                        access = p.access;
+                    break;
+                }
+            }
+        }
         xml += QStringLiteral("    <property name=\"%1\" type=\"%2\" access=\"%3\"/>\n")
                    .arg(advertisedName(name), dbusType, access);
     }
@@ -606,17 +633,23 @@ QString DBusAdaptor::generateXml() const {
         QString name = QString::fromLatin1(method.name());
         if (name.startsWith(QStringLiteral("qml")))
             continue;
+        // A10: library-mechanism names are never served — the XML must not
+        // advertise what dispatch refuses (advertised-but-UnknownMethod).
+        if (name == QStringLiteral("holdReply") || name == QStringLiteral("unregister") ||
+            name == QStringLiteral("emitSignal"))
+            continue;
 
-        xml += QStringLiteral("    <method name=\"%1\">\n").arg(advertisedName(name));
+        const QString wireName = advertisedName(name);
+        xml += QStringLiteral("    <method name=\"%1\">\n").arg(wireName);
 
         // In-args: the catalog's declared types replace the metaobject-derived
-        // variants when the folded name matches; otherwise fall back to the
-        // metaobject types (QML functions carry QVariant params → "v" each).
+        // variants. A8: the lookup matches the FOLD (QML name), the EXACT
+        // C++ name, and the RESOLVED WIRE name (aliased methods included).
         const int inCount = method.parameterCount();
         QStringList catalogArgTypes;
         if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
             for (const auto &m : spec->methods) {
-                if (dbusMemberToQml(m.name) == name) {
+                if (dbusMemberToQml(m.name) == name || m.name == name || m.name == wireName) {
                     catalogArgTypes = m.argTypes;
                     break;
                 }
@@ -635,7 +668,15 @@ QString DBusAdaptor::generateXml() const {
                        .arg(j)
                        .arg(dbusType);
         }
-        if (method.returnType() != QMetaType::Void) {
+        // A7: declared out-args win — a declaration with NO out-args means
+        // the method is void (no phantom `result v`); the inference fallback
+        // (C++ typed returns) applies only when nothing is declared.
+        bool declared = false;
+        const QStringList outTypes = declaredOutTypes(wireName, &declared);
+        if (declared) {
+            for (const QString &t : outTypes)
+                xml += QStringLiteral("      <arg type=\"%1\" direction=\"out\"/>\n").arg(t);
+        } else if (method.returnType() != QMetaType::Void) {
             QString retType = metaTypeToDbusSignature(method.returnType());
             xml += QStringLiteral("      <arg name=\"result\" type=\"%1\" direction=\"out\"/>\n")
                        .arg(retType);
@@ -672,8 +713,8 @@ QString DBusAdaptor::advertisedName(const QString &qmlName) const {
                 return m.name;
         }
         for (const auto &p : spec->properties) {
-            if (dbusMemberToQml(p) == qmlName)
-                return p;
+            if (dbusMemberToQml(p.name) == qmlName)
+                return p.name;
         }
         for (const auto &sig : spec->signals_) {
             if (dbusMemberToQml(sig.name) == qmlName)
@@ -736,7 +777,9 @@ QStringList DBusAdaptor::declaredSignalTypes(const QString &name) const {
 // Resolve the declared out-arg signatures for a method reply, in precedence
 // order: explicit _signatures override → catalog declaration. Returns empty
 // when no declaration exists (caller falls back to stable inference).
-QStringList DBusAdaptor::declaredOutTypes(const QString &member) const {
+QStringList DBusAdaptor::declaredOutTypes(const QString &member, bool *found) const {
+    if (found)
+        *found = false;
     const QString qmlMember = dbusMemberToQml(member);
 
     // 1. Explicit override — a concatenated signature string, split per-arg.
@@ -744,6 +787,8 @@ QStringList DBusAdaptor::declaredOutTypes(const QString &member) const {
     if (it == m_signatures.constEnd())
         it = m_signatures.constFind(qmlMember);
     if (it != m_signatures.constEnd()) {
+        if (found)
+            *found = true; // A7: declared (possibly empty = declared-void)
         QStringList out;
         const QString sig = it.value().toString();
         int pos = 0;
@@ -756,13 +801,17 @@ QStringList DBusAdaptor::declaredOutTypes(const QString &member) const {
         return out;
     }
 
-    // 2. Catalog declaration (bundled or user XML).
+    // 2. Catalog declaration (bundled or user XML). A8: the keys are wire
+    // names — the caller may present the wire name directly.
     if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
         auto mit = spec->methods.constFind(member);
         if (mit == spec->methods.constEnd())
             mit = spec->methods.constFind(qmlMember);
-        if (mit != spec->methods.constEnd())
+        if (mit != spec->methods.constEnd()) {
+            if (found)
+                *found = true; // A7: declared (possibly empty = declared-void)
             return mit->outTypes;
+        }
     }
     return {};
 }
@@ -930,9 +979,12 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         if (method.methodType() != QMetaMethod::Method && method.methodType() != QMetaMethod::Slot)
             continue;
         const QString methodName = QString::fromLatin1(method.name());
-        // holdReply() and unregister() are library mechanisms for the
-        // handler, not D-Bus methods — never dispatch to them over the wire.
-        if (methodName == QStringLiteral("holdReply") || methodName == QStringLiteral("unregister"))
+        // holdReply()/unregister()/emitSignal() are library mechanisms for
+        // the handler, not D-Bus methods — never dispatch to them over the
+        // wire (A10/D1: the load warning for emitSignal becomes true).
+        if (methodName == QStringLiteral("holdReply") ||
+            methodName == QStringLiteral("unregister") ||
+            methodName == QStringLiteral("emitSignal"))
             continue;
         if (!memberCandidates.contains(methodName)) {
             continue;
@@ -1238,7 +1290,16 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
         // → catalog declaration → stable inference (unchanged). Struct
         // replies now arrive here already in writable-QDBusArgument form
         // (toDbusVariant), so no top-level special case is needed.
-        const QStringList outTypes = declaredOutTypes(member);
+        // D6: a DECLARED-VOID method drops the handler's return value with
+        // one warning — the declaration is the contract (never a phantom
+        // inference out-arg, never a silent wrong-shaped reply).
+        bool declared = false;
+        const QStringList outTypes = declaredOutTypes(member, &declared);
+        if (declared && outTypes.isEmpty()) {
+            qWarning("dbusqml: %s is declared void — dropping return value", qPrintable(member));
+            conn.send(msg.createReply());
+            return;
+        }
         if (outTypes.size() == 1) {
             conn.send(msg.createReply({marshalBySignature(outTypes.first(), value)}));
             return;

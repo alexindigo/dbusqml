@@ -151,7 +151,12 @@ void DBusCatalog::loadFile(const QString &filePath) {
                         currentArgs << type;
                 }
             } else if (name == QLatin1String("property") && !currentIface.isEmpty()) {
-                spec.properties << reader.attributes().value("name").toString();
+                // A9: keep the declared type and access, not just the name.
+                DBusCatalog::PropertySpec p;
+                p.name = reader.attributes().value("name").toString();
+                p.type = reader.attributes().value("type").toString();
+                p.access = reader.attributes().value("access").toString();
+                spec.properties.append(p);
             }
         } else if (reader.isEndElement()) {
             const auto name = reader.name();

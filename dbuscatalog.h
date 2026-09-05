@@ -4,6 +4,7 @@
 #include <QReadWriteLock>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <optional>
 
 class DBusCatalog {
@@ -17,11 +18,16 @@ public:
         QString name;
         QStringList argTypes;
     };
+    struct PropertySpec {
+        QString name;
+        QString type;   // declared D-Bus type (empty = undeclared)
+        QString access; // read / readwrite (empty = undeclared)
+    };
     struct InterfaceSpec {
         QString source;
         QHash<QString, MethodSpec> methods;
         QHash<QString, SignalSpec> signals_;
-        QStringList properties;
+        QVector<PropertySpec> properties; // A9: type/access now retained
     };
 
     static DBusCatalog &instance();

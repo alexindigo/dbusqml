@@ -67,6 +67,22 @@ private:
     QString m_testString;
 };
 
+// Typed C++ properties for the W9 signature-gap test (B8): uchar/float/
+// objectpath/signature properties must map to y/d/o/g in the XML.
+class TypedPropsAdaptor : public DBusAdaptor {
+    Q_OBJECT
+    Q_PROPERTY(uchar level READ level CONSTANT)
+    Q_PROPERTY(float ratio READ ratio CONSTANT)
+    Q_PROPERTY(QDBusObjectPath objPath READ objPath CONSTANT)
+    Q_PROPERTY(QDBusSignature sig READ sig CONSTANT)
+public:
+    explicit TypedPropsAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+    uchar level() const { return 7; }
+    float ratio() const { return 1.5f; }
+    QDBusObjectPath objPath() const { return QDBusObjectPath(QStringLiteral("/p")); }
+    QDBusSignature sig() const { return QDBusSignature(QStringLiteral("s")); }
+};
+
 // C++-declared value signals — the organic host for PascalCase names
 // (QML forbids uppercase-initial signal declarations). Used by the A5/A6/A11
 // emission-truthfulness tests.
@@ -325,6 +341,12 @@ private slots:
     void testAdvertisedNameSignalTiers();
     void testDeclaredSignalTypesAtEmission();
     void testAttachXmlSetParity();
+
+    // A7/A8/A9/B8/A10 (fix-parity): the napkin + XML truthfulness.
+    void testDeclaredOutArgsAndVoid();
+    void testCatalogPropertyTypes();
+    void testMetaTypeSignatureGaps();
+    void testLibraryMechanismSkips();
 
     // {value:} heuristic removal pins (0.6.0 wire change).
     void testValueKeyDictIsRealDict();
@@ -2822,6 +2844,192 @@ void TestDBusAdaptor::testAttachXmlSetParity() {
     emit adaptor.qmlPing(QVariant(1));
     QTest::qWait(500);
     QCOMPARE(catcher.count, 0);
+}
+
+// A7 (the napkin) — declared out-args replace the phantom `result v`;
+// declared-void methods carry NO out-arg; D6 — a declared-void handler that
+// returns a value is warned and the value DROPPED (the declaration is the
+// contract). A8 rides along: the catalog lookup also matches the resolved
+// wire name.
+void TestDBusAdaptor::testDeclaredOutArgsAndVoid() {
+    QTemporaryDir userDir;
+    QVERIFY(userDir.isValid());
+    const QByteArray savedTypesPath = qgetenv("DBUSQML_TYPES_PATH");
+    qputenv("DBUSQML_TYPES_PATH", userDir.path().toLocal8Bit());
+    {
+        QFile f(userDir.filePath(QStringLiteral("org.dbusqml.OutArgs.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(R"(<node>
+  <interface name="org.dbusqml.OutArgs">
+    <method name="CreateMonitor">
+      <arg type="o" direction="in"/>
+      <arg type="s" direction="in"/>
+      <arg type="s" direction="in"/>
+      <arg type="s" direction="in"/>
+      <arg type="u" direction="out"/>
+    </method>
+    <method name="Inhibit">
+      <arg type="s" direction="in"/>
+    </method>
+  </interface>
+</node>
+)");
+    }
+    DBusCatalog::instance().reload();
+
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.OutArgs'\n"
+                                        "  path: '/OutArgs'\n"
+                                        "  iface: 'org.dbusqml.OutArgs'\n"
+                                        "  function createMonitor(a, b, c, d) { return 7 }\n"
+                                        "  function inhibit(what) { return 5 }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage intro = bus.call(
+        QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.OutArgs"), QStringLiteral("/OutArgs"),
+            QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect")),
+        QDBus::Block, 3000);
+    QCOMPARE(intro.type(), QDBusMessage::ReplyMessage);
+    const QString xml = intro.arguments().first().toString();
+    QVERIFY2(xml.contains(QStringLiteral("<arg type=\"u\" direction=\"out\"/>")), qPrintable(xml));
+    QVERIFY2(!xml.contains(QStringLiteral("name=\"result\"")), qPrintable(xml));
+    // The Inhibit method must carry NO out-arg (declared-void wins).
+    const int inhibitBlock = xml.indexOf(QStringLiteral("<method name=\"Inhibit\">"));
+    QVERIFY(inhibitBlock >= 0);
+    const int inhibitEnd = xml.indexOf(QStringLiteral("</method>"), inhibitBlock);
+    QVERIFY(inhibitEnd > inhibitBlock);
+    QVERIFY2(!xml.mid(inhibitBlock, inhibitEnd - inhibitBlock)
+                  .contains(QStringLiteral("direction=\"out\"")),
+             qPrintable(xml));
+
+    // The wire reply carries the DECLARED out type, not a phantom v.
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.OutArgs"), QStringLiteral("/OutArgs"),
+        QStringLiteral("org.dbusqml.OutArgs"), QStringLiteral("CreateMonitor"));
+    m.setArguments({QVariant::fromValue(QDBusObjectPath(QStringLiteral("/o"))), QVariant("a"),
+                    QVariant("b"), QVariant("c")});
+    QDBusMessage reply = bus.call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QByteArrayLiteral("u"));
+    QCOMPARE(reply.arguments().first().toUInt(), 7u);
+
+    // D6: declared-void + handler returns a value → warn + drop.
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
+                                           ".*Inhibit.*declared void.*dropping return value.*")));
+    QDBusMessage mi = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.OutArgs"), QStringLiteral("/OutArgs"),
+        QStringLiteral("org.dbusqml.OutArgs"), QStringLiteral("Inhibit"));
+    mi.setArguments({QVariant("screensaver")});
+    QDBusMessage ri = bus.call(mi, QDBus::Block, 3000);
+    QCOMPARE(ri.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(ri.arguments().size(), 0);
+
+    qputenv("DBUSQML_TYPES_PATH", savedTypesPath);
+    DBusCatalog::instance().reload();
+}
+
+// A9 — catalog property type/access reach the XML (the parser keeps what it
+// used to drop; the XML property loop consumes the declaration).
+void TestDBusAdaptor::testCatalogPropertyTypes() {
+    QTemporaryDir userDir;
+    QVERIFY(userDir.isValid());
+    const QByteArray savedTypesPath = qgetenv("DBUSQML_TYPES_PATH");
+    qputenv("DBUSQML_TYPES_PATH", userDir.path().toLocal8Bit());
+    {
+        QFile f(userDir.filePath(QStringLiteral("org.dbusqml.CatProps.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(R"(<node>
+  <interface name="org.dbusqml.CatProps">
+    <property name="Percentage" type="u" access="read"/>
+  </interface>
+</node>
+)");
+    }
+    DBusCatalog::instance().reload();
+
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.CatProps'\n"
+                                        "  path: '/CatProps'\n"
+                                        "  iface: 'org.dbusqml.CatProps'\n"
+                                        "  property int percentage: 50\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusMessage intro = QDBusConnection::sessionBus().call(
+        QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.CatProps"), QStringLiteral("/CatProps"),
+            QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect")),
+        QDBus::Block, 3000);
+    QCOMPARE(intro.type(), QDBusMessage::ReplyMessage);
+    const QString xml = intro.arguments().first().toString();
+    QVERIFY2(
+        xml.contains(QStringLiteral("<property name=\"Percentage\" type=\"u\" access=\"read\"/>")),
+        qPrintable(xml));
+
+    qputenv("DBUSQML_TYPES_PATH", savedTypesPath);
+    DBusCatalog::instance().reload();
+}
+
+// B8 — the W9 meta-type→signature map covers y/o/g/h/Float/Long; a uchar
+// C++ property can no longer advertise as "v".
+void TestDBusAdaptor::testMetaTypeSignatureGaps() {
+    TypedPropsAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.TypedProps"));
+    adaptor.setPath(QStringLiteral("/TypedProps"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.TypedProps"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusMessage intro = QDBusConnection::sessionBus().call(
+        QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.TypedProps"), QStringLiteral("/TypedProps"),
+            QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect")),
+        QDBus::Block, 3000);
+    QCOMPARE(intro.type(), QDBusMessage::ReplyMessage);
+    const QString xml = intro.arguments().first().toString();
+    QVERIFY2(xml.contains(QStringLiteral("type=\"y\"")), qPrintable(xml));
+    QVERIFY2(xml.contains(QStringLiteral("type=\"d\"")), qPrintable(xml));
+    QVERIFY2(xml.contains(QStringLiteral("type=\"o\"")), qPrintable(xml));
+    QVERIFY2(xml.contains(QStringLiteral("type=\"g\"")), qPrintable(xml));
+}
+
+// A10/D1 — library-mechanism names are never served: QML-declared emitSignal
+// is SKIPPED by dispatch (the load warning becomes true) and by the XML; the
+// XML also skips holdReply/unregister (advertised-but-UnknownMethod dies).
+void TestDBusAdaptor::testLibraryMechanismSkips() {
+    QTest::ignoreMessage(
+        QtInfoMsg, QRegularExpression(QStringLiteral(".*emitSignal member cannot be served.*")));
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.MechSkip'\n"
+                                        "  path: '/MechSkip'\n"
+                                        "  iface: 'org.dbusqml.MechSkip'\n"
+                                        "  function emitSignal(name, args) { return 'emitted' }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusMessage intro = QDBusConnection::sessionBus().call(
+        QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.MechSkip"), QStringLiteral("/MechSkip"),
+            QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect")),
+        QDBus::Block, 3000);
+    QCOMPARE(intro.type(), QDBusMessage::ReplyMessage);
+    const QString xml = intro.arguments().first().toString();
+    QVERIFY2(!xml.contains(QStringLiteral("EmitSignal")), qPrintable(xml));
+
+    // Dispatch refuses the library name too (the load warning becomes true).
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.MechSkip"), QStringLiteral("/MechSkip"),
+        QStringLiteral("org.dbusqml.MechSkip"), QStringLiteral("EmitSignal"));
+    m.setArguments({QVariant("x"), QVariant(QStringList{})});
+    QDBusMessage reply = bus.call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
 }
 
 // The 0.6.0 heuristic removal: a `{value: 42}` dict is a REAL dict on the

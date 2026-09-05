@@ -804,9 +804,9 @@ void DBusProxy::prepopulateFromCatalog() {
     if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
         return;
     if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
-        for (const QString &propName : spec->properties) {
-            QString qmlName = dbusPropToQml(propName);
-            m_qmlToDbusName.insert(qmlName, propName);
+        for (const auto &p : spec->properties) {
+            QString qmlName = dbusPropToQml(p.name);
+            m_qmlToDbusName.insert(qmlName, p.name);
             insert(qmlName, QVariant::fromValue(nullptr));
         }
     }
