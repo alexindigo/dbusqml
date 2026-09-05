@@ -72,6 +72,31 @@ private:
         args.reserve(raw.size());
         for (const QVariant &a : raw)
             args.append(toDbusVariant(a));
+        // A6: when the signal's arg types are declared (_signals / catalog),
+        // marshal through them so the wire shape equals the advertised one;
+        // a value that cannot produce the declared type warns + skips (a
+        // signal has no error-reply channel).
+        const QStringList declared = m_adaptor->declaredSignalTypes(m_name);
+        if (!declared.isEmpty()) {
+            if (declared.size() != args.size()) {
+                qWarning("dbusqml: signal %s carries %d args but %d declared — skipping send",
+                         qPrintable(m_name), args.size(), declared.size());
+                return;
+            }
+            QVariantList typed;
+            typed.reserve(args.size());
+            for (int i = 0; i < args.size(); ++i) {
+                QVariant v = marshalBySignature(declared.at(i), args.at(i));
+                if (!wireMarshalable(v)) {
+                    qWarning("dbusqml: signal %s arg %d cannot produce declared type '%s' — "
+                             "skipping send",
+                             qPrintable(m_name), i, qPrintable(declared.at(i)));
+                    return;
+                }
+                typed << v;
+            }
+            args = typed;
+        }
         for (const QVariant &a : args) {
             if (!wireMarshalable(a)) {
                 qWarning("dbusqml: signal %s arg is not marshalable (type %s) — skipping send",
@@ -259,8 +284,16 @@ void DBusAdaptor::componentComplete() {
     // they drive org.freedesktop.DBus.Properties.PropertiesChanged instead.
     QSet<int> notifyIndexes;
     QList<QPair<int, QMetaMethod>> notifies; // property index → notify signal
+    // A4: notify indexes are recorded for EVERY property — the signal loop
+    // below must know which signals are property notifies so they never get
+    // raw signal relays. Privacy/library exclusions apply at the Properties
+    // -Changed RELAY ATTACH (notifies), not before recording.
     for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
         QMetaProperty prop = meta->property(i);
+        if (!prop.hasNotifySignal())
+            continue;
+        const QMetaMethod ns = prop.notifySignal();
+        notifyIndexes.insert(ns.methodIndex());
         const QString pname = QString::fromLatin1(prop.name());
         if (isPrivateProperty(pname))
             continue;
@@ -268,10 +301,6 @@ void DBusAdaptor::componentComplete() {
             pname == QStringLiteral("path") || pname == QStringLiteral("iface") ||
             pname == QStringLiteral("connection"))
             continue;
-        if (!prop.hasNotifySignal())
-            continue;
-        const QMetaMethod ns = prop.notifySignal();
-        notifyIndexes.insert(ns.methodIndex());
         notifies.append({i, ns});
     }
 
@@ -283,6 +312,10 @@ void DBusAdaptor::componentComplete() {
             continue;
         QString name = QString::fromLatin1(sig.name());
         if (builtInSignals.contains(name))
+            continue;
+        // A11: qml*-prefixed signals are never advertised (XML filter) — the
+        // relay must not broadcast them either (attach-set = XML-set).
+        if (name.startsWith(QStringLiteral("qml")))
             continue;
 
         int paramCount = sig.parameterCount();
@@ -371,6 +404,30 @@ void DBusAdaptor::emitSignal(const QString &name, const QJSValue &arguments) {
             }
         } else {
             args.append(toDbusVariant(qjsValueToVariant(arguments)));
+        }
+        // A6: declared signal types at emission (the emitSignal path — the
+        // exact inverse of the out-args rule): the wire shape must equal the
+        // advertised one when the types are declared.
+        const QStringList declared =
+            declaredSignalTypes(advertisedName(name).isEmpty() ? name : advertisedName(name));
+        if (!declared.isEmpty()) {
+            if (declared.size() != args.size()) {
+                qWarning("dbusqml: signal %s carries %d args but %d declared — skipping send",
+                         qPrintable(name), args.size(), declared.size());
+                return;
+            }
+            QVariantList typed;
+            for (int i = 0; i < args.size(); ++i) {
+                QVariant v = marshalBySignature(declared.at(i), args.at(i));
+                if (!wireMarshalable(v)) {
+                    qWarning("dbusqml: signal %s arg %d cannot produce declared type '%s' — "
+                             "skipping send",
+                             qPrintable(name), i, qPrintable(declared.at(i)));
+                    return;
+                }
+                typed << v;
+            }
+            args = typed;
         }
         // Robustness guard: an unmarshalable arg would kill the connection.
         // Signals have no error-reply channel, so warn and skip the send.
@@ -498,6 +555,13 @@ QString DBusAdaptor::generateXml() const {
             continue;
         if (notifyNames.contains(name))
             continue;
+        // A11: the XML set equals the attach set — a >5-param signal is not
+        // relayed (max 5 supported), so it is not advertised either.
+        if (method.parameterCount() > 5) {
+            qmlInfo(this) << "Signal" << name << "has" << method.parameterCount()
+                          << "parameters — max 5 supported for auto-forwarding";
+            continue;
+        }
         QStringList types;
         const auto paramTypes = method.parameterTypes();
         for (const auto &t : paramTypes)
@@ -593,7 +657,15 @@ QString DBusAdaptor::advertisedName(const QString &qmlName) const {
         if (it.value().toString() == qmlName)
             return it.key();
     }
-    // 2. Catalog name whose fold matches the QML name.
+    // 2. Explicit _signals declaration (A5): the declared key IS the wire
+    // name — a non-fold-invertible declared signal must be relayed under it.
+    for (auto it = m_signals.cbegin(); it != m_signals.cend(); ++it) {
+        if (it.key() == qmlName || dbusMemberToQml(it.key()) == qmlName)
+            return it.key();
+    }
+    // 3. Catalog name whose fold matches the QML name (methods, properties,
+    // and now also DECLARED SIGNALS — the relay's ":can-never-diverge" claim
+    // was false for non-fold-invertible catalog signal names).
     if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
         for (const auto &m : spec->methods) {
             if (dbusMemberToQml(m.name) == qmlName)
@@ -602,6 +674,10 @@ QString DBusAdaptor::advertisedName(const QString &qmlName) const {
         for (const auto &p : spec->properties) {
             if (dbusMemberToQml(p) == qmlName)
                 return p;
+        }
+        for (const auto &sig : spec->signals_) {
+            if (dbusMemberToQml(sig.name) == qmlName)
+                return sig.name;
         }
     }
     // 3. Stable inference: the deterministic first-char-uppercase fold.
@@ -622,6 +698,39 @@ QStringList DBusAdaptor::candidateQmlNames(const QString &wireName) const {
     if (!folded.isEmpty() && folded != wireName)
         candidates << folded;
     return candidates;
+}
+
+// A6: resolve the declared per-arg types for a signal, in precedence order
+// (explicit _signals → catalog declaration). Empty when undeclared — the
+// caller falls back to inference. Matches by exact name or fold.
+QStringList DBusAdaptor::declaredSignalTypes(const QString &name) const {
+    const QString folded = dbusMemberToQml(name);
+    for (auto it = m_signals.cbegin(); it != m_signals.cend(); ++it) {
+        if (it.key() == name || dbusMemberToQml(it.key()) == folded) {
+            const QString sig = it.value().toString();
+            QStringList types;
+            int pos = 0;
+            bool ok = true;
+            while (pos < sig.size()) {
+                const QString t = firstCompleteType(sig, pos);
+                if (t.isEmpty()) {
+                    ok = false;
+                    break;
+                }
+                types << t;
+            }
+            if (ok)
+                return types;
+            return {};
+        }
+    }
+    if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
+        for (const auto &sig : spec->signals_) {
+            if (sig.name == name || dbusMemberToQml(sig.name) == folded)
+                return sig.argTypes;
+        }
+    }
+    return {};
 }
 
 // Resolve the declared out-arg signatures for a method reply, in precedence

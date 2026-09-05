@@ -45,6 +45,23 @@ bool wireMarshalable(const QVariant &v) {
     // QDBusArgument carries its own signature — always marshalable.
     if (t == qMetaTypeId<QDBusArgument>())
         return true;
+    // Object paths and signatures must be STRUCTURALLY valid — an invalid
+    // path content passes QtDBus's type lookup and fails only at marshal
+    // time (the caller would time out with zero diagnostics).
+    if (t == qMetaTypeId<QDBusObjectPath>()) {
+        const QString p = v.value<QDBusObjectPath>().path();
+        if (p.isEmpty() || (!p.startsWith(QLatin1Char('/'))))
+            return false;
+        for (const QChar &c : p) {
+            if (!(c.isLetterOrNumber() || c == QLatin1Char('/') || c == QLatin1Char('_')))
+                return false;
+        }
+        return true;
+    }
+    if (t == qMetaTypeId<QDBusSignature>()) {
+        const QString g = v.value<QDBusSignature>().signature();
+        return !g.isEmpty() && g.contains(QLatin1Char('.'));
+    }
     // Unix fds (plain ints after the walker round-trip) are marshalable.
     if (t == qMetaTypeId<QDBusUnixFileDescriptor>())
         return true;

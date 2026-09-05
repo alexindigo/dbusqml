@@ -67,6 +67,20 @@ private:
     QString m_testString;
 };
 
+// C++-declared value signals — the organic host for PascalCase names
+// (QML forbids uppercase-initial signal declarations). Used by the A5/A6/A11
+// emission-truthfulness tests.
+class DeclaredSignalAdaptor : public DBusAdaptor {
+    Q_OBJECT
+public:
+    explicit DeclaredSignalAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+
+signals:
+    void StateChanged(QVariant a0, QVariant a1); // declared: oa{sv}
+    void SixArgs(int a1, int a2, int a3, int a4, int a5, int a6);
+    void qmlPing(QVariant v); // qml* prefix
+};
+
 // QVariant-typed method — the C++ dispatch path (invokeMethod) passes call args
 // as QVariant, so only QVariant-typed Q_INVOKABLEs/slots are wire-callable.
 class VariantEchoAdaptor : public DBusAdaptor {
@@ -305,6 +319,12 @@ private slots:
 
     // C0 relay guard (fix-parity): relayed signal args are guarded.
     void testRelayGuardSkipsUnmarshalable();
+
+    // A4/A5/A6/A11 (fix-parity): emission truthfulness.
+    void testPrivateNotifyNotBroadcast();
+    void testAdvertisedNameSignalTiers();
+    void testDeclaredSignalTypesAtEmission();
+    void testAttachXmlSetParity();
 
     // {value:} heuristic removal pins (0.6.0 wire change).
     void testValueKeyDictIsRealDict();
@@ -2664,6 +2684,144 @@ void TestDBusAdaptor::testRelayGuardSkipsUnmarshalable() {
     QVERIFY2(!w->isError(), qPrintable(w->error().message()));
     QCOMPARE(w->reply().arguments().first().toString(), QStringLiteral("pong"));
     delete w;
+}
+
+// A4 — a private property's notify signal must not leak onto the bus: the
+// privacy exclusion applies at RELAY ATTACH time, while the notify INDEXES
+// are recorded for every property (pre-fix the early skip left the private
+// notify index unrecorded, so the signal loop attached a relay and the
+// PropertiesChanged emission named a property the XML suppresses).
+void TestDBusAdaptor::testPrivateNotifyNotBroadcast() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.PrivNotify'\n"
+                                        "  path: '/PrivNotify'\n"
+                                        "  iface: 'org.dbusqml.PrivNotify'\n"
+                                        "  property var _cache: 1\n"
+                                        "  property int level: 2\n"
+                                        "  function ping() { return 'pong' }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.PrivNotify"), QStringLiteral("/PrivNotify"),
+                        QStringLiteral("org.freedesktop.DBus.Properties"),
+                        QStringLiteral("PropertiesChanged"), &catcher,
+                        SLOT(onSignal(QDBusMessage))));
+
+    // Private change: no PropertiesChanged for the suppressed property.
+    adaptor->setProperty("_cache", 5);
+    QTest::qWait(500);
+    QCOMPARE(catcher.count, 0);
+
+    // Positive control: a public property change DOES reach the proxy shape.
+    adaptor->setProperty("level", 3);
+    QTRY_VERIFY_WITH_TIMEOUT(catcher.count >= 1, 5000);
+    const QVariantMap changed = unwrapDbus(catcher.lastSignal.arguments().at(1)).toMap();
+    QVERIFY(changed.contains(QStringLiteral("Level")));
+}
+
+// A5 — advertisedName gains the _signals tier (and the catalog-signals tier):
+// a declared lowercase signal name is advertised AND relayed under the SAME
+// wire name (pre-fix the relay emitted the fold — wire/XML divergence).
+void TestDBusAdaptor::testAdvertisedNameSignalTiers() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.SigTier'\n"
+                                        "  path: '/SigTier'\n"
+                                        "  iface: 'org.dbusqml.SigTier'\n"
+                                        "  _signals: ({ batteryLow: 'i' })\n"
+                                        "  signal batteryLow(var v)\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    // The XML advertises the declared name (0.9.0 behavior, unchanged).
+    QDBusMessage intro = QDBusConnection::sessionBus().call(
+        QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.SigTier"), QStringLiteral("/SigTier"),
+            QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect")),
+        QDBus::Block, 3000);
+    QCOMPARE(intro.type(), QDBusMessage::ReplyMessage);
+    const QString xml = intro.arguments().first().toString();
+    QVERIFY2(xml.contains(QStringLiteral("<signal name=\"batteryLow\">")), qPrintable(xml));
+
+    // The relay must emit the DECLARED wire name too.
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.SigTier"), QStringLiteral("/SigTier"),
+                        QStringLiteral("org.dbusqml.SigTier"), QStringLiteral("batteryLow"),
+                        &catcher, SLOT(onSignal(QDBusMessage))));
+    QVERIFY(QMetaObject::invokeMethod(adaptor, "batteryLow", Q_ARG(QVariant, 5)));
+    QTRY_VERIFY_WITH_TIMEOUT(catcher.count == 1, 5000);
+    QCOMPARE(catcher.lastSignal.signature(), QByteArrayLiteral("i"));
+}
+
+// A6 — declared signal types are applied at EMISSION (relay path): the wire
+// signature must equal the declared "oa{sv}"; non-conforming values warn and
+// skip the send (a signal has no error-reply channel).
+void TestDBusAdaptor::testDeclaredSignalTypesAtEmission() {
+    DeclaredSignalAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.DeclSig"));
+    adaptor.setPath(QStringLiteral("/DeclSig"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.DeclSig"));
+    adaptor.setSignalSpecs(
+        QVariantMap{{QStringLiteral("StateChanged"), QVariant(QStringLiteral("oa{sv}"))}});
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.DeclSig"), QStringLiteral("/DeclSig"),
+                        QStringLiteral("org.dbusqml.DeclSig"), QStringLiteral("StateChanged"),
+                        &catcher, SLOT(onSignal(QDBusMessage))));
+
+    // Conforming emission: on the wire with the DECLARED signature.
+    emit adaptor.StateChanged(QVariant::fromValue(QDBusObjectPath(QStringLiteral("/x"))),
+                              QVariant(QVariantMap{{QStringLiteral("k"), 1}}));
+    QTRY_VERIFY_WITH_TIMEOUT(catcher.count == 1, 5000);
+    QCOMPARE(catcher.lastSignal.signature(), QByteArrayLiteral("oa{sv}"));
+
+    // Non-conforming emission: cannot produce the declared shape → warn +
+    // skip (no wire signal, count unchanged).
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral(
+                             ".*signal StateChanged arg 0 cannot produce declared type.*")));
+    emit adaptor.StateChanged(QVariant(5), QVariant(6));
+    QTest::qWait(500);
+    QCOMPARE(catcher.count, 1);
+}
+
+// A11 — attach-set and XML-set parity: >5-param signals are neither relayed
+// nor ADVERTISED (pre-fix XML advertised what the relay refused); qml*
+// -prefixed signals are neither relayed nor advertised.
+void TestDBusAdaptor::testAttachXmlSetParity() {
+    DeclaredSignalAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.AttachParity"));
+    adaptor.setPath(QStringLiteral("/AttachParity"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.AttachParity"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusMessage intro = QDBusConnection::sessionBus().call(
+        QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.AttachParity"), QStringLiteral("/AttachParity"),
+            QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect")),
+        QDBus::Block, 3000);
+    QCOMPARE(intro.type(), QDBusMessage::ReplyMessage);
+    const QString xml = intro.arguments().first().toString();
+    QVERIFY2(!xml.contains(QStringLiteral("SixArgs")), qPrintable(xml));
+    QVERIFY2(!xml.contains(QStringLiteral("QmlPing")), qPrintable(xml));
+
+    // The qml* signal is not relayed either.
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.AttachParity"), QStringLiteral("/AttachParity"),
+                        QStringLiteral("org.dbusqml.AttachParity"), QStringLiteral("QmlPing"),
+                        &catcher, SLOT(onSignal(QDBusMessage))));
+    emit adaptor.qmlPing(QVariant(1));
+    QTest::qWait(500);
+    QCOMPARE(catcher.count, 0);
 }
 
 // The 0.6.0 heuristic removal: a `{value: 42}` dict is a REAL dict on the

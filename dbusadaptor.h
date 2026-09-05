@@ -59,6 +59,10 @@ public:
     void setSignatures(const QVariantMap &v);
 
     QVariantMap signalSpecs() const { return m_signals; }
+
+    // A6: declared per-arg types for a signal (_signals → catalog), for
+    // emission-side marshaling (relay + emitSignal). Empty = undeclared.
+    Q_INVOKABLE QStringList declaredSignalTypes(const QString &name) const;
     void setSignalSpecs(const QVariantMap &v);
 
     QVariantMap memberAliases() const { return m_members; }
