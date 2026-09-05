@@ -45,45 +45,50 @@ public:
         : QObject(parent), m_adaptor(adaptor), m_name(signalName) {}
 
 public slots:
-    void forward() {
-        QDBusMessage msg =
-            QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        busConn().send(msg);
-    }
-    void forward(QVariant a0) {
-        QDBusMessage msg =
-            QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        msg.setArguments({toDbusVariant(a0)});
-        busConn().send(msg);
-    }
-    void forward(QVariant a0, QVariant a1) {
-        QDBusMessage msg =
-            QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        msg.setArguments({toDbusVariant(a0), toDbusVariant(a1)});
-        busConn().send(msg);
-    }
+    void forward() { sendArgs({}); }
+    void forward(QVariant a0) { sendArgs({std::move(a0)}); }
+    void forward(QVariant a0, QVariant a1) { sendArgs({std::move(a0), std::move(a1)}); }
     void forward(QVariant a0, QVariant a1, QVariant a2) {
-        QDBusMessage msg =
-            QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        msg.setArguments({toDbusVariant(a0), toDbusVariant(a1), toDbusVariant(a2)});
-        busConn().send(msg);
+        sendArgs({std::move(a0), std::move(a1), std::move(a2)});
     }
     void forward(QVariant a0, QVariant a1, QVariant a2, QVariant a3) {
-        QDBusMessage msg =
-            QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        msg.setArguments(
-            {toDbusVariant(a0), toDbusVariant(a1), toDbusVariant(a2), toDbusVariant(a3)});
-        busConn().send(msg);
+        sendArgs({std::move(a0), std::move(a1), std::move(a2), std::move(a3)});
     }
     void forward(QVariant a0, QVariant a1, QVariant a2, QVariant a3, QVariant a4) {
-        QDBusMessage msg =
-            QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
-        msg.setArguments({toDbusVariant(a0), toDbusVariant(a1), toDbusVariant(a2),
-                          toDbusVariant(a3), toDbusVariant(a4)});
-        busConn().send(msg);
+        sendArgs({std::move(a0), std::move(a1), std::move(a2), std::move(a3), std::move(a4)});
     }
 
 private:
+    // C0 relay guard (the last unguarded value-bearing send site): unwrap
+    // QJSValue-carrying args, mirror emitSignal's wireMarshalable warn+skip
+    // (signals have no error-reply channel — an unmarshalable arg would kill
+    // the connection), and log send failures instead of dropping them.
+    void sendArgs(QVariantList raw) {
+        for (QVariant &a : raw) {
+            if (a.userType() == qMetaTypeId<QJSValue>())
+                a = qjsValueToVariant(a.value<QJSValue>());
+        }
+        QVariantList args;
+        args.reserve(raw.size());
+        for (const QVariant &a : raw)
+            args.append(toDbusVariant(a));
+        for (const QVariant &a : args) {
+            if (!wireMarshalable(a)) {
+                qWarning("dbusqml: signal %s arg is not marshalable (type %s) — skipping send",
+                         qPrintable(m_name), QMetaType(a.userType()).name());
+                return;
+            }
+        }
+        QDBusMessage msg =
+            QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
+        if (!args.isEmpty())
+            msg.setArguments(args);
+        QDBusConnection conn = busConn();
+        if (!conn.send(msg))
+            qWarning("dbusqml: signal %s send failed: %s", qPrintable(m_name),
+                     qPrintable(conn.lastError().message()));
+    }
+
     QDBusConnection busConn() const {
         return m_adaptor->connection() ? static_cast<QDBusConnection>(*m_adaptor->connection())
                                        : QDBusConnection::sessionBus();

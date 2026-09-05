@@ -303,6 +303,9 @@ private slots:
     void testPropertyGadgetQml();
     void testPropertyGuardIntrospection();
 
+    // C0 relay guard (fix-parity): relayed signal args are guarded.
+    void testRelayGuardSkipsUnmarshalable();
+
     // {value:} heuristic removal pins (0.6.0 wire change).
     void testValueKeyDictIsRealDict();
 
@@ -2605,6 +2608,57 @@ void TestDBusAdaptor::testPropertyGuardIntrospection() {
     QDBusMessage pingReply = bus.call(ping, QDBus::Block, 3000);
     QCOMPARE(pingReply.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(pingReply.arguments().first().toString(), QStringLiteral("pong"));
+}
+
+// C0 — relay guard: a QML-declared value signal relayed with unmarshalable
+// args must warn, skip the send, and leave the service alive. The kill
+// itself was observed pre-fix in a timeboxed qmltestrunner subprocess
+// (0.5.2 protocol) — the JS-function poison killed the connection.
+void TestDBusAdaptor::testRelayGuardSkipsUnmarshalable() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.RelayGuard'\n"
+                                        "  path: '/RelayGuard'\n"
+                                        "  iface: 'org.dbusqml.RelayGuard'\n"
+                                        "  property var poisonObject: QtObject {}\n"
+                                        "  property var poisonFunction: () => {}\n"
+                                        "  signal out(var v)\n"
+                                        "  function ping() { return 'pong' }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    // Baseline: the service answers over the wire.
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.RelayGuard"), QStringLiteral("/RelayGuard"),
+                          QStringLiteral("org.dbusqml.RelayGuard"), QStringLiteral("Ping"), {});
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QVERIFY2(!w->isError(), qPrintable(w->error().message()));
+    delete w;
+
+    // Emit the poisons through the relay: each warns + skips the send.
+    const QVariant objPoison = adaptor->property("poisonObject");
+    const QVariant fnPoison = adaptor->property("poisonFunction");
+    QVERIFY(objPoison.isValid());
+    QVERIFY(fnPoison.isValid());
+    QTest::ignoreMessage(
+        QtWarningMsg,
+        QRegularExpression(QStringLiteral(".*signal Out arg is not marshalable.*skipping send.*")));
+    QVERIFY(QMetaObject::invokeMethod(adaptor, "out", Q_ARG(QVariant, objPoison)));
+    QTest::ignoreMessage(
+        QtWarningMsg,
+        QRegularExpression(QStringLiteral(".*signal Out arg is not marshalable.*skipping send.*")));
+    QVERIFY(QMetaObject::invokeMethod(adaptor, "out", Q_ARG(QVariant, fnPoison)));
+
+    // Service alive: the follow-up wire call still answers.
+    w = asyncCallDeferred(QStringLiteral("org.dbusqml.RelayGuard"), QStringLiteral("/RelayGuard"),
+                          QStringLiteral("org.dbusqml.RelayGuard"), QStringLiteral("Ping"), {});
+    QSignalSpy spy2(w, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy2.wait(5000));
+    QVERIFY2(!w->isError(), qPrintable(w->error().message()));
+    QCOMPARE(w->reply().arguments().first().toString(), QStringLiteral("pong"));
+    delete w;
 }
 
 // The 0.6.0 heuristic removal: a `{value: 42}` dict is a REAL dict on the
