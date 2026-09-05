@@ -192,6 +192,93 @@ signals:
     void signalPong(const QString &data);
 };
 
+// Manual property server for the PropertiesChanged protocol tests (A2/A3/A16):
+// Introspect declares the properties; Get/GetAll/Set/Bump are fully manual so
+// the test can change the value WITHOUT any emission (the invalidation scenario).
+class PropertyServerObject : public QDBusVirtualObject {
+    Q_OBJECT
+
+public:
+    explicit PropertyServerObject(QObject *parent = nullptr) : QDBusVirtualObject(parent) {}
+
+    QString introspect(const QString &) const override {
+        QString xml = QStringLiteral("<node><interface name=\"") + s_iface +
+                      QStringLiteral("\">"
+                                     "<method name=\"Bump\"/>"
+                                     "<property name=\"Level\" type=\"u\" access=\"readwrite\"/>");
+        if (s_declarePayload)
+            xml +=
+                QStringLiteral("<property name=\"PayloadLevel\" type=\"u\" access=\"readwrite\"/>");
+        xml += QStringLiteral("</interface></node>");
+        return xml;
+    }
+
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.interface() == QLatin1String("org.dbusqml.PcServer") &&
+            msg.member() == QLatin1String("Bump")) {
+            s_level = 999u;
+            conn.send(msg.createReply());
+            return true;
+        }
+        if (msg.interface() != QLatin1String("org.freedesktop.DBus.Properties"))
+            return false;
+        if (msg.member() == QLatin1String("GetAll")) {
+            QVariantMap props;
+            props[QStringLiteral("Level")] = s_level;
+            if (s_declarePayload && s_servePayload)
+                props[QStringLiteral("PayloadLevel")] = 1u;
+            conn.send(msg.createReply({QVariant::fromValue(props)}));
+            return true;
+        }
+        if (msg.member() == QLatin1String("Get")) {
+            const QString prop = msg.arguments().at(1).toString();
+            if (prop == QLatin1String("Level")) {
+                conn.send(msg.createReply({QVariant::fromValue(QDBusVariant(QVariant(s_level)))}));
+                return true;
+            }
+            return false; // unknown property → error reply
+        }
+        if (msg.member() == QLatin1String("Set")) {
+            s_lastSetProp = msg.arguments().at(1).toString();
+            conn.send(msg.createReply());
+            return true;
+        }
+        return false;
+    }
+
+    static uint s_level;
+    static QString s_lastSetProp;
+    static QString s_iface;
+    static bool s_declarePayload;
+    static bool s_servePayload;
+};
+uint PropertyServerObject::s_level = 7u;
+QString PropertyServerObject::s_lastSetProp;
+QString PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServer");
+bool PropertyServerObject::s_declarePayload = false;
+bool PropertyServerObject::s_servePayload = false;
+
+// Organic QML adaptor helper (adaptor↔proxy E2E) — local twin of
+// test_dbusadaptor.cpp's createQmlAdaptor.
+static QObject *createPcQmlAdaptor(const QByteArray &qmlSrc) {
+    static QQmlEngine *engine = nullptr;
+    if (!engine) {
+        engine = new QQmlEngine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine->addImportPath(binDir.path());
+        engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    }
+    QQmlComponent component(engine);
+    component.setData(qmlSrc, QUrl());
+    if (!component.isReady()) {
+        qWarning() << "component errors:" << component.errorString();
+        return nullptr;
+    }
+    QObject *adaptor = component.create();
+    QTest::qWait(300);
+    return adaptor;
+}
+
 // Late-start recovery provider: registered AFTER the proxy under test is
 // already watching for it (the service-restart scenario).
 class LateService : public QObject {
@@ -450,6 +537,125 @@ private slots:
         QVERIFY2(!reply->isError(), qPrintable(reply->error().message()));
         QCOMPARE(reply->value().toString(), QStringLiteral("hello"));
         delete reply;
+    }
+
+    // ---- Client PropertiesChanged protocol (A2/A3/A16, fix-parity) ----
+
+    void testProxyIgnoresForeignPropertiesChanged() {
+        // A2: a PropertiesChanged carrying a DIFFERENT interface argument at
+        // the same path must not contaminate this proxy's map (Nemo/
+        // Quickshell precedent). Positive control: the adaptor's own
+        // PropertiesChanged (organic emitter) DOES update the proxy.
+        QObject *adaptor = createPcQmlAdaptor("import DBus 1.0\n"
+                                              "DBusAdaptor {\n"
+                                              "  service: 'org.dbusqml.PcE2e'\n"
+                                              "  path: '/PcE2e'\n"
+                                              "  iface: 'org.dbusqml.PcE2e'\n"
+                                              "  property int level: 7\n"
+                                              "  function ping() { return 'pong' }\n"
+                                              "}");
+        QVERIFY(adaptor != nullptr);
+
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.PcE2e"));
+        proxy.setPath(QStringLiteral("/PcE2e"));
+        proxy.setIface(QStringLiteral("org.dbusqml.PcE2e"));
+        proxy.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        QCOMPARE(proxy.property("level").toUInt(), 7u);
+
+        // Rogue: same path, right signal interface, WRONG interface argument.
+        QDBusMessage rogue = QDBusMessage::createSignal(
+            QStringLiteral("/PcE2e"), QStringLiteral("org.freedesktop.DBus.Properties"),
+            QStringLiteral("PropertiesChanged"));
+        rogue.setArguments({QVariant(QStringLiteral("org.freedesktop.SomeOtherIface")),
+                            QVariant(QVariantMap{{QStringLiteral("level"), 99u}}),
+                            QVariant(QStringList{})});
+        QVERIFY(QDBusConnection::sessionBus().send(rogue));
+        QTest::qWait(500);
+        QCOMPARE(proxy.property("level").toUInt(), 7u);
+
+        // Positive control: the adaptor's own change reaches the proxy.
+        adaptor->setProperty("level", 42);
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.property("level").toUInt(), 42u, 5000);
+    }
+
+    void testProxyRefetchesInvalidated() {
+        // A3/D3: the client must re-Get invalidated names (our own adaptor
+        // emits invalidated by design); on re-Get error the stale value is
+        // kept with one warning — never silently dropped, never silently kept.
+        auto *server = new PropertyServerObject();
+        QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/PcServer"),
+                                                                    server));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.PcServer")));
+
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.PcServer"));
+        proxy.setPath(QStringLiteral("/PcServer"));
+        proxy.setIface(QStringLiteral("org.dbusqml.PcServer"));
+        proxy.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        QCOMPARE(proxy.property("level").toUInt(), 7u);
+
+        // Change the value WITHOUT any emission, then invalidate.
+        QDBusMessage bump = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.PcServer"), QStringLiteral("/PcServer"),
+            QStringLiteral("org.dbusqml.PcServer"), QStringLiteral("Bump"));
+        QVERIFY(QDBusConnection::sessionBus().call(bump, QDBus::Block, 3000).type() ==
+                QDBusMessage::ReplyMessage);
+        QDBusMessage inv = QDBusMessage::createSignal(
+            QStringLiteral("/PcServer"), QStringLiteral("org.freedesktop.DBus.Properties"),
+            QStringLiteral("PropertiesChanged"));
+        inv.setArguments({QVariant(QStringLiteral("org.dbusqml.PcServer")), QVariant(QVariantMap{}),
+                          QVariant(QStringList{QStringLiteral("Level")})});
+        QVERIFY(QDBusConnection::sessionBus().send(inv));
+
+        // Re-Get fetches the new value (pre-fix: stale 7 forever).
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.property("level").toUInt(), 999u, 5000);
+
+        // Error path: an unknown invalidated name keeps the stale value and
+        // warns exactly once.
+        QDBusMessage inv2 = inv;
+        inv2.setArguments({QVariant(QStringLiteral("org.dbusqml.PcServer")),
+                           QVariant(QVariantMap{}),
+                           QVariant(QStringList{QStringLiteral("Ghost")})});
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
+                                               ".*re-fetch of Ghost after invalidation failed.*")));
+        QVERIFY(QDBusConnection::sessionBus().send(inv2));
+        QTest::qWait(500);
+        QCOMPARE(proxy.property("level").toUInt(), 999u);
+    }
+
+    void testProxyPlaceholderRecordsWireName() {
+        // A16: properties known only from live introspection must record the
+        // wire name at placeholder time — a write before GetAll backfills the
+        // map must go out under the wire name, not the camelCase fallback.
+        PropertyServerObject::s_declarePayload = true;
+        PropertyServerObject::s_servePayload = false; // GetAll stays empty
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServer2");
+        auto *server = new PropertyServerObject();
+        QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/PcServer2"),
+                                                                    server));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.PcServer2")));
+
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.PcServer2"));
+        proxy.setPath(QStringLiteral("/PcServer2"));
+        proxy.setIface(QStringLiteral("org.dbusqml.PcServer2"));
+        proxy.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        QVERIFY(proxy.property("payloadLevel").isNull());
+
+        PropertyServerObject::s_lastSetProp.clear();
+        // A dynamic-key write through the METAOBJECT is the QML-assignment
+        // path — it routes into updateValue (the Q_INVOKABLE setProperty
+        // overload would use the name verbatim instead).
+        QVERIFY(static_cast<QObject &>(proxy).setProperty("payloadLevel", 5u));
+        QTest::qWait(500);
+        QCOMPARE(PropertyServerObject::s_lastSetProp, QStringLiteral("PayloadLevel"));
+        PropertyServerObject::s_declarePayload = false;
     }
 
     void testDBusProperties() {

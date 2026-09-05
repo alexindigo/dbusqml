@@ -583,12 +583,29 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
             unwrapped.append(unwrapDbus(arg));
         emit signalReceived(msg.member(), unwrapped);
 
-        if (msg.member() == "PropertiesChanged" && msg.arguments().size() >= 2) {
-            QVariantMap changed = qdbus_cast<QVariantMap>(msg.arguments()[1]);
-            for (auto it = changed.begin(); it != changed.end(); ++it) {
-                QString qmlName = dbusPropToQml(it.key());
-                m_qmlToDbusName.insert(qmlName, it.key());
-                insert(qmlName, unwrapDbus(it.value()));
+        if (msg.member() == "PropertiesChanged") {
+            // A2: the interface argument decides — a co-located adaptor's
+            // PropertiesChanged at the same path must not contaminate this
+            // proxy's map (Nemo/Quickshell precedent).
+            if (msg.interface() != QLatin1String("org.freedesktop.DBus.Properties"))
+                return;
+            if (msg.arguments().isEmpty() || msg.arguments().first().toString() != m_iface)
+                return;
+            if (msg.arguments().size() >= 2) {
+                QVariantMap changed = qdbus_cast<QVariantMap>(msg.arguments()[1]);
+                for (auto it = changed.begin(); it != changed.end(); ++it) {
+                    QString qmlName = dbusPropToQml(it.key());
+                    m_qmlToDbusName.insert(qmlName, it.key());
+                    insert(qmlName, unwrapDbus(it.value()));
+                }
+            }
+            // A3/D3: invalidated_properties re-Get — the client re-fetches
+            // each name; on error the stale value is kept with one warning
+            // (never silently dropped, never silently stale).
+            if (msg.arguments().size() >= 3) {
+                const QStringList invalidated = qdbus_cast<QStringList>(msg.arguments()[2]);
+                if (!invalidated.isEmpty())
+                    refetchInvalidated(invalidated);
             }
         }
     }
@@ -720,8 +737,11 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
     // when GetAll/PropertiesChanged arrive. Without this, properties
     // auto-created by the engine resolve to invalid QVariant (undefined)
     // and never re-evaluate when the real value is later inserted.
+    // A16: the wire name is recorded HERE — a write before GetAll backfills
+    // the map must go out under the wire name, not the camelCase fallback.
     for (const QString &propName : std::as_const(propertyNames)) {
         QString qmlName = dbusPropToQml(propName);
+        m_qmlToDbusName.insert(qmlName, propName);
         if (!contains(qmlName))
             insert(qmlName, QVariant::fromValue(nullptr));
     }
@@ -736,6 +756,32 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
         m_status = Ready;
         emit statusChanged();
         emit introspectionCompleted();
+    }
+}
+
+// A3/D3: re-Get invalidated property names. Success → the fresh value is
+// inserted; error → the stale value is kept and one warning is emitted.
+void DBusProxy::refetchInvalidated(const QStringList &names) {
+    for (const QString &wireName : names) {
+        const QString service = m_service;
+        QDBusMessage msg = QDBusMessage::createMethodCall(m_service, m_path,
+                                                          "org.freedesktop.DBus.Properties", "Get");
+        msg.setArguments({m_iface, wireName});
+        auto pending = m_bus.asyncCall(msg, m_callTimeout);
+        auto *watcher = new QDBusPendingCallWatcher(pending, this);
+        connect(watcher, &QDBusPendingCallWatcher::finished, this,
+                [this, wireName, service](QDBusPendingCallWatcher *w) {
+                    QDBusPendingReply<QVariant> reply = *w;
+                    if (reply.isError()) {
+                        qWarning("dbusqml: re-fetch of %s after invalidation failed: %s",
+                                 qPrintable(wireName), qPrintable(reply.error().message()));
+                    } else if (service == m_service) {
+                        const QString qmlName = dbusPropToQml(wireName);
+                        m_qmlToDbusName.insert(qmlName, wireName);
+                        insert(qmlName, unwrapDbus(reply.value()));
+                    }
+                    w->deleteLater();
+                });
     }
 }
 

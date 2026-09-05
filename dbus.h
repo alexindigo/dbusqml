@@ -148,6 +148,10 @@ private:
     bool m_signalsConnected = false;
     bool m_signalsEnabled = true;
     int m_callTimeout = -1;
+    // A3/D3: re-Get invalidated property names after a PropertiesChanged
+    // carrying invalidated_properties (stale kept + one warning on error).
+    void refetchInvalidated(const QStringList &names);
+
     // Idempotent service-watcher readiness: create-or-rewire on the CURRENT
     // bus and (re-)run the initial NameHasOwner check. Safe from any entry
     // point in any order — componentComplete() backfills whatever the
