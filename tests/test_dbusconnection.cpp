@@ -511,6 +511,26 @@ private slots:
         close(valid[1]);
     }
 
+    void testProxyDestroyWithPendingCalls() {
+        // P4 verification: pending-call watchers are parented to the proxy —
+        // destroying the proxy mid-flight must not deliver callbacks after
+        // free (no crash, no use-after-destroy).
+        auto *proxy = new DBusProxy;
+        proxy->setService(QStringLiteral("org.dbusqml.TestService"));
+        proxy->setPath(QStringLiteral("/TestService"));
+        proxy->setIface(QStringLiteral("org.dbusqml.TestService"));
+        auto *reply = proxy->call(QStringLiteral("echoString"), {QVariant(QStringLiteral("x"))});
+        QVERIFY(reply != nullptr);
+        delete proxy; // the pending reply + watcher die with the proxy
+        // Pump the event loop hard — a use-after-destroy would crash here.
+        for (int i = 0; i < 50; ++i) {
+            QCoreApplication::processEvents();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+            QTest::qWait(10);
+        }
+        QVERIFY(true); // reached without a crash
+    }
+
     void testSetPropertyConversionParity() {
         // B12: setProperty converts gadget values before the marshalable
         // guard — parity with updateValue (pre-fix: DBus.* gadgets dropped).

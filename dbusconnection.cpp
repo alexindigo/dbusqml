@@ -1153,6 +1153,9 @@ void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resol
     QPointer<QQmlEngine> engine = qmlEngine(this);
     connect(reply, &DBusPendingReply::finished, this,
             [reply, resolve = QJSValue(resolve), reject = QJSValue(reject), engine]() mutable {
+                // P6: user callbacks run in the JS world — a thrown
+                // exception from one is a QJSValue result, not a crash, but
+                // dropping it silently violates the loud contract.
                 if (reply->isError()) {
                     if (reject.isCallable()) {
                         QJSValue errObj;
@@ -1165,13 +1168,19 @@ void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resol
                         } else {
                             errObj = QJSValue(reply->error().message());
                         }
-                        reject.call({errObj});
+                        QJSValue thrown = reject.call({errObj});
+                        if (thrown.isError())
+                            qWarning("dbusqml: asyncCall reject callback threw: %s",
+                                     qPrintable(thrown.toString()));
                     }
                 } else if (resolve.isCallable()) {
                     QVariant unwrapped = unwrapDbus(reply->value());
                     QJSValue val = engine ? variantToJs(engine.data(), unwrapped)
                                           : QJSValue(reply->value().toString());
-                    resolve.call({val});
+                    QJSValue thrown = resolve.call({val});
+                    if (thrown.isError())
+                        qWarning("dbusqml: asyncCall resolve callback threw: %s",
+                                 qPrintable(thrown.toString()));
                 }
             });
 }
