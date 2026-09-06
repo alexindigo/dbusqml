@@ -130,7 +130,14 @@ QJSValue variantToJs(QQmlEngine *engine, const QVariant &v) {
 // Read a single element from a QDBusArgument using the correct type
 // based on the current signature. Avoids operator>>(QDBusArgument,
 // QVariant) which crashes inside libdbus inside nested containers.
-static QVariant readBySignature(const QDBusArgument &arg) {
+static QVariant readBySignature(const QDBusArgument &arg, int depth = 0) {
+    // B1: recursion depth cap 32 (Nemo precedent) — remote signature data
+    // flows into these walkers verbatim; unbounded recursion would exhaust
+    // the stack. Over the cap: warn + loud fail (never silent).
+    if (depth > 32) {
+        qWarning("dbusqml: readBySignature: recursion depth cap (32) exceeded — failing loud");
+        return {};
+    }
     const QString sig = arg.currentSignature();
 
     // Basic types — single char signatures
@@ -321,8 +328,8 @@ static QVariant readBySignature(const QDBusArgument &arg) {
         arg.beginMap();
         while (!arg.atEnd()) {
             arg.beginMapEntry();
-            QVariant key = readBySignature(arg);
-            QVariant value = readBySignature(arg);
+            QVariant key = readBySignature(arg, depth + 1);
+            QVariant value = readBySignature(arg, depth + 1);
             map.insert(key.toString(), unwrapDbus(value));
             arg.endMapEntry();
         }
@@ -334,7 +341,7 @@ static QVariant readBySignature(const QDBusArgument &arg) {
         QVariantList out;
         arg.beginArray();
         while (!arg.atEnd())
-            out.append(readBySignature(arg));
+            out.append(readBySignature(arg, depth + 1));
         arg.endArray();
         return out;
     }
@@ -366,7 +373,7 @@ static QVariant readBySignature(const QDBusArgument &arg) {
         QVariantList out;
         arg.beginArray();
         while (!arg.atEnd())
-            out.append(readBySignature(arg));
+            out.append(readBySignature(arg, depth + 1));
         arg.endArray();
         return out;
     }
@@ -375,7 +382,7 @@ static QVariant readBySignature(const QDBusArgument &arg) {
         QVariantList members;
         arg.beginStructure();
         while (!arg.atEnd())
-            members.append(readBySignature(arg));
+            members.append(readBySignature(arg, depth + 1));
         arg.endStructure();
         return members;
     }
@@ -671,7 +678,13 @@ static QMetaType metaTypeForSignature(const QString &sig) {
 // writable QDBusArgument — the write-side mirror of readBySignature.
 // Returns false when `sig` cannot be produced via public QtDBus primitives
 // (e.g. arrays of anonymous structs, which need a registered carrier type).
-static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const QVariant &value) {
+static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const QVariant &value,
+                                  int depth = 0) {
+    if (depth > 32) {
+        qWarning("dbusqml: writeValueBySignature: recursion depth cap (32) exceeded — failing "
+                 "loud");
+        return false;
+    }
     // Unwrap DBus.* gadgets nested in the value before walking. toDbusVariant
     // recurses QVariantMap and DBus::Struct payloads; list/array elements are
     // unwrapped as we recurse per element below.
@@ -780,7 +793,7 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
             if (memberSig.isEmpty())
                 return false;
             const QVariant mv = mi < members.size() ? members.at(mi) : QVariant();
-            if (!writeValueBySignature(arg, memberSig, mv))
+            if (!writeValueBySignature(arg, memberSig, mv, depth + 1))
                 return false;
             ++mi;
         }
@@ -804,9 +817,9 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
             const QVariantMap map = v.toMap();
             for (auto it = map.begin(); it != map.end(); ++it) {
                 arg.beginMapEntry();
-                if (!writeValueBySignature(arg, keySig, QVariant(it.key())))
+                if (!writeValueBySignature(arg, keySig, QVariant(it.key()), depth + 1))
                     return false;
-                if (!writeValueBySignature(arg, valSig, it.value()))
+                if (!writeValueBySignature(arg, valSig, it.value(), depth + 1))
                     return false;
                 arg.endMapEntry();
             }
@@ -819,7 +832,7 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
         arg.beginArray(eMt);
         const QVariantList list = v.toList();
         for (const QVariant &e : list) {
-            if (!writeValueBySignature(arg, elemSig, e))
+            if (!writeValueBySignature(arg, elemSig, e, depth + 1))
                 return false;
         }
         arg.endArray();
@@ -931,7 +944,11 @@ QVariant marshalBySignature(const QString &sig, const QVariant &value) {
         sig.startsWith(QLatin1Char('{')))
         return marshalContainerBySignature(sig, value);
 
-    // Unrecognized — fall back to inference.
+    // Unrecognized — fall back to inference. B10: LOUD (the container twin
+    // already warns) — a declared signature is never silently ignored.
+    qWarning("dbusqml: marshalBySignature: unrecognized signature '%s' — falling back to "
+             "inference",
+             qPrintable(sig));
     return toDbusVariant(value);
 }
 
@@ -1036,8 +1053,14 @@ static QDBusMessage toQDBusMessage(const DBusMessage &msg) {
             int pos = 0;
             for (int i = 0; i < args.size() && pos < sig.size(); ++i) {
                 QString argSig = firstCompleteType(sig, pos);
-                if (argSig.isEmpty())
+                if (argSig.isEmpty()) {
+                    // B10: a signature that breaks mid-parse is LOUD — the
+                    // remaining args fall back to inference visibly.
+                    qWarning("dbusqml: message signature '%s' breaks mid-parse at arg %d — "
+                             "remaining args fall back to inference",
+                             qPrintable(sig), i);
                     break;
+                }
                 args[i] = marshalBySignature(argSig, args[i]);
             }
         } else {

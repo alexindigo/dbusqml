@@ -97,6 +97,53 @@ signals:
     void qmlPing(QVariant v); // qml* prefix
 };
 
+// A14 host: a C++-declared upper-runs property (QML cannot declare these).
+class RunsFoldAdaptor : public DBusAdaptor {
+    Q_OBJECT
+    Q_PROPERTY(QString XMLConfig READ xmlConfig WRITE setXmlConfig NOTIFY xmlConfigChanged)
+public:
+    explicit RunsFoldAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+    QString xmlConfig() const { return m_value; }
+    void setXmlConfig(const QString &v) {
+        m_value = v;
+        emit xmlConfigChanged();
+    }
+    QString m_value = QStringLiteral("hi");
+signals:
+    void xmlConfigChanged();
+};
+
+// A15 host: a C++-typed QObject* property (XML-excluded; QML `var` props are
+// advertised "v").
+class QObjPropAdaptor : public DBusAdaptor {
+    Q_OBJECT
+    Q_PROPERTY(QObject *holder READ holder NOTIFY holderChanged)
+public:
+    explicit QObjPropAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+    QObject *holder() const { return m_holder; }
+    void setHolder(QObject *h) {
+        m_holder = h;
+        emit holderChanged();
+    }
+    QObject *m_holder = nullptr;
+signals:
+    void holderChanged();
+};
+
+// B7 fixture: a C++ slot whose QVariant→parameter conversion FAILS.
+struct Unconvertible {
+    int x = 0;
+};
+Q_DECLARE_METATYPE(Unconvertible)
+
+class InvokeFailAdaptor : public DBusAdaptor {
+    Q_OBJECT
+public:
+    explicit InvokeFailAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+public slots:
+    void takesThing(const Unconvertible &t) { Q_UNUSED(t) }
+};
+
 // QVariant-typed method — the C++ dispatch path (invokeMethod) passes call args
 // as QVariant, so only QVariant-typed Q_INVOKABLEs/slots are wire-callable.
 class VariantEchoAdaptor : public DBusAdaptor {
@@ -347,6 +394,15 @@ private slots:
     void testCatalogPropertyTypes();
     void testMetaTypeSignatureGaps();
     void testLibraryMechanismSkips();
+
+    // Phase 7 (fix-parity): robustness + hygiene.
+    void testWalkerDepthCap();
+    void testInvokeFailureLoud();
+    void testErrorNameValidation();
+    void testAliasPrivateRefused();
+    void testAliasSignaturesKey();
+    void testClientFoldSetAccepted();
+    void testQObjectPropertySilent();
 
     // {value:} heuristic removal pins (0.6.0 wire change).
     void testValueKeyDictIsRealDict();
@@ -2655,6 +2711,179 @@ void TestDBusAdaptor::testPropertyGuardIntrospection() {
     QDBusMessage pingReply = bus.call(ping, QDBus::Block, 3000);
     QCOMPARE(pingReply.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(pingReply.arguments().first().toString(), QStringLiteral("pong"));
+}
+
+// B1 — recursion depth cap 32 (Nemo precedent): a pathological signature
+// fails LOUD (warning + invalid result) instead of unbounded recursion; the
+// same shape within the cap still works.
+void TestDBusAdaptor::testWalkerDepthCap() {
+    const int over = 40;
+    QString overSig;
+    for (int i = 0; i < over; ++i)
+        overSig += QStringLiteral("(");
+    overSig += QStringLiteral("i");
+    for (int i = 0; i < over; ++i)
+        overSig += QStringLiteral(")");
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*recursion depth.*")));
+    QVariant overPayload = writeBySignature(overSig, QVariant(5));
+    QVERIFY2(!overPayload.isValid(), qPrintable(overSig));
+
+    QString okSig;
+    for (int i = 0; i < 10; ++i)
+        okSig += QStringLiteral("(");
+    okSig += QStringLiteral("i");
+    for (int i = 0; i < 10; ++i)
+        okSig += QStringLiteral(")");
+    QVariant okPayload = writeBySignature(okSig, QVariant(5));
+    QVERIFY(okPayload.isValid());
+}
+
+// B7 — a failed QMetaMethod::invoke is a LOUD Failed error reply, never a
+// silent empty success (the C++ typed-param conversion failure case).
+void TestDBusAdaptor::testInvokeFailureLoud() {
+    InvokeFailAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.InvokeFail"));
+    adaptor.setPath(QStringLiteral("/InvokeFail"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.InvokeFail"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.InvokeFail"), QStringLiteral("/InvokeFail"),
+        QStringLiteral("org.dbusqml.InvokeFail"), QStringLiteral("takesThing"));
+    m.setArguments({QVariant(QStringLiteral("x"))});
+    QDBusMessage reply = bus.call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+}
+
+// B11 — error names are validated before createErrorReply: a dotted-name
+// check that fails the D-Bus name grammar falls back to Failed with a
+// warning (an invalid name would abort at marshal / time the caller out).
+void TestDBusAdaptor::testErrorNameValidation() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import DBus 1.0 as DBusQML\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.BadErr'\n"
+                                        "  path: '/BadErr'\n"
+                                        "  iface: 'org.dbusqml.BadErr'\n"
+                                        "  function boom() {\n"
+                                        "    throw DBusQML.DBusUtils.error('nodot', 'bad name')\n"
+                                        "  }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QTest::ignoreMessage(
+        QtWarningMsg, QRegularExpression(QStringLiteral(".*invalid error name.*falling back.*")));
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.BadErr"), QStringLiteral("/BadErr"),
+        QStringLiteral("org.dbusqml.BadErr"), QStringLiteral("boom"));
+    QDBusMessage reply = bus.call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+}
+
+// A12/D2 — an alias targeting a PRIVATE property is refused everywhere:
+// attach-time warning, Get/Set/GetAll/XML all refuse. Privacy wins.
+void TestDBusAdaptor::testAliasPrivateRefused() {
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral(".*targets a private property.*")));
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.AliasPriv'\n"
+                                        "  path: '/AliasPriv'\n"
+                                        "  iface: 'org.dbusqml.AliasPriv'\n"
+                                        "  _members: ({ Pub: '_secret' })\n"
+                                        "  property var _secret: 1\n"
+                                        "  function ping() { return 'pong' }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.AliasPriv"), QStringLiteral("/AliasPriv"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    m.setArguments(
+        {QVariant(QStringLiteral("org.dbusqml.AliasPriv")), QVariant(QStringLiteral("Pub"))});
+    QDBusMessage reply = bus.call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+}
+
+// A13 — _signatures keyed by the ALIASED QML name are honored (the matched
+// alias is tried, not just wire+fold keys).
+void TestDBusAdaptor::testAliasSignaturesKey() {
+    QDBusMessage reply =
+        callQmlAdaptorMethod(QStringLiteral("org.dbusqml.AliasSig"), QStringLiteral("/AliasSig"),
+                             QStringLiteral("org.dbusqml.AliasSig"), QStringLiteral("BigEcho"), {},
+                             "import DBus 1.0\n"
+                             "DBusAdaptor {\n"
+                             "  service: 'org.dbusqml.AliasSig'\n"
+                             "  path: '/AliasSig'\n"
+                             "  iface: 'org.dbusqml.AliasSig'\n"
+                             "  _members: ({ BigEcho: 'doBigEcho' })\n"
+                             "  _signatures: ({ doBigEcho: 'x' })\n"
+                             "  function doBigEcho() { return '9007199254740993' }\n"
+                             "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QByteArrayLiteral("x"));
+    QCOMPARE(reply.arguments().first().toLongLong(), Q_INT64_C(9007199254740993));
+}
+
+// A14/D5 — lookup tolerance: a client-folded (upper-runs) property name is
+// accepted by Get/Set (both folds accepted on lookup; the shared fold impl).
+void TestDBusAdaptor::testClientFoldSetAccepted() {
+    RunsFoldAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.RunsFold"));
+    adaptor.setPath(QStringLiteral("/RunsFold"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.RunsFold"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.RunsFold"), QStringLiteral("/RunsFold"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Set"));
+    m.setArguments({QVariant(QStringLiteral("org.dbusqml.RunsFold")),
+                    QVariant(QStringLiteral("xmlConfig")),
+                    QVariant::fromValue(QDBusVariant(QStringLiteral("v2")))});
+    QDBusMessage reply = bus.call(m, QDBus::Block, 3000);
+    QVERIFY2(reply.type() == QDBusMessage::ReplyMessage,
+             qPrintable(reply.errorName() + ": " + reply.errorMessage()));
+    QCOMPARE(adaptor.xmlConfig(), QStringLiteral("v2"));
+
+    QDBusMessage g = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.RunsFold"), QStringLiteral("/RunsFold"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    g.setArguments(
+        {QVariant(QStringLiteral("org.dbusqml.RunsFold")), QVariant(QStringLiteral("xmlConfig"))});
+    QDBusMessage gr = bus.call(g, QDBus::Block, 3000);
+    QCOMPARE(gr.type(), QDBusMessage::ReplyMessage);
+}
+
+// A15 — a QObject*-typed property is never advertised (XML skips it) and its
+// relay must not attach either: no PropertiesChanged noise for a value the
+// wire can never carry.
+void TestDBusAdaptor::testQObjectPropertySilent() {
+    QObjPropAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.QObjProp"));
+    adaptor.setPath(QStringLiteral("/QObjProp"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.QObjProp"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.QObjProp"), QStringLiteral("/QObjProp"),
+                        QStringLiteral("org.freedesktop.DBus.Properties"),
+                        QStringLiteral("PropertiesChanged"), &catcher,
+                        SLOT(onSignal(QDBusMessage))));
+    adaptor.setHolder(new QObject(&adaptor));
+    QTest::qWait(500);
+    QCOMPARE(catcher.count, 0);
 }
 
 // C0 — relay guard: a QML-declared value signal relayed with unmarshalable

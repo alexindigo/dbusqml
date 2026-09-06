@@ -1,4 +1,5 @@
 #include "dbusadaptor.h"
+#include "dbusintrospection.h"
 #include "dbuscatalog.h"
 #include "dbusconnection.h" // wireMarshalable — shared marshal-boundary guard
 #include "dbusheldreply.h"
@@ -23,10 +24,10 @@
 // Same rule as the proxy's dbusPropToQml: fold only the first character.
 // QML forbids uppercase-initial method names, so a spec-faithful D-Bus
 // member like "ReadOne" is declared in QML as "readOne".
+// A14/D5: the SERVER fold (first character only) — the other documented
+// mode of the shared dbusFoldName.
 static QString dbusMemberToQml(const QString &name) {
-    if (name.isEmpty())
-        return name;
-    return name.at(0).toLower() + name.mid(1);
+    return dbusFoldName(name, false);
 }
 
 // Underscore-prefixed adaptor properties are library meta-config (e.g.
@@ -247,6 +248,18 @@ QDBusConnection DBusAdaptor::bus() const {
 }
 
 void DBusAdaptor::componentComplete() {
+    // A12/D2: an alias targeting a PRIVATE property is refused everywhere —
+    // privacy wins over the alias. Strip it at attach with a warning; the
+    // wire name then resolves to nothing (Get/Set/GetAll/XML all refuse).
+    for (auto it = m_members.begin(); it != m_members.end();) {
+        if (isPrivateProperty(it.value().toString())) {
+            qWarning("dbusqml: _members alias %s targets a private property — refused",
+                     qPrintable(it.key()));
+            it = m_members.erase(it);
+        } else {
+            ++it;
+        }
+    }
     if (m_iface.isEmpty())
         qmlInfo(this)
             << "DBusAdaptor: iface is empty — introspection XML will have an empty interface name";
@@ -297,6 +310,11 @@ void DBusAdaptor::componentComplete() {
         notifyIndexes.insert(ns.methodIndex());
         const QString pname = QString::fromLatin1(prop.name());
         if (isPrivateProperty(pname))
+            continue;
+        // A15: a QObject*-derived property is never advertised (no wire
+        // representation) — its relay must not attach either (no
+        // PropertiesChanged noise for a value GetAll can never serve).
+        if (prop.metaType().flags().testFlag(QMetaType::PointerToQObject))
             continue;
         if (pname == QStringLiteral("objectName") || pname == QStringLiteral("service") ||
             pname == QStringLiteral("path") || pname == QStringLiteral("iface") ||
@@ -735,9 +753,15 @@ QStringList DBusAdaptor::candidateQmlNames(const QString &wireName) const {
     if (!aliased.isEmpty())
         candidates << aliased;
     candidates << wireName;
+    // A14/D5: both folds accepted on lookup — the server mode (first char)
+    // and the client mode (upper-runs collapse). A client-folded key ("url"
+    // for URL, "xmlConfig" for XMLConfig) must resolve to the same member.
     const QString folded = dbusMemberToQml(wireName);
     if (!folded.isEmpty() && folded != wireName)
         candidates << folded;
+    const QString runsFolded = dbusFoldName(wireName, true);
+    if (!runsFolded.isEmpty() && runsFolded != wireName && !candidates.contains(runsFolded))
+        candidates << runsFolded;
     return candidates;
 }
 
@@ -786,6 +810,13 @@ QStringList DBusAdaptor::declaredOutTypes(const QString &member, bool *found) co
     auto it = m_signatures.constFind(member);
     if (it == m_signatures.constEnd())
         it = m_signatures.constFind(qmlMember);
+    if (it == m_signatures.constEnd()) {
+        // A13: the matched ALIAS name is tried too (a _signatures key
+        // carrying the aliased QML name was silently ignored).
+        const QString aliased = m_members.value(member).toString();
+        if (!aliased.isEmpty())
+            it = m_signatures.constFind(aliased);
+    }
     if (it != m_signatures.constEnd()) {
         if (found)
             *found = true; // A7: declared (possibly empty = declared-void)
@@ -794,8 +825,14 @@ QStringList DBusAdaptor::declaredOutTypes(const QString &member, bool *found) co
         int pos = 0;
         while (pos < sig.size()) {
             const QString argSig = firstCompleteType(sig, pos);
-            if (argSig.isEmpty())
+            if (argSig.isEmpty()) {
+                // B10: a declared signature that breaks mid-parse is LOUD
+                // (the proxy's twin already is); the parsed prefix stands.
+                qWarning("dbusqml: declared signature '%s' for %s breaks mid-parse — partial "
+                         "out-args used",
+                         qPrintable(sig), qPrintable(member));
                 break;
+            }
             out << argSig;
         }
         return out;
@@ -862,7 +899,11 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
                 const QString name = QString::fromLatin1(prop.name());
-                if (!propCandidates.contains(name))
+                // A14/D5: both folds accepted on lookup — a client-folded
+                // ("xmlConfig") and server-folded ("xMLConfig") wire name
+                // both resolve to the QML property XMLConfig.
+                if (!propCandidates.contains(name) &&
+                    dbusFoldName(name, true) != dbusFoldName(propName, true))
                     continue;
                 QVariant val = prop.read(this);
                 if (val.userType() == qMetaTypeId<QJSValue>())
@@ -931,11 +972,14 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             }
             QVariant value = unwrapDbus(args[2]);
             // A2: same dual lookup as Get — exact QML name, then folded wire name.
+            // A14/D5: both folds accepted on lookup (client vs server fold).
             const QStringList propCandidates = candidateQmlNames(propName);
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
                 const QString name = QString::fromLatin1(prop.name());
-                if (!propCandidates.contains(name) || !prop.isWritable())
+                if ((!propCandidates.contains(name) &&
+                     dbusFoldName(name, true) != dbusFoldName(propName, true)) ||
+                    !prop.isWritable())
                     continue;
                 // C1: a failed write is a caller error — reply InvalidArgs with
                 // the property unchanged, not a silent empty success (the
@@ -1056,8 +1100,10 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                     const QJSValue marker = result.property(QStringLiteral("dbusError"));
                     if (marker.isUndefined() || marker.isNull() || !marker.toBool())
                         return false;
+                    // A name that fails the grammar still shapes as an error
+                    // throw — B11's validation falls back to Failed for it.
                     const QJSValue n = result.property(QStringLiteral("name"));
-                    return n.isString() && n.toString().contains(QLatin1Char('.'));
+                    return n.isString();
                 }();
                 if (result.isError() || thrownErrorShape) {
                     // S2: named error replies from handlers. A thrown value
@@ -1073,8 +1119,36 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                     const QJSValue msgVal = result.property(QStringLiteral("message"));
                     if (nameVal.isString()) {
                         const QString n = nameVal.toString();
-                        if (n.contains(QLatin1Char('.'))) {
+                        // B11: the name must satisfy the D-Bus error-name
+                        // grammar (dot-separated identifiers, each starting
+                        // with a letter or underscore). An invalid name would
+                        // fail at reply marshal — the caller would just time
+                        // out. Fall back to Failed with a warning.
+                        const bool validName = [n]() {
+                            const QStringList parts = n.split(QLatin1Char('.'));
+                            if (parts.size() < 2)
+                                return false;
+                            for (const QString &p : parts) {
+                                if (p.isEmpty() || !p.at(0).isLetter())
+                                    return false;
+                                for (const QChar &c : p) {
+                                    if (!(c.isLetterOrNumber() || c == QLatin1Char('_')))
+                                        return false;
+                                }
+                            }
+                            return true;
+                        }();
+                        if (validName) {
                             errorName = n;
+                            if (msgVal.isString())
+                                errorMessage = msgVal.toString();
+                        } else if (n.contains(QLatin1Char('.')) || thrownErrorShape) {
+                            // B11: a THROWER-declared named error with bad
+                            // grammar warns + falls back; a plain JS Error
+                            // ("Error") is not a named error — silent Failed.
+                            qWarning("dbusqml: invalid error name '%s' — falling back to "
+                                     "org.freedesktop.DBus.Error.Failed",
+                                     qPrintable(n));
                             if (msgVal.isString())
                                 errorMessage = msgVal.toString();
                         }
@@ -1215,6 +1289,18 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             if (retVal.isValid()) {
                 qWarning("dbusqml: handler return value ignored when holdReply() was called");
             }
+            return true;
+        }
+
+        // B7: a failed QMetaMethod::invoke is a LOUD Failed error reply —
+        // an unchecked invoke used to send a silent EMPTY SUCCESS reply
+        // (invalid retVal) for C++-typed handlers whose conversion failed.
+        if (!invoked) {
+            qWarning("dbusqml: handler invocation failed for %s (conversion error)",
+                     qPrintable(member));
+            sendReply(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                                           QStringLiteral("Handler invocation failed")));
+            m_inDispatch = false;
             return true;
         }
 

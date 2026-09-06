@@ -276,6 +276,7 @@ QString DBusPathDispatcher::introspect(const QString &) const {
     // members (duplicate signals/methods), which busctl/GDBus reject.
     QString xml;
     QSet<QString> servedIfaces;
+    bool servedEmptyIface = false; // A17: empty ifaces dedupe too
     for (const auto &a : m_adaptors) {
         if (!a)
             continue;
@@ -284,6 +285,12 @@ QString DBusPathDispatcher::introspect(const QString &) const {
             if (servedIfaces.contains(iface))
                 continue;
             servedIfaces.insert(iface);
+        } else {
+            // A17: two co-located empty-iface adaptors emitted duplicate
+            // <interface name=""> blocks (busctl-reject class).
+            if (servedEmptyIface)
+                continue;
+            servedEmptyIface = true;
         }
         xml += a->introspect(QString());
     }

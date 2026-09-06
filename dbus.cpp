@@ -76,17 +76,10 @@ private:
     DBusProxy *m_proxy;
 };
 
-// Convert D-Bus PascalCase property name to QML camelCase.
-// Handles abbreviations: "Percentage" → percentage, "URL" → url, "XMLConfig" → xmlConfig
+// A14/D5: the CLIENT fold (upper-runs collapse) — a documented mode of the
+// shared dbusFoldName; never a second implementation.
 static QString dbusPropToQml(const QString &name) {
-    if (name.isEmpty())
-        return name;
-    int upper = 0;
-    while (upper < name.size() && name[upper].isUpper())
-        ++upper;
-    if (upper <= 1)
-        return name.at(0).toLower() + name.mid(1);
-    return name.left(upper).toLower() + name.mid(upper);
+    return dbusFoldName(name, true);
 }
 
 DBusProxy::DBusProxy(QObject *parent)
@@ -467,14 +460,21 @@ void DBusProxy::setProperty(const QString &name, const QVariant &value) {
     if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
         return;
 
-    if (!wireMarshalable(value)) {
+    // B12: convert FIRST (gadget values to wire shapes), then guard — parity
+    // with updateValue (a DBus.* gadget dropped through one API and passed
+    // through the other).
+    const QVariant converted = toDbusVariant(value);
+    if (!wireMarshalable(converted)) {
         qWarning("dbusqml: value for property %s is not marshalable (type %s) — dropping write",
                  qPrintable(name), QMetaType(value.userType()).name());
         return;
     }
+    // The wire name resolves through the recorded map (A16's placeholder
+    // recording feeds it); unknown keys stay verbatim.
+    const QString wireName = m_qmlToDbusName.value(name, name);
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
-    msg.setArguments({m_iface, name, QVariant::fromValue(QDBusVariant(value))});
+    msg.setArguments({m_iface, wireName, QVariant::fromValue(QDBusVariant(converted))});
     m_bus.asyncCall(msg, m_callTimeout);
 }
 

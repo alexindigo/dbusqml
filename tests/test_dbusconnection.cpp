@@ -511,6 +511,32 @@ private slots:
         close(valid[1]);
     }
 
+    void testSetPropertyConversionParity() {
+        // B12: setProperty converts gadget values before the marshalable
+        // guard — parity with updateValue (pre-fix: DBus.* gadgets dropped).
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServer");
+        auto *server = new PropertyServerObject();
+        QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/PcServerB12"),
+                                                                    server));
+        QVERIFY(QDBusConnection::sessionBus().registerService(
+            QStringLiteral("org.dbusqml.PcServerB12")));
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServerB12");
+
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.PcServerB12"));
+        proxy.setPath(QStringLiteral("/PcServerB12"));
+        proxy.setIface(QStringLiteral("org.dbusqml.PcServerB12"));
+        proxy.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+
+        PropertyServerObject::s_lastSetProp.clear();
+        // B12 post-fix: the gadget CONVERTS (no drop warning) and the Set
+        // carries the converted value under the wire name.
+        proxy.setProperty(QStringLiteral("level"), QVariant::fromValue(DBus::Uint32(9)));
+        QTest::qWait(500);
+        QCOMPARE(PropertyServerObject::s_lastSetProp, QStringLiteral("Level"));
+    }
+
     void testWalkerGadgetSignatureParity() {
         // B5/D4: a gadget whose own signature DIFFERS from the declared one
         // is coerced to the declaration (position-independent); the equal-
