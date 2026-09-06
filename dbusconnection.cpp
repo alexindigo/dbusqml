@@ -59,12 +59,23 @@ bool wireMarshalable(const QVariant &v) {
         return true;
     }
     if (t == qMetaTypeId<QDBusSignature>()) {
+        // A valid signature is one or more COMPLETE types — "s" and "i" are
+        // valid (the dot heuristic rejected them and broke typed calls).
         const QString g = v.value<QDBusSignature>().signature();
-        return !g.isEmpty() && g.contains(QLatin1Char('.'));
-    }
-    // Unix fds (plain ints after the walker round-trip) are marshalable.
-    if (t == qMetaTypeId<QDBusUnixFileDescriptor>())
+        if (g.isEmpty())
+            return false;
+        int pos = 0;
+        while (pos < g.size()) {
+            if (firstCompleteType(g, pos).isEmpty())
+                return false;
+        }
         return true;
+    }
+    // Unix fds (plain ints after the walker round-trip) are marshalable —
+    // but an INVALID fd is not: it would fail at marshal time with the
+    // caller left timing out (B4).
+    if (t == qMetaTypeId<QDBusUnixFileDescriptor>())
+        return v.value<QDBusUnixFileDescriptor>().isValid();
     if (t == QMetaType::Int)
         return true;
 
@@ -327,6 +338,29 @@ static QVariant readBySignature(const QDBusArgument &arg) {
         arg.endArray();
         return out;
     }
+    // B2: nested av/ao — the top-level twin (unwrapDbus) handles these; the
+    // nested positions ((sav), a{sav}, a{sao}, …) previously fell through to
+    // the unsupported-signature warning and DROPPED the element.
+    if (sig == QLatin1String("av")) {
+        QVariantList out;
+        arg.beginArray();
+        while (!arg.atEnd()) {
+            QVariant elem;
+            arg >> elem;
+            out.append(unwrapDbus(elem));
+        }
+        arg.endArray();
+        return out;
+    }
+    if (sig == QLatin1String("ao")) {
+        QList<QDBusObjectPath> paths;
+        arg >> paths;
+        QVariantList out;
+        out.reserve(paths.size());
+        for (const auto &p : paths)
+            out.append(p.path());
+        return out;
+    }
     if (sig.startsWith(QStringLiteral("aa"))) {
         // Array of arrays — aa* (including aa{...}). Elements are arrays.
         QVariantList out;
@@ -429,6 +463,19 @@ QVariant unwrapDbus(const QVariant &v) {
             QByteArray bytes;
             arg >> bytes;
             return bytes;
+        }
+        // B6: bare object-path / signature carriers (e.g. the a{so} fast
+        // path's values) unwrap to plain strings — no opaque gadgets in QML
+        // (nested positions already arrive as strings via readBySignature).
+        if (sig == "o") {
+            QDBusObjectPath p;
+            arg >> p;
+            return p.path();
+        }
+        if (sig == "g") {
+            QDBusSignature g;
+            arg >> g;
+            return g.signature();
         }
 
         // Everything else — nested containers, dict arrays, structs,
@@ -697,7 +744,20 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
         return true;
     }
     if (sig == QLatin1String("ay")) {
-        arg << v.toByteArray();
+        // B3: mirror W4's coercion — a number array (QVariantList of ints)
+        // converts per-element; a bare toByteArray() on a list silently
+        // produced EMPTY bytes at nested positions.
+        if (v.userType() == QMetaType::QString)
+            arg << v.toString().toUtf8();
+        else if (v.userType() == qMetaTypeId<QVariantList>()) {
+            QByteArray bytes;
+            const QVariantList list = v.toList();
+            bytes.reserve(list.size());
+            for (const QVariant &b : list)
+                bytes.append(static_cast<char>(b.toInt()));
+            arg << bytes;
+        } else
+            arg << v.toByteArray();
         return true;
     }
     if (sig == QLatin1String("as")) {
@@ -781,16 +841,20 @@ QVariant marshalBySignature(const QString &sig, const QVariant &value) {
         return toDbusVariant(value);
 
     // Explicit DBus.* wrapper types always win — the caller chose the type.
+    // D4: the short-circuit applies ONLY when the value's own wire signature
+    // EQUALS the declared one; otherwise fall through to the declared
+    // coercion. Position-independent: declared `u` + Int32 coerces to u at
+    // every position, while declared `i` + Int32 passes through untouched.
     if (value.userType() != qMetaTypeId<QVariantList>() &&
         value.userType() != qMetaTypeId<QVariantMap>() && value.userType() != QMetaType::QString &&
         value.userType() != QMetaType::Bool && value.userType() != QMetaType::Int &&
         value.userType() != QMetaType::Double && value.userType() != QMetaType::UInt &&
         value.userType() != QMetaType::LongLong && value.userType() != QMetaType::ULongLong &&
         value.userType() != QMetaType::QByteArray) {
-        // Non-plain type — likely a DBus.* gadget or QDBusObjectPath etc.
-        // Unwrap via toDbusVariant; the resulting type should match the
-        // signature already.
-        return toDbusVariant(value);
+        const QVariant converted = toDbusVariant(value);
+        const char *own = QDBusMetaType::typeToSignature(QMetaType(converted.userType()));
+        if (own && sig == QLatin1String(own))
+            return converted;
     }
 
     // Basic types — coerce the QVariant to the exact C++ type.
@@ -806,10 +870,17 @@ QVariant marshalBySignature(const QString &sig, const QVariant &value) {
         return QVariant::fromValue(value.toInt());
     if (sig == QLatin1String("u"))
         return QVariant::fromValue(value.toUInt());
-    if (sig == QLatin1String("h"))
+    if (sig == QLatin1String("h")) {
         // Unix fd: a plain int fd is wrapped into QDBusUnixFileDescriptor
-        // (which dup()s it — the SENDER keeps ownership of its fd).
-        return QVariant::fromValue(QDBusUnixFileDescriptor(value.toInt()));
+        // (which dup()s it — the SENDER keeps ownership of its fd). B4: an
+        // invalid fd fails LOUD (invalid result → the wireMarshalable
+        // boundary rejects the send) instead of carrying a dead fd that
+        // would leave the caller timing out with zero diagnostics.
+        QDBusUnixFileDescriptor fd(value.toInt());
+        if (!fd.isValid())
+            return {};
+        return QVariant::fromValue(fd);
+    }
     if (sig == QLatin1String("x"))
         return QVariant::fromValue(static_cast<qint64>(value.toLongLong()));
     if (sig == QLatin1String("t"))

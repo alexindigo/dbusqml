@@ -212,6 +212,13 @@ if(BUILD_TEST_MODE)
     target_include_directories(fd_helper_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(fd_helper_service PRIVATE Qt6::Core Qt6::Qml Qt6::DBus dbusqml)
 
+    add_executable(payload_echo_service tests/payload_echo_service.cpp
+        dbusconnection.cpp
+        dbustypes.cpp
+    )
+    target_include_directories(payload_echo_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(payload_echo_service PRIVATE Qt6::Core Qt6::Qml Qt6::DBus dbusqml)
+
     add_test(NAME test_types COMMAND test_types)
     add_test(NAME test_introspect COMMAND test_introspect)
     add_test(NAME test_adaptor COMMAND dbus-run-session -- $<TARGET_FILE:test_adaptor>)

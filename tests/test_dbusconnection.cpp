@@ -8,7 +8,9 @@
 #include <QSignalSpy>
 #include <QTimer>
 #include <QThread>
+#include <QDBusUnixFileDescriptor>
 #include <QProcess>
+#include <unistd.h>
 #include <QDBusConnectionInterface>
 #include <QDBusMetaType>
 #include <QDBusVirtualObject>
@@ -258,6 +260,47 @@ QString PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServer");
 bool PropertyServerObject::s_declarePayload = false;
 bool PropertyServerObject::s_servePayload = false;
 
+// Payload-echo helper: launched as a separate process (payload_echo_service)
+// — a real wire round-trip: the helper replies with a write-built payload of
+// the requested signature; the caller receives it READ-mode.
+static QProcess *s_payloadEcho = nullptr;
+
+static bool startPayloadEcho() {
+    const QString helperBin =
+        QCoreApplication::applicationDirPath() + QStringLiteral("/payload_echo_service");
+    s_payloadEcho = new QProcess();
+    s_payloadEcho->setProgram(QStringLiteral("/bin/sh"));
+    QStringList shArgs;
+    shArgs << QStringLiteral("-c")
+           << QStringLiteral("exec '%1' org.dbusqml.PayloadEcho").arg(helperBin);
+    s_payloadEcho->setArguments(shArgs);
+    s_payloadEcho->start();
+    if (!s_payloadEcho->waitForStarted(5000))
+        return false;
+    // QTRY_* macros carry a bare return — illegal in a bool function; a
+    // plain poll loop instead.
+    for (int i = 0; i < 40; ++i) {
+        if (QDBusConnection::sessionBus().interface()->isServiceRegistered(
+                QStringLiteral("org.dbusqml.PayloadEcho")))
+            return true;
+        QTest::qWait(250);
+    }
+    return false;
+}
+
+// Wire round-trip: the helper builds the declared signature on its side; the
+// caller receives the reply demarshaled (READ-mode carrier).
+static QVariant echoPayload(const QString &sig, const QVariant &value) {
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.PayloadEcho"), QStringLiteral("/PayloadEcho"),
+        QStringLiteral("org.dbusqml.PayloadEcho"), QStringLiteral("Echo"));
+    m.setArguments({QVariant(sig), QVariant::fromValue(value)});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(m, QDBus::Block, 5000);
+    if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
+        return {};
+    return reply.arguments().first();
+}
+
 // Organic QML adaptor helper (adaptor↔proxy E2E) — local twin of
 // test_dbusadaptor.cpp's createQmlAdaptor.
 static QObject *createPcQmlAdaptor(const QByteArray &qmlSrc) {
@@ -377,6 +420,7 @@ private slots:
         auto *sigEcho = new SignatureEchoObject(this);
         QVERIFY2(bus.registerVirtualObject(QStringLiteral("/"), sigEcho),
                  "Failed to register signature echo object");
+        QVERIFY2(startPayloadEcho(), "payload echo helper failed to start");
         QVERIFY2(bus.registerService(QStringLiteral("org.dbusqml.SigEcho")),
                  "Failed to register signature echo service");
         // Let the connection stabilize
@@ -384,6 +428,109 @@ private slots:
     }
 
     void cleanupTestCase() { stopPrivateBus(); }
+
+    // ---- Walker parity (B2/B3/B4/B5/B6, fix-parity) ----
+    // Position-parity matrix: the same value read/written at a top-level and
+    // a nested position must produce identical results.
+
+    void testWalkerNestedVariantArray() {
+        // B2: nested av — (sav) and a{sav} positions read the array, not
+        // drop it (pre-fix: fall-through warning, element dropped).
+        QVariant replyArg = echoPayload(
+            QStringLiteral("(sav)"), QVariantList{QVariant("s"), QVariant(QVariantList{1, 2, 3})});
+        QVERIFY(replyArg.isValid());
+        QVariantList members = unwrapDbus(replyArg).toList();
+        QCOMPARE(members.size(), 2);
+        QCOMPARE(members.at(0).toString(), QStringLiteral("s"));
+        QVariantList inner = members.at(1).toList();
+        QCOMPARE(inner.size(), 3);
+        QCOMPARE(inner.at(0).toInt(), 1);
+        QCOMPARE(inner.at(2).toInt(), 3);
+
+        QVariant replyArg2 = echoPayload(
+            QStringLiteral("a{sav}"),
+            QVariantList{QVariantMap{{QStringLiteral("k"), QVariant(QVariantList{7})}}});
+        QVERIFY(replyArg2.isValid());
+        QVariantMap entry = unwrapDbus(replyArg2).toMap();
+        QCOMPARE(entry.size(), 1);
+        QCOMPARE(entry.value(QStringLiteral("k")).toList().at(0).toInt(), 7);
+    }
+
+    void testWalkerNestedObjectPathArray() {
+        // B2: nested ao — a{sao} reads path strings (pre-fix: dropped).
+        QVariant replyArg =
+            echoPayload(QStringLiteral("a{sao}"),
+                        QVariantList{QVariantMap{
+                            {QStringLiteral("objs"),
+                             QVariant(QVariantList{QStringLiteral("/a"), QStringLiteral("/b")})}}});
+        QVERIFY(replyArg.isValid());
+        QVariantMap entry = unwrapDbus(replyArg).toMap();
+        QCOMPARE(entry.size(), 1);
+        QVariantList objs = entry.value(QStringLiteral("objs")).toList();
+        QCOMPARE(objs.size(), 2);
+        QCOMPARE(objs.at(0).toString(), QStringLiteral("/a"));
+        QCOMPARE(objs.at(1).toString(), QStringLiteral("/b"));
+    }
+
+    void testWalkerByteArrayPositions() {
+        // B3: ay at every position — nested (ay), aay, (v-embedded) — a
+        // number array coerces per-element (pre-fix: silently empty bytes).
+        QVariant replyArg =
+            echoPayload(QStringLiteral("(ay)"),
+                        QVariantList{QVariant(QVariantList{QVariant(QVariantList{104, 105})})});
+        QVERIFY(replyArg.isValid());
+        QVariantList members = unwrapDbus(replyArg).toList();
+        QCOMPARE(members.size(), 1);
+        QCOMPARE(members.at(0).toByteArray(), QByteArrayLiteral("hi"));
+
+        QVariant replyArg2 =
+            echoPayload(QStringLiteral("aay"),
+                        QVariantList{QVariant(QVariantList{72, 73}), QVariant(QVariantList{84})});
+        QVERIFY(replyArg2.isValid());
+        QVariantList arr = unwrapDbus(replyArg2).toList();
+        QCOMPARE(arr.size(), 2);
+        QCOMPARE(arr.at(0).toByteArray(), QByteArrayLiteral("HI"));
+        QCOMPARE(arr.at(1).toByteArray(), QByteArrayLiteral("T"));
+    }
+
+    void testWalkerFdValidity() {
+        // B4: invalid fds are rejected everywhere — marshalBySignature's h
+        // coercion and wireMarshalable's fd blessing.
+        int invalidFd = -1;
+        QVariant m = marshalBySignature(QStringLiteral("h"), QVariant(invalidFd));
+        QVERIFY2(!m.isValid(), "marshalBySignature(h, -1) must fail loud");
+        QVERIFY2(!wireMarshalable(QVariant::fromValue(QDBusUnixFileDescriptor(invalidFd))),
+                 "wireMarshalable must reject an invalid fd");
+        // Valid fd still passes.
+        int valid[2];
+        QCOMPARE(pipe(valid), 0);
+        QVariant ok = marshalBySignature(QStringLiteral("h"), QVariant(valid[1]));
+        QVERIFY(ok.isValid());
+        QVERIFY(wireMarshalable(QVariant::fromValue(QDBusUnixFileDescriptor(valid[1]))));
+        close(valid[0]);
+        close(valid[1]);
+    }
+
+    void testWalkerGadgetSignatureParity() {
+        // B5/D4: a gadget whose own signature DIFFERS from the declared one
+        // is coerced to the declaration (position-independent); the equal-
+        // signature passthrough still works.
+        QVariant coerced =
+            marshalBySignature(QStringLiteral("u"), QVariant::fromValue(DBus::Int32(5)));
+        QCOMPARE(coerced.metaType().id(), QMetaType::UInt);
+        QVariant passthrough =
+            marshalBySignature(QStringLiteral("i"), QVariant::fromValue(DBus::Int32(7)));
+        QCOMPARE(passthrough.metaType().id(), QMetaType::Int);
+
+        // B6: bare o/g carriers (e.g. a{so} fast-path values) unwrap to
+        // strings — no opaque gadgets in QML.
+        QVariant replyArg =
+            echoPayload(QStringLiteral("a{so}"),
+                        QVariantList{QVariantMap{{QStringLiteral("k"), QStringLiteral("/x")}}});
+        QVERIFY(replyArg.isValid());
+        QVariantMap map = unwrapDbus(replyArg).toMap();
+        QCOMPARE(map.value(QStringLiteral("k")).toString(), QStringLiteral("/x"));
+    }
 
     void testBusTypeEnum() {
         QCOMPARE(static_cast<int>(busType::Session), 0);
