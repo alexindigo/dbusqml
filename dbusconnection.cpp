@@ -1,7 +1,11 @@
 #include "dbusconnection.h"
+#include "dbussignatureslots.h"
 #include "dbustypes.h"
 
 #include <QDBusMetaType>
+
+#include <array>
+#include <utility>
 
 #include <QAtomicInt>
 #include <QDBusArgument>
@@ -15,6 +19,7 @@
 #include <QJSValueList>
 #include <QList>
 #include <QMap>
+#include <QMutex>
 #include <QPointer>
 #include <QQmlEngine>
 
@@ -655,10 +660,107 @@ QString firstCompleteType(const QString &sig, int &pos) {
     return {};
 }
 
+// Signature-slot pool state (F1/B9 — see dbussignatureslots.h for the four
+// invariants). File-static like the walkers: one instance per process, shared
+// by every connection in it. Assignment takes the mutex for lookup +
+// registerCustomType as a single critical section and releases it before
+// returning — never held while streaming, so nested assignment re-takes it
+// without deadlock. Qt's own registry lock nests inside ours; Qt never calls
+// back into us under its lock (no marshall operators are ever registered),
+// so the ordering is deadlock-free.
+namespace {
+template <int... Is>
+std::array<QMetaType, sizeof...(Is)> makeSignatureSlotTypes(std::integer_sequence<int, Is...>) {
+    std::array<QMetaType, sizeof...(Is)> types{};
+    ((types[Is] = QMetaType(qRegisterMetaType<DbusSignatureSlot<Is>>())), ...);
+    return types;
+}
+const std::array<QMetaType, SignatureSlotPoolSize + 1> &signatureSlotTypes() {
+    static const auto types =
+        makeSignatureSlotTypes(std::make_integer_sequence<int, SignatureSlotPoolSize + 1>());
+    return types;
+}
+
+// Strict single-type validation: recursive descent over every char (basic
+// type codes only, containers balanced and non-empty). Depth-capped —
+// signatures can arrive from peer introspection XML.
+bool isStrictSignature(const QString &sig, int &pos, int depth = 0) {
+    if (depth > 64 || pos >= sig.size())
+        return false;
+    const QChar c = sig.at(pos++);
+    if (QStringLiteral("ybnqiuxtdhsogv").contains(c))
+        return true;
+    if (c == QLatin1Char('a'))
+        return isStrictSignature(sig, pos, depth + 1);
+    if (c == QLatin1Char('(')) {
+        // "()" is not a valid D-Bus type — libdbus aborts on it.
+        if (pos < sig.size() && sig.at(pos) == QLatin1Char(')'))
+            return false;
+        bool any = false;
+        while (pos < sig.size() && sig.at(pos) != QLatin1Char(')')) {
+            if (!isStrictSignature(sig, pos, depth + 1))
+                return false;
+            any = true;
+        }
+        if (!any || pos >= sig.size())
+            return false;
+        ++pos; // ')'
+        return true;
+    }
+    if (c == QLatin1Char('{')) {
+        // Dict entry: exactly two complete member types. (Key-basicness is
+        // enforced loudly by beginMap itself.)
+        if (!isStrictSignature(sig, pos, depth + 1))
+            return false;
+        if (!isStrictSignature(sig, pos, depth + 1))
+            return false;
+        if (pos >= sig.size() || sig.at(pos) != QLatin1Char('}'))
+            return false;
+        ++pos;
+        return true;
+    }
+    return false;
+}
+} // namespace
+
+QMetaType signatureSlotForSignature(const QString &sig) {
+    // Strict validation BEFORE touching Qt's registry: firstCompleteType is
+    // structural (it depth-counts (...) contents), but a bad header aborts
+    // inside libdbus — and element signatures can arrive from a peer's live
+    // introspection XML, so garbage here is remotely triggerable. Every char
+    // must be a valid type code, every container balanced and non-empty.
+    // Loud-fail (invalid metatype) on anything else.
+    int pos = 0;
+    if (!isStrictSignature(sig, pos) || pos != sig.size())
+        return QMetaType();
+    static QMutex mutex;
+    static QHash<QString, int> assigned;
+    static int nextFree = 0;
+    QMutexLocker locker(&mutex);
+    auto it = assigned.constFind(sig);
+    if (it != assigned.cend())
+        return signatureSlotTypes().at(it.value());
+    if (nextFree >= SignatureSlotPoolSize) {
+        qWarning("dbusqml: signature-slot pool exhausted (%d distinct element signatures) — "
+                 "failing loud",
+                 SignatureSlotPoolSize);
+        return QMetaType();
+    }
+    const int index = nextFree++;
+    assigned.insert(sig, index);
+    // Assign-once: this id is never registered again (invariant 1). The
+    // signature is live in the registry before the metatype escapes
+    // (invariant 2).
+    QDBusMetaType::registerCustomType(signatureSlotTypes().at(index), sig.toUtf8());
+    return signatureSlotTypes().at(index);
+}
+
 // Map a D-Bus signature to the QMetaType used for beginArray/beginMap
 // element arguments. QDBusMetaType::signatureToMetaType() only covers basic
 // types on Qt 6.11 (container signatures return an invalid QMetaType even
-// after registerCustomType), so container shapes are mapped explicitly.
+// after registerCustomType), so container shapes are mapped explicitly — and
+// anything left over mints a signature-slot pool assignment (F1/B9), so every
+// well-formed element signature is producible.
 static QMetaType metaTypeForSignature(const QString &sig) {
     QMetaType mt = QDBusMetaType::signatureToMetaType(sig.toUtf8().constData());
     if (mt.isValid())
@@ -671,13 +773,15 @@ static QMetaType metaTypeForSignature(const QString &sig) {
         return QMetaType::fromType<QList<QVariantMap>>();
     if (sig == QLatin1String("h"))
         return QMetaType::fromType<QDBusUnixFileDescriptor>();
-    return QMetaType();
+    return signatureSlotForSignature(sig);
 }
 
 // Recursive signature walker: append `value` marshaled as `sig` into a
 // writable QDBusArgument — the write-side mirror of readBySignature.
-// Returns false when `sig` cannot be produced via public QtDBus primitives
-// (e.g. arrays of anonymous structs, which need a registered carrier type).
+// Returns false (loud, at the caller) for malformed signatures, invalid
+// values, and past the depth cap. Every well-formed element signature is
+// producible: unregistered container shapes mint signature-slot pool
+// assignments (F1/B9) instead of failing.
 static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const QVariant &value,
                                   int depth = 0) {
     if (depth > 32) {
@@ -953,8 +1057,9 @@ QVariant marshalBySignature(const QString &sig, const QVariant &value) {
 }
 
 // Container marshaling — handles a{...}, a<complex>, (...), etc.
-// For dicts we register the correct QtDBus type on the fly via
-// QDBusMetaType::registerCustomType or use known container types.
+// Dicts use known container types; any other container shape walks the
+// generic signature-driven writer below (unregistered element signatures
+// mint signature-slot pool assignments — F1/B9).
 static QVariant marshalContainerBySignature(const QString &sig, const QVariant &value) {
     // a{sv} — dict with string keys and variant values.
     // QVariantMap is exactly a{sv} in QtDBus.
@@ -980,17 +1085,11 @@ static QVariant marshalContainerBySignature(const QString &sig, const QVariant &
         return QVariant::fromValue(typed);
     }
 
-    // a(sss...) — array of structs with homogeneous members.
-    // Marshal as QVariantList of QVariantList; QtDBus can't type-check this
-    // without a registered struct type, so we hand-marshal via QDBusArgument.
-    // This is the general path for any a(...) where ... is not a basic type.
-
-    // Generic container marshaling via QDBusArgument — the escape hatch.
-    // Build a writable QDBusArgument, populate it per the signature, and
-    // wrap it as a QVariant. QtDBus will cross-marshal it into the message.
-    // NOTE: This requires QtDBus to accept a QDBusArgument as a message
-    // argument. The fallback mechanism (registerCustomType) covers the
-    // known shapes; for unknown deep nesting we use QDBusArgument.
+    // a(sss...) — array of structs with homogeneous members, and the general
+    // path for any other container: signature-walking writer. Produces a
+    // QDBusArgument-wrapped QVariant cross-marshaled by QtDBus. Unproducible
+    // inputs (malformed signatures, invalid values) fail loudly and fall back
+    // to inference — a declared signature is never silently ignored.
     {
         // For now, handle aay (array of byte arrays) explicitly.
         if (sig == QLatin1String("aay")) {

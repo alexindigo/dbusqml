@@ -93,6 +93,7 @@ public:
 
 signals:
     void StateChanged(QVariant a0, QVariant a1); // declared: oa{sv}
+    void ShortcutsChanged(QVariant bindings);    // declared: a(sa{sv}) in F1 tests
     void SixArgs(int a1, int a2, int a3, int a4, int a5, int a6);
     void qmlPing(QVariant v); // qml* prefix
 };
@@ -333,8 +334,9 @@ private slots:
     void testWireSignatureExplicitOverride();
     void testWireSignatureOverrideShapes();
     void testWireSignatureOverrideBeatsCatalog();
+    void testWireSignatureBindShortcutsReply();
     void testWireSignatureCppInvokable();
-    void testWireSignatureUnproducibleWarns();
+    void testWireSignatureStructArrayRoundTrip();
     void testStructInVariantReply();
     void testStructInMapValueReply();
     void testStructSignalArg();
@@ -350,7 +352,7 @@ private slots:
     void testVariantTypedPayloadStringArray();
     void testVariantTypedPayloadBytes();
     void testVariantTypedPayloadStructEquivalence();
-    void testVariantTypedPayloadUnproducibleWarns();
+    void testVariantTypedPayloadStructArray();
     void testVariantTypedPayloadNoSigUnchanged();
     void testVariantTypedPayloadFileChooserAcceptance();
     void testVariantTypedPayloadListInference();
@@ -387,6 +389,7 @@ private slots:
     void testPrivateNotifyNotBroadcast();
     void testAdvertisedNameSignalTiers();
     void testDeclaredSignalTypesAtEmission();
+    void testDeclaredSignalBindShortcuts();
     void testAttachXmlSetParity();
 
     // A7/A8/A9/B8/A10 (fix-parity): the napkin + XML truthfulness.
@@ -1248,6 +1251,33 @@ void TestDBusAdaptor::testWireSignatureOverrideBeatsCatalog() {
     QCOMPARE(reply.signature(), QStringLiteral("a{sv}"));
 }
 
+// F1 — BindShortcuts response shape: a QML method declaring a(sa{sv})
+// replies wire-exact with the bindings content.
+void TestDBusAdaptor::testWireSignatureBindShortcutsReply() {
+    QDBusMessage reply = callQmlAdaptorMethod(
+        QStringLiteral("org.dbusqml.BindShortcuts"), QStringLiteral("/BindShortcuts"),
+        QStringLiteral("org.dbusqml.BindShortcuts"), QStringLiteral("getBindings"), {},
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.BindShortcuts'\n"
+        "  path: '/BindShortcuts'\n"
+        "  iface: 'org.dbusqml.BindShortcuts'\n"
+        "  _signatures: ({ getBindings: 'a(sa{sv})' })\n"
+        "  function getBindings() {\n"
+        "    return [['id0', { shortcut: 'Meta+K', devices: ['/dev/input0'] }],\n"
+        "            ['id1', { shortcut: 'Meta+L', devices: ['/dev/input1'] }]]\n"
+        "  }\n"
+        "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral("a(sa{sv})"));
+    const QVariantList bindings = unwrapDbus(reply.arguments().first()).toList();
+    QCOMPARE(bindings.size(), 2);
+    QCOMPARE(bindings.at(0).toList().at(0).toString(), QStringLiteral("id0"));
+    QCOMPARE(bindings.at(0).toList().at(1).toMap().value(QStringLiteral("shortcut")).toString(),
+             QStringLiteral("Meta+K"));
+    QCOMPARE(bindings.at(1).toList().at(0).toString(), QStringLiteral("id1"));
+}
+
 // C++ Q_INVOKABLE adaptor path — declared signature honored through the shared
 // reply hook (no QQmlEngine dispatch involved).
 void TestDBusAdaptor::testWireSignatureCppInvokable() {
@@ -1268,12 +1298,9 @@ void TestDBusAdaptor::testWireSignatureCppInvokable() {
     QCOMPARE(reply.signature(), QStringLiteral("a{sa{sv}}"));
 }
 
-// A declared signature that cannot be produced must warn and fall back to
-// inference, never silently emit a different wire type or crash.
-void TestDBusAdaptor::testWireSignatureUnproducibleWarns() {
-    QTest::ignoreMessage(
-        QtWarningMsg,
-        QRegularExpression(QStringLiteral("dbusqml: cannot produce declared signature a\\(ii\\)")));
+// F1 — struct arrays are producible via the signature-slot pool: a declared
+// a(ii) replies wire-exact, no warning, no inference fallback.
+void TestDBusAdaptor::testWireSignatureStructArrayRoundTrip() {
     QDBusMessage reply = callQmlAdaptorMethod(
         QStringLiteral("org.dbusqml.Unproducible"), QStringLiteral("/Unproducible"),
         QStringLiteral("org.dbusqml.Unproducible"), QStringLiteral("getPairs"), {},
@@ -1286,7 +1313,11 @@ void TestDBusAdaptor::testWireSignatureUnproducibleWarns() {
         "  function getPairs() { return [[1, 2]] }\n"
         "}");
     QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
-    QCOMPARE(reply.signature(), QStringLiteral("av"));
+    QCOMPARE(reply.signature(), QStringLiteral("a(ii)"));
+    const QVariantList pairs = unwrapDbus(reply.arguments().first()).toList();
+    QCOMPARE(pairs.size(), 1);
+    QCOMPARE(pairs.at(0).toList().at(0).toInt(), 1);
+    QCOMPARE(pairs.at(0).toList().at(1).toInt(), 2);
 }
 
 // T1 — struct inside a variant (the TODO reproducer). readOne returns
@@ -1859,12 +1890,9 @@ void TestDBusAdaptor::testVariantTypedPayloadStructEquivalence() {
     QCOMPARE(unwrapDbus(pa).toList(), unwrapDbus(pb).toList());
 }
 
-// V4 — variant(x, "a(ii)") is an unproducible boundary: warn + fall back to
-// inference, never a silent wrong type or a dropped connection.
-void TestDBusAdaptor::testVariantTypedPayloadUnproducibleWarns() {
-    QTest::ignoreMessage(
-        QtWarningMsg,
-        QRegularExpression(QStringLiteral("dbusqml: cannot produce declared signature a\\(ii\\)")));
+// F1 — variant(x, "a(ii)"): the typed variant carries a wire-exact a(ii)
+// payload via the signature-slot pool, not an inferred av.
+void TestDBusAdaptor::testVariantTypedPayloadStructArray() {
     QDBusMessage reply =
         callQmlAdaptorMethod(QStringLiteral("org.dbusqml.VTypedBad"), QStringLiteral("/VTypedBad"),
                              QStringLiteral("org.dbusqml.VTypedBad"), QStringLiteral("get"), {},
@@ -1875,13 +1903,16 @@ void TestDBusAdaptor::testVariantTypedPayloadUnproducibleWarns() {
                              "  path: '/VTypedBad'\n"
                              "  iface: 'org.dbusqml.VTypedBad'\n"
                              "  function get() {\n"
-                             "    return new DBusQML.variant([1, 2], 'a(ii)')\n"
+                             "    return new DBusQML.variant([[1, 2]], 'a(ii)')\n"
                              "  }\n"
                              "}");
     QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(reply.signature(), QStringLiteral("v"));
     const QVariant payload = reply.arguments().first().value<QDBusVariant>().variant();
-    QCOMPARE(payloadSignature(payload), QStringLiteral("av"));
+    QCOMPARE(payloadSignature(payload), QStringLiteral("a(ii)"));
+    const QVariantList pairs = unwrapDbus(payload).toList();
+    QCOMPARE(pairs.size(), 1);
+    QCOMPARE(pairs.at(0).toList().at(1).toInt(), 2);
 }
 
 // V5 — no-signature variant(value) is unchanged: payload still inferred (av).
@@ -3041,6 +3072,40 @@ void TestDBusAdaptor::testDeclaredSignalTypesAtEmission() {
     emit adaptor.StateChanged(QVariant(5), QVariant(6));
     QTest::qWait(500);
     QCOMPARE(catcher.count, 1);
+}
+
+// F1 — ShortcutsChanged-style emission: a signal declaring a(sa{sv}) goes on
+// the wire with the declared signature and the bindings content.
+void TestDBusAdaptor::testDeclaredSignalBindShortcuts() {
+    DeclaredSignalAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.ShortcutsChanged"));
+    adaptor.setPath(QStringLiteral("/ShortcutsChanged"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.ShortcutsChanged"));
+    adaptor.setSignalSpecs(
+        QVariantMap{{QStringLiteral("ShortcutsChanged"), QVariant(QStringLiteral("a(sa{sv})"))}});
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(
+        QStringLiteral("org.dbusqml.ShortcutsChanged"), QStringLiteral("/ShortcutsChanged"),
+        QStringLiteral("org.dbusqml.ShortcutsChanged"), QStringLiteral("ShortcutsChanged"),
+        &catcher, SLOT(onSignal(QDBusMessage))));
+
+    QVariantMap b0;
+    b0[QStringLiteral("shortcut")] = QStringLiteral("Meta+K");
+    b0[QStringLiteral("devices")] = QVariant(QStringList{QStringLiteral("/dev/input0")});
+    QVariantList pair0;
+    pair0 << QStringLiteral("id0") << QVariant(b0);
+    QVariantList bindings;
+    bindings << QVariant(pair0);
+    emit adaptor.ShortcutsChanged(QVariant(bindings));
+    QTRY_VERIFY_WITH_TIMEOUT(catcher.count == 1, 5000);
+    QCOMPARE(catcher.lastSignal.signature(), QByteArrayLiteral("a(sa{sv})"));
+    const QVariantList back = unwrapDbus(catcher.lastSignal.arguments().first()).toList();
+    QCOMPARE(back.size(), 1);
+    QCOMPARE(back.at(0).toList().at(0).toString(), QStringLiteral("id0"));
 }
 
 // A11 — attach-set and XML-set parity: >5-param signals are neither relayed

@@ -16,8 +16,12 @@
 #include <QDBusVirtualObject>
 #include <QRegularExpression>
 #include <iostream>
+#include <thread>
+#include <atomic>
+#include <vector>
 
 #include "../dbusconnection.h"
+#include "../dbussignatureslots.h"
 #include "../dbuserror.h"
 #include "../dbusmessage.h"
 #include "../dbuspendingreply.h"
@@ -1909,15 +1913,135 @@ private slots:
         QCOMPARE(echoWireSignature(marshaled), QStringLiteral("a{sa{sa{sv}}}"));
     }
 
-    // Unproducible declared signatures (arrays of anonymous structs, which
-    // need a registered carrier type) must warn and fall back to inference,
-    // never silently emit a different wire type.
-    void testMarshalUnproducibleLoudFail() {
-        QTest::ignoreMessage(QtWarningMsg,
-                             QRegularExpression(QStringLiteral(
-                                 "dbusqml: cannot produce declared signature a\\(ii\\)")));
-        QVariant marshaled = marshalBySignature(QStringLiteral("a(ii)"), QVariant(QVariantList{}));
+    // F1 — struct arrays are producible via the signature-slot pool:
+    // marshalBySignature("a(ii)") yields wire-exact a(ii), no warning.
+    void testMarshalStructArrayRoundTrip() {
+        QVariantList pairs;
+        pairs << QVariant(QVariantList{1, 2}) << QVariant(QVariantList{3, 4});
+        QVariant marshaled = marshalBySignature(QStringLiteral("a(ii)"), QVariant(pairs));
         QVERIFY(marshaled.isValid());
+        QCOMPARE(echoWireSignature(marshaled), QStringLiteral("a(ii)"));
+        const QVariantList back =
+            unwrapDbus(echoPayload(QStringLiteral("a(ii)"), QVariant(pairs))).toList();
+        QCOMPARE(back.size(), 2);
+        QCOMPARE(back.at(0).toList().at(0).toInt(), 1);
+        QCOMPARE(back.at(1).toList().at(1).toInt(), 4);
+    }
+
+    // F1 — BindShortcuts shape: a(sa{sv}) round-trips through a SEPARATE
+    // process. Pool assignment happens in the echo service; the reply
+    // crosses the real wire and reads back through the generic read path
+    // (this is also the echo-back pin).
+    void testBindShortcutsShapeEcho() {
+        QVariantList bindings;
+        QVariantMap b0;
+        b0[QStringLiteral("shortcut")] = QStringLiteral("Meta+K");
+        b0[QStringLiteral("devices")] = QVariant(QStringList{QStringLiteral("/dev/input0")});
+        QVariantMap b1;
+        b1[QStringLiteral("shortcut")] = QStringLiteral("Meta+L");
+        b1[QStringLiteral("devices")] = QVariant(QStringList{QStringLiteral("/dev/input1")});
+        QVariantList pair0;
+        pair0 << QStringLiteral("id0") << QVariant(b0);
+        QVariantList pair1;
+        pair1 << QStringLiteral("id1") << QVariant(b1);
+        bindings << QVariant(pair0) << QVariant(pair1);
+
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.PayloadEcho"), QStringLiteral("/PayloadEcho"),
+            QStringLiteral("org.dbusqml.PayloadEcho"), QStringLiteral("Echo"));
+        m.setArguments({QVariant(QStringLiteral("a(sa{sv})")), QVariant::fromValue(bindings)});
+        QDBusMessage reply = QDBusConnection::sessionBus().call(m, QDBus::Block, 5000);
+        QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(reply.signature(), QStringLiteral("a(sa{sv})"));
+        const QVariantList back = unwrapDbus(reply.arguments().first()).toList();
+        QCOMPARE(back.size(), 2);
+        QCOMPARE(back.at(0).toList().at(0).toString(), QStringLiteral("id0"));
+        QCOMPARE(back.at(0).toList().at(1).toMap().value(QStringLiteral("shortcut")).toString(),
+                 QStringLiteral("Meta+K"));
+        QCOMPARE(back.at(1).toList().at(0).toString(), QStringLiteral("id1"));
+    }
+
+    // F1 — aa{ss} (array of string→string dicts) round-trip over the real
+    // wire (header + content).
+    void testStringArrayArrayRoundTrip() {
+        QVariantList dicts;
+        QVariantMap d0;
+        d0[QStringLiteral("Meta")] = QStringLiteral("K");
+        QVariantMap d1;
+        d1[QStringLiteral("layout")] = QStringLiteral("si");
+        dicts << QVariant(d0) << QVariant(d1);
+        QVariant marshaled = marshalBySignature(QStringLiteral("aa{ss}"), QVariant(dicts));
+        QVERIFY(marshaled.isValid());
+        QCOMPARE(echoWireSignature(marshaled), QStringLiteral("aa{ss}"));
+        const QVariantList back =
+            unwrapDbus(echoPayload(QStringLiteral("aa{ss}"), QVariant(dicts))).toList();
+        QCOMPARE(back.size(), 2);
+        QCOMPARE(back.at(0).toMap().value(QStringLiteral("Meta")).toString(), QStringLiteral("K"));
+        QCOMPARE(back.at(1).toMap().value(QStringLiteral("layout")).toString(),
+                 QStringLiteral("si"));
+    }
+
+    // F1 — a{sas} round-trip over the real wire (header + content). Kept as
+    // a pin either way: passing at the parent tree means already producible.
+    void testStringArrayDictRoundTrip() {
+        QVariantMap indexed;
+        indexed[QStringLiteral("media")] =
+            QVariant(QStringList{QStringLiteral("/dev/input0"), QStringLiteral("/dev/input1")});
+        indexed[QStringLiteral("kbd")] = QVariant(QStringList{QStringLiteral("/dev/input9")});
+        QVariant marshaled = marshalBySignature(QStringLiteral("a{sas}"), QVariant(indexed));
+        QVERIFY(marshaled.isValid());
+        QCOMPARE(echoWireSignature(marshaled), QStringLiteral("a{sas}"));
+        // NOTE: the echo helper's in-arg is av — a bare map arrives as a{sv}
+        // and demarshals to an empty list. Wrap in a single-element list so
+        // the service's size==1 path hands the map itself to the writer.
+        QVariantList wrapped;
+        wrapped << QVariant(indexed);
+        const QVariantMap back =
+            unwrapDbus(echoPayload(QStringLiteral("a{sas}"), QVariant(wrapped))).toMap();
+        const QStringList expectedMedia{QStringLiteral("/dev/input0"),
+                                        QStringLiteral("/dev/input1")};
+        const QStringList expectedKbd{QStringLiteral("/dev/input9")};
+        QCOMPARE(back.value(QStringLiteral("media")).toStringList(), expectedMedia);
+        QCOMPARE(back.value(QStringLiteral("kbd")).toStringList(), expectedKbd);
+    }
+
+    // F1 — concurrent first-assignment stress: threads racing on a fresh
+    // shape ("a(si)", unused anywhere else in this binary) must all produce
+    // valid output — one slot, mutex'd assign-once.
+    void testSignatureSlotConcurrentAssignment() {
+        QVariantList rows;
+        rows << QVariant(QVariantList{QStringLiteral("a"), 1})
+             << QVariant(QVariantList{QStringLiteral("b"), 2});
+        const QVariant input(rows);
+        std::atomic<int> failures{0};
+        auto worker = [&]() {
+            for (int i = 0; i < 200; ++i) {
+                if (!marshalBySignature(QStringLiteral("a(si)"), input).isValid())
+                    failures.fetch_add(1);
+            }
+        };
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 8; ++t)
+            threads.emplace_back(worker);
+        for (auto &th : threads)
+            th.join();
+        QCOMPARE(failures.load(), 0);
+        QVariant marshaled = marshalBySignature(QStringLiteral("a(si)"), input);
+        QVERIFY(marshaled.isValid());
+        QCOMPARE(echoWireSignature(marshaled), QStringLiteral("a(si)"));
+    }
+
+    // F1 — unassigned-slot pin: the eternal canary (never assigned) fails
+    // LOUD via unregisteredTypeError, never corrupts the stream. Pure Qt
+    // behavior — passes with or without the pool implementation.
+    void testSignatureSlotCanaryLoudFail() {
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression(QStringLiteral("not registered with D-Bus")));
+        QDBusArgument arg;
+        arg.beginArray(signatureSlotCanary());
+        // Nothing was opened (null → error return) — no endArray; the pin IS
+        // the warning plus survival.
+        QVERIFY(true);
     }
 
     // _signatures override on the proxy — the declared call-arg signature wins
