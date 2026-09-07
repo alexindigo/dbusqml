@@ -8,6 +8,7 @@
 #include <QDBusVariant>
 #include <QXmlStreamReader>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QProcess>
 #include <QQmlComponent>
@@ -19,6 +20,7 @@
 #include <QTimer>
 
 #include <memory>
+#include <vector>
 
 #include "dbusadaptor.h"
 #include "dbusconnection.h"
@@ -299,6 +301,13 @@ public slots:
 class TestDBusAdaptor : public QObject {
     Q_OBJECT
 
+public:
+    // Stress iteration count, settable from main() via -stress N (0 = the
+    // compiled default). The post-fix gate runs survivors at scale without
+    // forking the test binary. NOTE: QTest consumes unknown argv itself
+    // ("Unknown option" is fatal), so main() strips -stress before qExec.
+    static int s_stressIterations;
+
 private:
     QDBusMessage callOnAdaptor(const QString &iface, const QString &member,
                                const QVariantList &args = {});
@@ -335,6 +344,9 @@ private slots:
     void testWireSignatureOverrideShapes();
     void testWireSignatureOverrideBeatsCatalog();
     void testWireSignatureBindShortcutsReply();
+    void testNotificationAddDispatch();
+    void testNotificationAddDispatchBytesSilent();
+    void testNotificationActionInvokedEmission();
     void testWireSignatureCppInvokable();
     void testWireSignatureStructArrayRoundTrip();
     void testStructInVariantReply();
@@ -366,6 +378,8 @@ private slots:
     void testCoLocatedPropertiesRouting();
     void testCoLocatedTeardownPath();
     void testCoLocatedTeardownService();
+    void testChildNodeIntrospection();
+    void testNameOwnerChangedChurnSurvives();
     void testCoLocatedIfaceLessCall();
     void testCoLocatedSeparateBuses();
     void testCoLocatedDuplicateIface();
@@ -1004,6 +1018,10 @@ void TestDBusAdaptor::testNestedVariantInMapReply() {
 // variant-wrapped maps identically to a{sa{sv}}; xdg-desktop-portal
 // rejects the former. These tests assert literal wire signatures.
 
+// Forward declaration — defined below after the wire-signature tests; the F3
+// notification tests above need the adaptor object for property readback.
+static QObject *createQmlAdaptor(const QByteArray &qmlSrc);
+
 // Helper: spin up a QML adaptor from inline source, invoke one method,
 // return the raw reply message.
 static QDBusMessage callQmlAdaptorMethod(const QString &service, const QString &path,
@@ -1276,6 +1294,164 @@ void TestDBusAdaptor::testWireSignatureBindShortcutsReply() {
     QCOMPARE(bindings.at(0).toList().at(1).toMap().value(QStringLiteral("shortcut")).toString(),
              QStringLiteral("Meta+K"));
     QCOMPARE(bindings.at(1).toList().at(0).toString(), QStringLiteral("id1"));
+}
+
+// F3 — Notification vardict builder: the real
+// org.freedesktop.portal.Notification shapes (title/body/buttons/icon/sound).
+// Icon and buttons are pre-built via writeBySignature and variant-wrapped so
+// the vardict carries wire-exact v((sv)) / v(aa{sv}) (buttons are aa{sv} =
+// array of vardicts, NOT array of string arrays).
+static QVariantMap notificationVardict(bool bytesIcon, const QString &sound) {
+    QVariantMap n;
+    n[QStringLiteral("title")] = QStringLiteral("Backup done");
+    n[QStringLiteral("body")] = QStringLiteral("42 files synced");
+    n[QStringLiteral("priority")] = QStringLiteral("normal");
+    n[QStringLiteral("category")] = QStringLiteral("transfer.complete");
+    n[QStringLiteral("default-action")] = QStringLiteral("open");
+    QVariantList buttons;
+    QVariantMap openBtn;
+    openBtn[QStringLiteral("label")] = QStringLiteral("Open");
+    openBtn[QStringLiteral("action")] = QStringLiteral("open");
+    QVariantMap dismissBtn;
+    dismissBtn[QStringLiteral("label")] = QStringLiteral("Dismiss");
+    dismissBtn[QStringLiteral("action")] = QStringLiteral("dismiss");
+    buttons << QVariant(openBtn) << QVariant(dismissBtn);
+    QVariant buttonsArg = writeBySignature(QStringLiteral("aa{sv}"), QVariant(buttons));
+    n[QStringLiteral("buttons")] = QVariant::fromValue(QDBusVariant(buttonsArg));
+    QVariantList iconPair;
+    if (bytesIcon)
+        iconPair << QStringLiteral("bytes") << QVariant(QByteArray::fromHex("89504e470d0a1a0a"));
+    else
+        iconPair << QStringLiteral("themed")
+                 << QVariant(QStringList{QStringLiteral("dialog-ok"), QStringLiteral("ok")});
+    QVariant iconArg = writeBySignature(QStringLiteral("(sv)"), QVariant(iconPair));
+    n[QStringLiteral("icon")] = QVariant::fromValue(QDBusVariant(iconArg));
+    n[QStringLiteral("sound")] = QVariant(sound);
+    return n;
+}
+
+// F3 — adaptor receives: AddNotification(app_id, id, notification) dispatches
+// the full vardict (themed icon, default sound) and the declared-void method
+// replies with no out-args.
+void TestDBusAdaptor::testNotificationAddDispatch() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.Notify'\n"
+                                        "  path: '/Notify'\n"
+                                        "  iface: 'org.freedesktop.impl.portal.Notification'\n"
+                                        "  property var lastAdd\n"
+                                        "  function addNotification(appId, id, notification) {\n"
+                                        "    lastAdd = [appId, id, notification]\n"
+                                        "  }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    const QVariantMap vardict = notificationVardict(false, QStringLiteral("default"));
+    QVariant payload = writeBySignature(QStringLiteral("a{sv}"), QVariant(vardict));
+    QVERIFY(payload.isValid());
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Notify"), QStringLiteral("/Notify"),
+        QStringLiteral("org.freedesktop.impl.portal.Notification"),
+        QStringLiteral("AddNotification"));
+    msg.setArguments(
+        {QVariant(QStringLiteral("com.example.App")), QVariant(QStringLiteral("id-1")), payload});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral(""));
+
+    const QVariantList got = adaptor->property("lastAdd").toList();
+    QCOMPARE(got.size(), 3);
+    QCOMPARE(got.at(0).toString(), QStringLiteral("com.example.App"));
+    QCOMPARE(got.at(1).toString(), QStringLiteral("id-1"));
+    const QVariantMap back = unwrapDbus(got.at(2)).toMap();
+    QCOMPARE(back.value(QStringLiteral("title")).toString(), QStringLiteral("Backup done"));
+    QCOMPARE(back.value(QStringLiteral("sound")).toString(), QStringLiteral("default"));
+    const QVariantList buttons = unwrapDbus(back.value(QStringLiteral("buttons"))).toList();
+    QCOMPARE(buttons.size(), 2);
+    QCOMPARE(buttons.at(0).toMap().value(QStringLiteral("label")).toString(),
+             QStringLiteral("Open"));
+    QCOMPARE(buttons.at(0).toMap().value(QStringLiteral("action")).toString(),
+             QStringLiteral("open"));
+    const QVariantList icon = unwrapDbus(back.value(QStringLiteral("icon"))).toList();
+    QCOMPARE(icon.size(), 2);
+    QCOMPARE(icon.at(0).toString(), QStringLiteral("themed"));
+    QVERIFY(unwrapDbus(icon.at(1)).toStringList().contains(QStringLiteral("dialog-ok")));
+    delete adaptor;
+}
+
+// F3 — bytes icon + silent sound variant through the same axis.
+void TestDBusAdaptor::testNotificationAddDispatchBytesSilent() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.NotifyBytes'\n"
+                                        "  path: '/NotifyBytes'\n"
+                                        "  iface: 'org.freedesktop.impl.portal.Notification'\n"
+                                        "  property var lastAdd\n"
+                                        "  function addNotification(appId, id, notification) {\n"
+                                        "    lastAdd = [appId, id, notification]\n"
+                                        "  }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    const QVariantMap vardict = notificationVardict(true, QStringLiteral("silent"));
+    QVariant payload = writeBySignature(QStringLiteral("a{sv}"), QVariant(vardict));
+    QVERIFY(payload.isValid());
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.NotifyBytes"), QStringLiteral("/NotifyBytes"),
+        QStringLiteral("org.freedesktop.impl.portal.Notification"),
+        QStringLiteral("AddNotification"));
+    msg.setArguments(
+        {QVariant(QStringLiteral("com.example.App")), QVariant(QStringLiteral("id-9")), payload});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.signature(), QStringLiteral(""));
+
+    const QVariantList got = adaptor->property("lastAdd").toList();
+    QCOMPARE(got.size(), 3);
+    const QVariantMap back = unwrapDbus(got.at(2)).toMap();
+    QCOMPARE(back.value(QStringLiteral("sound")).toString(), QStringLiteral("silent"));
+    const QVariantList icon = unwrapDbus(back.value(QStringLiteral("icon"))).toList();
+    QCOMPARE(icon.size(), 2);
+    QCOMPARE(icon.at(0).toString(), QStringLiteral("bytes"));
+    QVERIFY(!unwrapDbus(icon.at(1)).toByteArray().isEmpty());
+    delete adaptor;
+}
+
+// F3 — ActionInvoked-style emission with declared types: (sssav) on the
+// wire with app/id/action/parameter content.
+void TestDBusAdaptor::testNotificationActionInvokedEmission() {
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.NotifySig'\n"
+                         "  path: '/NotifySig'\n"
+                         "  iface: 'org.freedesktop.impl.portal.Notification'\n"
+                         "  _signals: ({ actionInvoked: 'sssav' })\n"
+                         "  signal actionInvoked(var appId, var id, var action, var parameter)\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.NotifySig"), QStringLiteral("/NotifySig"),
+                        QStringLiteral("org.freedesktop.impl.portal.Notification"),
+                        QStringLiteral("actionInvoked"), &catcher, SLOT(onSignal(QDBusMessage))));
+    QVariantList parameter;
+    parameter << QStringLiteral("open-target") << 7;
+    QVERIFY(QMetaObject::invokeMethod(
+        adaptor, "actionInvoked", Q_ARG(QVariant, QVariant(QStringLiteral("com.example.App"))),
+        Q_ARG(QVariant, QVariant(QStringLiteral("id-1"))),
+        Q_ARG(QVariant, QVariant(QStringLiteral("open"))), Q_ARG(QVariant, QVariant(parameter))));
+    QTRY_VERIFY_WITH_TIMEOUT(catcher.count == 1, 5000);
+    QCOMPARE(catcher.lastSignal.signature(), QByteArrayLiteral("sssav"));
+    const QVariantList args = catcher.lastSignal.arguments();
+    QCOMPARE(args.size(), 4);
+    QCOMPARE(args.at(0).toString(), QStringLiteral("com.example.App"));
+    QCOMPARE(args.at(1).toString(), QStringLiteral("id-1"));
+    QCOMPARE(args.at(2).toString(), QStringLiteral("open"));
+    const QVariantList back = unwrapDbus(args.at(3)).toList();
+    QCOMPARE(back.size(), 2);
+    QCOMPARE(back.at(0).toString(), QStringLiteral("open-target"));
 }
 
 // C++ Q_INVOKABLE adaptor path — declared signature honored through the shared
@@ -2297,6 +2473,198 @@ void TestDBusAdaptor::testCoLocatedTeardownService() {
 
     QTRY_VERIFY_WITH_TIMEOUT(
         !bus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.Multi5")), 3000);
+}
+
+// F4 — child-node introspection pin (audit-1 C3): adaptors at /a/b and /a/b/c
+// → introspecting /a/b lists <node name="c"/> (QtDBus-provided); the
+// intermediate /a answers with <node name="b"/>.
+void TestDBusAdaptor::testChildNodeIntrospection() {
+    QObject *b = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.ChildB'\n"
+                                  "  path: '/a/b'\n"
+                                  "  iface: 'org.dbusqml.ChildB'\n"
+                                  "  function ping() { return 'b' }\n"
+                                  "}");
+    QVERIFY(b != nullptr);
+    QObject *c = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  service: 'org.dbusqml.ChildC'\n"
+                                  "  path: '/a/b/c'\n"
+                                  "  iface: 'org.dbusqml.ChildC'\n"
+                                  "  function ping() { return 'c' }\n"
+                                  "}");
+    QVERIFY(c != nullptr);
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage ib = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.ChildB"), QStringLiteral("/a/b"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"));
+    QDBusMessage rb = bus.call(ib, QDBus::Block, 3000);
+    QCOMPARE(rb.type(), QDBusMessage::ReplyMessage);
+    const QString xmlb = rb.arguments().first().toString();
+    QVERIFY2(xmlb.contains(QStringLiteral("<node name=\"c\"/>")), qPrintable(xmlb));
+
+    QDBusMessage ia = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.ChildB"), QStringLiteral("/a"),
+        QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"));
+    QDBusMessage ra = bus.call(ia, QDBus::Block, 3000);
+    QCOMPARE(ra.type(), QDBusMessage::ReplyMessage);
+    const QString xmla = ra.arguments().first().toString();
+    QVERIFY2(xmla.contains(QStringLiteral("<node name=\"b\"/>")), qPrintable(xmla));
+
+    delete b;
+    delete c;
+}
+
+// Commit 11 (dispatcher deadlock resolution) — deterministic stress for the
+// registryMutex × bus-call embrace. Geometry: one UNFLAGGED anchor owns the
+// victim name on the main session bus; per cycle a REPLACE_EXISTING stealer
+// adaptor on connA's OWN connection takes the name over (takeover at the
+// daemon, watched on the manager thread); then the STEALER is destroyed in
+// the same cycle — ITS detach takes the blocking ReleaseName path while
+// connA/connB's parallel churnA battle keeps NameOwnerChanged live on that
+// thread. N iterations with a hard wall-clock bound: post-fix the suite
+// survives; pre-fix the stealer detach wedges (registryMutex held across
+// unregisterService while the manager thread blocks on it) and the
+// teardown clock trips.
+void TestDBusAdaptor::testNameOwnerChangedChurnSurvives() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.ChurnVictim'\n"
+                              "  path: '/ChurnAnchor'\n"
+                              "  iface: 'org.dbusqml.ChurnAnchor'\n"
+                              "  allowReplacement: true\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    static const char *kVictimSrc = "import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.ChurnVictim'\n"
+                                    "  path: '/ChurnStealer'\n"
+                                    "  iface: 'org.dbusqml.ChurnStealer'\n"
+                                    "  replaceExisting: true\n"
+                                    "  function ping() { return 'x' }\n"
+                                    "}";
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    QQmlComponent stealerComp(&engine);
+    stealerComp.setData(kVictimSrc, QUrl());
+    QVERIFY2(stealerComp.isReady(), qPrintable(stealerComp.errorString()));
+
+    // Claim-record topology: records are keyed (connName, name). Anchor on
+    // the session bus, stealer on connA — distinct records, same DAEMON
+    // name, so the takeover happens at the daemon and every connection's
+    // watch fires independently.
+    QDBusConnection sessionBus = QDBusConnection::sessionBus();
+    auto serviceOwner = [&](const QString &name) {
+        const QDBusReply<QString> r = sessionBus.interface()->serviceOwner(name);
+        return r.isValid() ? r.value() : QString();
+    };
+
+    const QString churnA = QStringLiteral("org.dbusqml.ChurnA");
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    QElapsedTimer bound;
+    bound.start();
+    const int iterations =
+        TestDBusAdaptor::s_stressIterations > 0 ? TestDBusAdaptor::s_stressIterations : 25;
+    const int targetMoves = qEnvironmentVariableIsSet("DBUSQML_STRESS_LOW") ? 10 : 80;
+    for (int i = 0; i < iterations; ++i) {
+        QVERIFY2(bound.elapsed() < 55000,
+                 qPrintable(QStringLiteral("stress exceeded 55s at iteration %1").arg(i)));
+
+        // (1) Re-arm fresh contender connections every iteration.
+        DBusConnection *connA = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+        QVERIFY(connA != nullptr);
+        DBusConnection *connB = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+        QVERIFY(connB != nullptr);
+        QDBusConnection qa = *connA;
+        QDBusConnection qb = *connB;
+
+        // (2) QUIESCED — moved to (2b) after the anchor settles (see
+        // below): the churnA battle saturated the daemon ahead of the
+        // anchor's async RequestName and delayed its watch delivery past
+        // the spy window. Anchor first, traffic second.
+        QTest::qWait(20);
+
+        const QString churnVictim = QStringLiteral("org.dbusqml.ChurnVictim");
+        // PROBE N RESULT (daemon policy): raw RequestName(REPLACE_EXISTING)
+        // against an UNFLAGGED owner returns IN_QUEUE (2), never stolen —
+        // the anchor MUST be flagged (allowReplacement:true) for any steal
+        // to land. And revision-B forensics: the anchor's flagged claim
+        // reply was delayed past the spy window by step (2)'s churnA battle
+        // saturating the daemon JUST before anchor creation. FIX BOTH:
+        // flagged anchor + quiesce (battle moves AFTER the anchor's claim
+        // settles, gated on the anchor's own nameAcquired spy).
+        QObject *anchor = comp.beginCreate(engine.rootContext());
+        QVERIFY(anchor != nullptr);
+        QSignalSpy anchorSpy(anchor, SIGNAL(nameAcquired()));
+        comp.completeCreate();
+        QTRY_VERIFY_WITH_TIMEOUT(anchorSpy.count() >= 1, 15000);
+
+        // (2b) NOW battle churnA: the anchor's claim is settled, its watch
+        // is live on the manager thread, and every acquire/loss below emits
+        // NameOwnerChanged through that thread.
+        int moves = 0;
+        for (int m = 0; m < targetMoves && moves < 8; ++m) {
+            if (m % 2 == 0) {
+                qa.unregisterService(churnA);
+                QTest::qWait(5);
+                qb.registerService(churnA);
+            } else {
+                qb.unregisterService(churnA);
+                QTest::qWait(5);
+                qa.registerService(churnA);
+            }
+            if (!serviceOwner(churnA).isEmpty())
+                ++moves;
+        }
+        QTest::qWait(20);
+
+        // (4) CYCLE (the wedge geometry): connA takes the name with a
+        // stealer adaptor (its claim record is connA's OWN — no contention
+        // with the anchor's record); then the STEALER ITSELF is destroyed in
+        // the same cycle — ITS detach takes the blocking ReleaseName path
+        // while the traffic above stays live on the manager thread.
+        // Per cycle: steal → destroy stealer under traffic.
+        bool stoleOnce = false;
+        for (int c = 0; c < 3; ++c) {
+            // The takeover-test pattern verbatim on a DEDICATED component:
+            // literal flags in QML, connection + redundant flag setProperty
+            // BEFORE completeCreate.
+            QObject *stealer = stealerComp.beginCreate(engine.rootContext());
+            QVERIFY(stealer != nullptr);
+            stealer->setProperty("connection", QVariant::fromValue<DBusConnection *>(connA));
+            stealer->setProperty("replaceExisting", true);
+            QSignalSpy stealerSpy(stealer, SIGNAL(nameAcquired()));
+            stealerComp.completeCreate();
+            QTRY_VERIFY_WITH_TIMEOUT(stealerSpy.count() >= 1, 15000);
+            stoleOnce = true;
+            QTest::qWait(20);
+            // Extra traffic inside the window: connB battles churnA while
+            // the stealer's detach below blocks on ReleaseName.
+            qb.unregisterService(churnA);
+            qa.registerService(churnA);
+            QElapsedTimer teardown;
+            teardown.start();
+            delete stealer;
+            QVERIFY2(teardown.elapsed() < 20000,
+                     qPrintable(
+                         QStringLiteral("teardown wedged at iteration %1 cycle %2").arg(i).arg(c)));
+            QTest::qWait(10);
+        }
+        QVERIFY2(stoleOnce, "no takeover steal ever succeeded during the stress");
+        delete anchor;
+        delete connB;
+        delete connA;
+        QTest::qWait(10);
+    }
+    QVERIFY(true);
 }
 
 // M6 — iface-less call (D-Bus allows empty interface): routes by member name
@@ -4363,6 +4731,16 @@ void TestDBusAdaptor::testServiceAcquisitionTakeover() {
     QSignalSpy acquiredA(a, SIGNAL(nameAcquired()));
     QSignalSpy lostA(a, SIGNAL(nameLost()));
     compA.completeCreate();
+    // D8 determinism: the barrier is bus STATE, not wall-clock luck. The
+    // daemon's own GetNameOwner reports the claim settled; the local
+    // nameAcquired/nameLost signals are consequences that must follow within
+    // an event-loop turn — if they don't, that's a real defect, failed loud.
+    // (Under suite load the async flagged claim used to outrun fixed QTRY
+    // windows here: 4/9 first-run failures.)
+    const QDBusConnection sessionBus = QDBusConnection::sessionBus();
+    QTRY_VERIFY_WITH_TIMEOUT(sessionBus.interface()->serviceOwner(
+                                 QStringLiteral("org.dbusqml.Acquire")) == sessionBus.baseService(),
+                             15000);
     QTRY_VERIFY_WITH_TIMEOUT(acquiredA.count() >= 1, 5000); // async flagged claim
     QCOMPARE(lostA.count(), 0);
 
@@ -4389,6 +4767,12 @@ void TestDBusAdaptor::testServiceAcquisitionTakeover() {
 
     QSignalSpy acquiredB(b, SIGNAL(nameAcquired()));
     compB.completeCreate();
+    // D8 barrier, takeover side: wait for the bus to report B as owner
+    // before asserting the local consequences.
+    const QDBusConnection bConn = *connB;
+    QTRY_VERIFY_WITH_TIMEOUT(sessionBus.interface()->serviceOwner(
+                                 QStringLiteral("org.dbusqml.Acquire")) == bConn.baseService(),
+                             15000);
     QTRY_VERIFY_WITH_TIMEOUT(acquiredB.count() >= 1, 5000);
     QTRY_VERIFY_WITH_TIMEOUT(lostA.count() >= 1, 5000);
 
@@ -5847,12 +6231,28 @@ void TestDBusAdaptor::testMatrixSignalValues() {
                    SLOT(onSignal(QDBusMessage)));
 }
 
+int TestDBusAdaptor::s_stressIterations = 0;
+
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
+    // Optional: -stress N overrides the churn test's iteration count.
+    // Stripped from argv (QTest fatals on unknown options).
+    std::vector<char *> filtered;
+    filtered.reserve(argc);
+    filtered.push_back(argv[0]);
+    for (int i = 1; i < argc; ++i) {
+        if (QByteArray(argv[i]) == QByteArrayLiteral("-stress") && i + 1 < argc) {
+            TestDBusAdaptor::s_stressIterations = QByteArray(argv[i + 1]).toInt();
+            ++i;
+        } else {
+            filtered.push_back(argv[i]);
+        }
+    }
+    int filteredArgc = static_cast<int>(filtered.size());
     int rc = 0;
     {
         TestDBusAdaptor tc;
-        rc = QTest::qExec(&tc, argc, argv);
+        rc = QTest::qExec(&tc, filteredArgc, filtered.data());
     }
     // Process deferred deletes so QML adaptors clean up
     for (int i = 0; i < 500; ++i) {

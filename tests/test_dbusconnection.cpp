@@ -2044,6 +2044,54 @@ private slots:
         QVERIFY(true);
     }
 
+    // F3 — the full Notification vardict (themed icon, buttons, sound)
+    // round-trips through a separate process over the real wire.
+    static QVariantMap notificationVardict() {
+        QVariantMap n;
+        n[QStringLiteral("title")] = QStringLiteral("Backup done");
+        n[QStringLiteral("body")] = QStringLiteral("42 files synced");
+        QVariantList buttons;
+        QVariantMap openBtn;
+        openBtn[QStringLiteral("label")] = QStringLiteral("Open");
+        openBtn[QStringLiteral("action")] = QStringLiteral("open");
+        QVariantMap dismissBtn;
+        dismissBtn[QStringLiteral("label")] = QStringLiteral("Dismiss");
+        dismissBtn[QStringLiteral("action")] = QStringLiteral("dismiss");
+        buttons << QVariant(openBtn) << QVariant(dismissBtn);
+        n[QStringLiteral("buttons")] = QVariant::fromValue(
+            QDBusVariant(writeBySignature(QStringLiteral("aa{sv}"), QVariant(buttons))));
+        QVariantList iconPair;
+        iconPair << QStringLiteral("themed")
+                 << QVariant(QStringList{QStringLiteral("dialog-ok"), QStringLiteral("ok")});
+        n[QStringLiteral("icon")] = QVariant::fromValue(
+            QDBusVariant(writeBySignature(QStringLiteral("(sv)"), QVariant(iconPair))));
+        n[QStringLiteral("sound")] = QVariant(QStringLiteral("default"));
+        n[QStringLiteral("priority")] = QStringLiteral("normal");
+        return n;
+    }
+
+    void testNotificationVardictEcho() {
+        QVariant marshaled =
+            marshalBySignature(QStringLiteral("a{sv}"), QVariant(notificationVardict()));
+        QVERIFY(marshaled.isValid());
+        QCOMPARE(echoWireSignature(marshaled), QStringLiteral("a{sv}"));
+        // The echo helper's in-arg is av — wrap the map so the service's
+        // size==1 path hands the map itself to the writer.
+        QVariantList wrapped;
+        wrapped << QVariant(notificationVardict());
+        const QVariantMap back =
+            unwrapDbus(echoPayload(QStringLiteral("a{sv}"), QVariant(wrapped))).toMap();
+        QCOMPARE(back.value(QStringLiteral("title")).toString(), QStringLiteral("Backup done"));
+        QCOMPARE(back.value(QStringLiteral("sound")).toString(), QStringLiteral("default"));
+        const QVariantList buttons = unwrapDbus(back.value(QStringLiteral("buttons"))).toList();
+        QCOMPARE(buttons.size(), 2);
+        QCOMPARE(buttons.at(1).toMap().value(QStringLiteral("action")).toString(),
+                 QStringLiteral("dismiss"));
+        const QVariantList icon = unwrapDbus(back.value(QStringLiteral("icon"))).toList();
+        QCOMPARE(icon.size(), 2);
+        QCOMPARE(icon.at(0).toString(), QStringLiteral("themed"));
+    }
+
     // _signatures override on the proxy — the declared call-arg signature wins
     // over the introspected one (the echo service declares "s"; the override
     // demands "aa{sv}").

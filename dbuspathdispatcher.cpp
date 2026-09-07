@@ -25,6 +25,11 @@ struct ServiceClaim {
     int refs = 0;
     bool owned = false;
     bool queued = false;
+    bool tearingDown = false; // detach tombstone: last holder left, the
+                              // blocking ReleaseName is in flight — a
+                              // concurrent attach ADOPTS this record instead
+                              // of re-registering (never re-register under a
+                              // tombstone; never unregister an adopted name)
     bool allowReplacement = false;
     bool replaceExisting = false;
     bool queueOnBusy = false;
@@ -37,6 +42,29 @@ QMutex &registryMutex() {
     static QMutex m;
     return m;
 }
+
+// Debug-only invariant guard (commit 11, part 4): a mutex must NEVER span a
+// blocking bus call — the party that needs the mutex (QtDBus's manager
+// thread, the sole socket reader) also owns bus I/O progress, so the pairing
+// is a deadly embrace by construction. Any future recurrence trips this
+// assert deterministically instead of hanging the suite for 300s.
+#ifdef QT_DEBUG
+thread_local bool g_holdingRegistryMutex = false;
+struct RegistryMutexGuard {
+    explicit RegistryMutexGuard(QMutex &m) : m_locker(&m) { g_holdingRegistryMutex = true; }
+    ~RegistryMutexGuard() { g_holdingRegistryMutex = false; }
+    QMutexLocker<QMutex> m_locker;
+};
+inline void assertNoRegistryMutex(const char *site) {
+    Q_ASSERT_X(!g_holdingRegistryMutex, site, "blocking bus call under registryMutex");
+}
+#else
+struct RegistryMutexGuard {
+    explicit RegistryMutexGuard(QMutex &m) : m_locker(&m) {}
+    QMutexLocker<QMutex> m_locker;
+};
+inline void assertNoRegistryMutex(const char *) {}
+#endif
 
 QHash<PathKey, DBusPathDispatcher *> &dispatchers() {
     static QHash<PathKey, DBusPathDispatcher *> h;
@@ -58,7 +86,7 @@ void DBusPathDispatcher::handleServiceOwnerChange(const QString &connName, const
     bool acquired = false;
     bool lost = false;
     {
-        QMutexLocker locker(&registryMutex());
+        RegistryMutexGuard locker(registryMutex());
         auto it = serviceClaims().find({connName, service});
         if (it == serviceClaims().end())
             return;
@@ -97,7 +125,7 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
 
     DBusPathDispatcher *disp = nullptr;
     {
-        QMutexLocker locker(&registryMutex());
+        RegistryMutexGuard locker(registryMutex());
         auto it = dispatchers().find(key);
         if (it != dispatchers().end()) {
             disp = it.value();
@@ -116,8 +144,21 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
 
     if (!service.isEmpty()) {
         const ServiceKey svcKey{connName, service};
-        QMutexLocker locker(&registryMutex());
+        RegistryMutexGuard locker(registryMutex());
         ServiceClaim &claim = serviceClaims()[svcKey];
+        // Tombstone adoption (detach's teardown marker): the name is still
+        // registered at the daemon — a ReleaseName is either in flight or
+        // was skipped — so take over the record: refresh the claim state,
+        // re-arm the watch if these flags need one, and count the holder.
+        // No re-register, no unregister window to clobber.
+        if (claim.tearingDown) {
+            claim.tearingDown = false;
+            claim.refs = 0;
+            claim.holders.clear();
+            claim.owned = false;
+            claim.queued = false;
+            claim.baseService = conn.baseService();
+        }
         const bool flagged = allowReplacement || replaceExisting || queueOnBusy;
         // Owner-change watch (flagged claims only): nameAcquired for queued
         // acquisitions and nameLost for takeovers are driven by the daemon's
@@ -192,7 +233,7 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
 
     DBusPathDispatcher *disp = nullptr;
     {
-        QMutexLocker locker(&registryMutex());
+        RegistryMutexGuard locker(registryMutex());
         auto it = dispatchers().find({connName, path});
         if (it != dispatchers().end())
             disp = it.value();
@@ -201,35 +242,75 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
         disp->detachAdaptor(adaptor);
 
     if (!service.isEmpty()) {
+        // Commit 11, parts 1-3: the blocking ReleaseName happens OUTSIDE the
+        // lock; gated on ownership (a lost name makes it a guaranteed-futile
+        // NOT_OWNER round trip); the claim becomes a TOMBSTONE (not erased)
+        // so a concurrent same-name attach adopts it instead of registering
+        // into the unregister window.
         const ServiceKey svcKey{connName, service};
-        QMutexLocker locker(&registryMutex());
-        auto it = serviceClaims().find(svcKey);
-        if (it != serviceClaims().end()) {
-            ServiceClaim &claim = it.value();
-            for (int i = 0; i < claim.holders.size(); ++i) {
-                if (claim.holders.at(i).data() == adaptor) {
-                    claim.holders.removeAt(i);
-                    break;
+        bool needUnregister = false;
+        {
+            RegistryMutexGuard locker(registryMutex());
+            auto it = serviceClaims().find(svcKey);
+            if (it != serviceClaims().end()) {
+                ServiceClaim &claim = it.value();
+                for (int i = 0; i < claim.holders.size(); ++i) {
+                    if (claim.holders.at(i).data() == adaptor) {
+                        claim.holders.removeAt(i);
+                        break;
+                    }
+                }
+                const int refs = claim.refs - 1;
+                if (refs <= 0) {
+                    if (claim.watch) {
+                        QObject::disconnect(claim.watch);
+                        claim.watch = QMetaObject::Connection();
+                    }
+                    claim.refs = 0;
+                    claim.holders.clear();
+                    // Part 2: only an OWNED name is worth the blocking
+                    // ReleaseName. A lost name (takeover path) would return
+                    // NOT_OWNER — futile by construction, and it used to log
+                    // a spurious "Failed to unregister" on the happy path.
+                    needUnregister = claim.owned;
+                    claim.owned = false;
+                    // Part 3: tombstone — stays in the map until the bus call
+                    // below returns. attach() adopts it (see there).
+                    claim.tearingDown = true;
+                } else {
+                    claim.refs = refs;
                 }
             }
-            const int refs = claim.refs - 1;
-            if (refs <= 0) {
-                if (claim.watch) {
-                    QObject::disconnect(claim.watch);
-                    claim.watch = QMetaObject::Connection();
+        }
+        if (needUnregister) {
+            // Part 1 + 4: OUTSIDE the lock (guard asserts it in debug).
+            assertNoRegistryMutex("DBusPathDispatcher::detach");
+            const bool released = conn.unregisterService(service);
+            {
+                RegistryMutexGuard locker(registryMutex());
+                auto it = serviceClaims().find(svcKey);
+                // Erase the tombstone — UNLESS a concurrent attach adopted
+                // it meanwhile (refs > 0 or !tearingDown): then the adopters
+                // own the record and the bus call above was theirs to skip
+                // (adopt path never re-registers, so nothing to un-register).
+                if (it != serviceClaims().end() && it.value().tearingDown && it.value().refs == 0) {
+                    serviceClaims().erase(it);
                 }
-                serviceClaims().erase(it);
-                if (!conn.unregisterService(service))
-                    qmlInfo(adaptor) << "Failed to unregister service" << service;
-            } else {
-                claim.refs = refs;
+            }
+            if (!released) {
+                const QString err = conn.lastError().message();
+                // NOT_OWNER (lost the name between gating and ReleaseName)
+                // is expected fallout of a takeover, not a failure.
+                if (!err.contains(QStringLiteral("NOT_OWNER")) &&
+                    !err.contains(QStringLiteral("not an owner")))
+                    qmlInfo(adaptor) << "Failed to unregister service" << service << err;
             }
         }
     }
 }
 
 int DBusPathDispatcher::liveCount() {
-    QMutexLocker locker(&registryMutex());
+    RegistryMutexGuard locker(registryMutex());
     return dispatchers().size();
 }
 
@@ -262,7 +343,7 @@ void DBusPathDispatcher::detachAdaptor(DBusAdaptor *adaptor) {
 
     // Last adaptor gone — drop the path and tear down the dispatcher.
     {
-        QMutexLocker locker(&registryMutex());
+        RegistryMutexGuard locker(registryMutex());
         dispatchers().remove({m_connName, m_path});
     }
     m_conn.unregisterObject(m_path);

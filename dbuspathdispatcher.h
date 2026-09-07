@@ -14,6 +14,13 @@ class DBusAdaptor;
 // name registration across adaptors. The dispatcher is the single
 // QDBusVirtualObject QtDBus sees at a path; adaptors attach/detach through the
 // static registry. NOT QML-exposed, NOT an installed header.
+//
+// Threading (attach/detach contract): attach/detach for a given (connection,
+// service) are consumer-serialized — typically both run on the QML/main
+// thread, which is the only configuration the registry's teardown markers
+// protect. A C++ consumer driving attach/detach for the SAME name from two
+// threads concurrently is unsupported (the registry mutex guards the manager
+// thread, not concurrent consumer threads).
 class DBusPathDispatcher : public QDBusVirtualObject {
     Q_OBJECT
 
