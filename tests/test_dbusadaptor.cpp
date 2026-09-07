@@ -380,6 +380,7 @@ private slots:
     void testCoLocatedTeardownService();
     void testChildNodeIntrospection();
     void testNameOwnerChangedChurnSurvives();
+    void testConcurrentAttachSurvives();
     void testCoLocatedIfaceLessCall();
     void testCoLocatedSeparateBuses();
     void testCoLocatedDuplicateIface();
@@ -2663,6 +2664,111 @@ void TestDBusAdaptor::testNameOwnerChangedChurnSurvives() {
         delete connB;
         delete connA;
         QTest::qWait(10);
+    }
+    QVERIFY(true);
+}
+
+// Commit 12 (attach-side embrace) — concurrent same-name attach while a
+// first attach's blocking registerService is in flight. Pre-fix the second
+// attach sees refs > 0 before ownership is known, skips registration, and
+// the name is never owned (lost registration); worse, any live flagged
+// watch wedges the manager thread while the first attach blocks under the
+// lock. Post-fix the second attach joins the `pending` claim and both end
+// up owned and routing. N rapid same-name create cycles with a hard
+// wall-clock bound (the teardown clock converts any wedge into a loud
+// failure instead of a hang).
+void TestDBusAdaptor::testConcurrentAttachSurvives() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.RaceAttach'\n"
+                              "  path: '/RaceAttach'\n"
+                              "  iface: 'org.dbusqml.RaceAttach'\n"
+                              "  function ping() { return 'r' }\n"
+                              "}";
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+
+    const QString race = QStringLiteral("org.dbusqml.RaceAttach");
+    const QString raceWatch = QStringLiteral("org.dbusqml.RaceWatch");
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    auto raceOwner = [&]() {
+        const QDBusReply<QString> r = bus.interface()->serviceOwner(race);
+        return r.isValid() ? r.value() : QString();
+    };
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    QElapsedTimer bound;
+    bound.start();
+    const int iterations =
+        TestDBusAdaptor::s_stressIterations > 0 ? TestDBusAdaptor::s_stressIterations : 25;
+    for (int i = 0; i < iterations; ++i) {
+        QVERIFY2(bound.elapsed() < 55000,
+                 qPrintable(QStringLiteral("attach race exceeded 55s at iteration %1").arg(i)));
+        // PROBE-A RESULT: back-to-back creates serialize at the daemon
+        // (owner present after the FIRST create) — the race as written
+        // cannot wedge because Qt's blocking registerService completes
+        // before the second attach starts. The real attach-side embrace
+        // needs the second attach INSIDE the first's bus call, which on a
+        // single thread requires the flagged async path… which never blocks
+        // under the lock. So the attach-side wedge needs NameOwnerChanged
+        // traffic DURING the first's blocking register: churn a watched
+        // name on a second connection while rapid-fire creating same-name
+        // adaptors on the main one.
+        //
+        // Per iteration: arm a flagged watch on the race name from connB
+        // (its serviceOwnerChanged lambda lives on the manager thread),
+        // then create/destroy-cycle the main-name adaptors while connB
+        // churns the watched name's ownership.
+        if (i == 0)
+            qInfo("attach-race diag: armed watch variant");
+        // Arm: a flagged watch adaptor on a SECOND connection for a
+        // watched name, so its serviceOwnerChanged lambda lives on the
+        // manager thread for the whole iteration.
+        DBusConnection *connW = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+        QVERIFY(connW != nullptr);
+        QObject *watcher = comp.beginCreate(engine.rootContext());
+        QVERIFY(watcher != nullptr);
+        watcher->setProperty("service", QVariant(raceWatch));
+        watcher->setProperty("connection", QVariant::fromValue<DBusConnection *>(connW));
+        watcher->setProperty("allowReplacement", true);
+        comp.completeCreate();
+        // Churn the watched name from the main bus: every acquire/loss
+        // emits NameOwnerChanged through the manager thread's lambda.
+        for (int w = 0; w < 6; ++w) {
+            bus.unregisterService(raceWatch);
+            QTest::qWait(5);
+            bus.registerService(raceWatch);
+            QTest::qWait(5);
+        }
+        QObject *first = comp.beginCreate(engine.rootContext());
+        QVERIFY(first != nullptr);
+        comp.completeCreate();
+        QObject *second = comp.beginCreate(engine.rootContext());
+        QVERIFY(second != nullptr);
+        comp.completeCreate();
+        QDBusMessage m = QDBusMessage::createMethodCall(race, QStringLiteral("/RaceAttach"),
+                                                        QStringLiteral("org.dbusqml.RaceAttach"),
+                                                        QStringLiteral("ping"));
+        QDBusMessage r = bus.call(m, QDBus::Block, 3000);
+        QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(r.arguments().first().toString(), QStringLiteral("r"));
+        QVERIFY2(!raceOwner().isEmpty(), "name lost after concurrent attach");
+        QElapsedTimer teardown;
+        teardown.start();
+        delete first;
+        delete second;
+        delete watcher;
+        delete connW;
+        QVERIFY2(teardown.elapsed() < 20000,
+                 qPrintable(QStringLiteral("attach-race teardown wedged at iteration %1").arg(i)));
+        // The name must be fully released before the next cycle re-arms
+        // (tombstone erased, no leaked claim).
+        QTRY_VERIFY_WITH_TIMEOUT(raceOwner().isEmpty(), 10000);
     }
     QVERIFY(true);
 }
