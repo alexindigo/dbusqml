@@ -4,6 +4,65 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] — 2026-09-06
+
+### Fixed
+
+- **Declared container elements are producible** (the `a(...)` hole is
+  closed): unproducible array/map element signatures mint assign-once
+  signature-slot pool registrations at first encounter and stream through
+  the existing walkers — `a(sa{sv})` (BindShortcuts response / signal),
+  `aa{ss}`, `a{sas}`, struct arrays like `a(ii)`. No marshall operators,
+  no libdbus, no private Qt ABI; pool exhaustion fails loud.
+- **Dispatcher never blocks under the registry lock** (two proven deadly
+  embraces): detach releases `ReleaseName` outside the lock with
+  ownership gating, tombstone adoption, and NOT_OWNER-aware logging;
+  attach registers outside the lock with a pending-state claim. A
+  debug-only guard asserts the lock is clear before any blocking bus call.
+- **Relayed signal args are guarded** (the last unguarded send site):
+  unmarshalable values warn + skip; send failures are logged; the 0.5.2
+  kill-class is closed.
+- **Aliased handlers dispatch through the JS path** — thrown
+  `DBusUtils.error()` on an aliased member is a named error reply (was:
+  silent empty success), and 64-bit in-args keep precision.
+- **Client PropertiesChanged protocol complete**: interface-argument filter
+  (a co-located adaptor's signals no longer contaminate the map);
+  `invalidated_properties` re-Gets each name (stale kept + one warning on
+  error); introspected-property placeholders record the wire name
+  immediately (no wrong-name Set window).
+- **Emission truthfulness**: private-property notify signals no longer
+  leak onto the bus (privacy exclusion moved to relay attach);
+  `_signals`/catalog-declared signal names are relayed under the declared
+  wire name; declared signal TYPES are applied at emission (relay +
+  `emitSignal`), mismatched payloads warn + skip; >5-param signals are
+  neither relayed nor advertised; `qml*`-prefixed signals are never
+  relayed.
+- **Served out-args are declared-truthful**: `declaredOutTypes` gains a
+  found/not-found distinction; declared-void methods carry no out-arg
+  (the napkin's phantom `result v` dies); a declared-void handler that
+  returns a value is warned and the value dropped (declaration wins);
+  catalog in-args match the resolved wire name (alias + exact tiers);
+  catalog property `type`/`access` reach the served XML.
+- **Walker parity**: nested `av`/`ao` read (was silently dropped); `ay`
+  number-array coercion at every position; invalid fds rejected at
+  marshal (`h`) and at the send boundary; the declared signature wins
+  over a mismatched gadget's own type at every position (D4); bare
+  `o`/`g` carriers unwrap to strings.
+- **Robustness**: recursion depth cap 32 in the recursive walkers (warn +
+  loud fail); a failed C++ method invocation is a Failed error reply
+  (never a silent empty success); every silent malformed-signature path
+  warns; error names are grammar-validated before the reply; QML-declared
+  `emitSignal` is skipped by dispatch AND the XML (the load warning is
+  now true); `holdReply`/`unregister` are never advertised.
+- **Hygiene**: the client/server folds share one implementation with the
+  two documented modes (both accepted on lookup — `xmlConfig` resolves
+  `XMLConfig`); `setProperty` converts before the guard and resolves
+  names through the recorded map; alias-to-private-property refused at
+  attach with a warning; `_signatures` keyed by the aliased QML name
+  honored; QObject\*-typed properties never attach relays; co-located
+  empty-iface adaptors dedupe in merged introspection; dead residues
+  removed; user-callback exceptions in asyncCall are logged.
+
 ## [0.9.0] — 2026-09-02
 
 ### Added

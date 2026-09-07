@@ -104,4 +104,6 @@ declared signatures drive the reply marshaling. This is what lets a
 `org.freedesktop.impl.portal.Settings` backend return `ReadAll` as
 `a{sa{sv}}` — the shape xdg-desktop-portal requires — from a plain QML object
 literal, with no per-app override. Explicit `_signatures` overrides beat the
-catalog; unproducible declared shapes warn and fall back to inference.
+catalog; only malformed signatures, invalid values, or pool exhaustion warn
+and fall back to inference (every well-formed element signature is
+producible via the signature-slot pool).

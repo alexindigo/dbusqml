@@ -330,6 +330,11 @@ never disagree:
 3. **Stable inference** — the deterministic first-character fold
    (`readOne` ⇄ `ReadOne`). The same fold in reverse is the advertised-name
    fallback: an undeclared QML member is advertised wire-cased on the bus.
+   On the client the property-map fold collapses leading uppercase RUNS with
+   the word-boundary exception (`URLConfig` → `urlConfig`, `XMLConfig` →
+   `xmlConfig`, `URL` → `url`); the two folds are the two documented modes of
+   one shared implementation, and lookups accept BOTH folds (a client-folded
+   name resolves the same member).
 
 `_signals` is introspection-only — `emitSignal` remains the send path.
 `_signatures` (reply out-signatures) is unchanged.
@@ -546,6 +551,11 @@ Destroying any co-located adaptor leaves the path and the service name
 registered for the survivors; only the last adaptor to be destroyed releases
 them.
 
+Threading: attach/detach for a given (connection, service) are
+consumer-serialized — in practice both run on the QML/main thread. Driving
+attach/detach for the SAME name from two threads concurrently is
+unsupported (see `docs/PARITY.md`, threading contract).
+
 #### Per-call adaptor lifecycle
 
 `DBusAdaptor` is safe to create dynamically — one instance per call at a
@@ -630,10 +640,11 @@ DBusAdaptor {
 }
 ```
 
-A declared signature is never silently ignored. If dbusqml cannot produce a
-declared signature (e.g. an array of anonymous structs, which needs a
-registered carrier type), it logs a warning and falls back to inference —
-never a different wire type with no notice.
+A declared signature is never silently ignored. Every well-formed element
+signature is producible (unregistered container shapes mint assign-once
+signature-slot pool registrations — see `dbussignatureslots.h`); only
+malformed signatures, invalid values, or pool exhaustion log a warning and
+fall back to inference — never a different wire type with no notice.
 
 ---
 
@@ -837,11 +848,10 @@ Caveats:
 
 ## Known Limitations
 
-Only two remain, both true language/type-system constraints — everything
-buildable is served (see the sections above for the full surface:
-truthful introspection, `PropertiesChanged`, named errors, name
-acquisition, call options, watchers, ObjectManager, fds, lossless
-64-bit).
+Language/type-system constraints only — everything buildable is served
+(see the sections above for the full surface: truthful introspection,
+`PropertiesChanged`, named errors, name acquisition, call options,
+watchers, ObjectManager, fds, lossless 64-bit).
 
 - **Dict keys are strings.** JS object keys are strings by definition, so
   demarshaled dict keys stringify (an `i`-keyed dict arrives with string
@@ -849,6 +859,14 @@ acquisition, call options, watchers, ObjectManager, fds, lossless
 - **Empty container inference.** `[]` infers `av` and `{}` infers `a{sv}`
   — stable, deterministic inference. Declared signatures are the answer
   when a receiver needs a concrete element type.
+- **No bus-restart reconnection.** A `DBus` proxy does not watch for
+  `Disconnected` on the bus connection (session-bus death usually ends
+  the session anyway); the service watcher recovers cleanly across
+  service restarts. If the bus ITSELF dies and returns, destroy and
+  recreate the proxy.
+- **Signature recursion depth is capped at 32.** Hostile or pathological
+  signatures (remote-influenced) fail loud with a warning instead of
+  exhausting the stack.
 
 ### Signal handlers on `DBus` elements run in C++-object context
 
