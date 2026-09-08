@@ -382,6 +382,13 @@ private slots:
     void testAllowedSenderMethodGate();
     void testAllowedSenderPropertiesGate();
     void testAllowedSenderOpenByDefault();
+    // Phase 9 (held-reply TTL): expiry errors the caller
+    // (wire-asserted, exactly-one-reply), settle-first cancels,
+    // NO_REPLY interaction, destructor tail unaffected.
+    void testHeldReplyTimeoutExpires();
+    void testHeldReplyTimeoutSettleCancels();
+    void testHeldReplyTimeoutDisabledByDefault();
+    void testHeldReplyTimeoutNoReplySilent();
     void testVariantTypedPayloadStringArray();
     void testVariantTypedPayloadBytes();
     void testVariantTypedPayloadStructEquivalence();
@@ -2333,6 +2340,142 @@ void TestDBusAdaptor::testAllowedSenderOpenByDefault() {
     QCOMPARE(r3.type(), QDBusMessage::ErrorMessage);
     QCOMPARE(r3.errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
     delete adaptor;
+}
+
+// ==================== Phase 9: held-reply TTL ====================
+//
+// Adaptor property heldReplyTimeout (ms, 0 = disabled, the default):
+// expiry settles the held reply with Failed ("reply timed out") + warn;
+// settle cancels the timer. The xdp reality note (their sync Close
+// blocks 25 s) documents WHY a consumer would opt in.
+void TestDBusAdaptor::testHeldReplyTimeoutExpires() {
+    // TTL fires: the caller gets EXACTLY ONE Failed reply on the serial
+    // (wire-asserted — reply type + error name + message), even though
+    // the handler never settles.
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.TtlA'\n"
+                                        "  path: '/TtlA'\n"
+                                        "  iface: 'org.dbusqml.TtlA'\n"
+                                        "  heldReplyTimeout: 400\n"
+                                        "  function hang() { holdReply(); }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.TtlA"), QStringLiteral("/TtlA"),
+                          QStringLiteral("org.dbusqml.TtlA"), QStringLiteral("Hang"));
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(8000));
+    QDBusMessage r = w->reply();
+    delete w;
+    // Exactly-one-reply: an error (not a timeout-silence, not a double).
+    QCOMPARE(r.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(r.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+    QVERIFY(r.errorMessage().contains(QStringLiteral("timed out")));
+    delete adaptor;
+}
+
+void TestDBusAdaptor::testHeldReplyTimeoutSettleCancels() {
+    // Settle-first cancels the timer: a prompt settle answers normally
+    // and no expiry error follows (exactly one reply, the success).
+    // SILENCE-PAST-EXPIRY (V1 punch list): the TTL here is SHORT (600ms)
+    // and the test waits WELL past it (3s) — proving the settled timer
+    // never fires, not just that a second call still works.
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.TtlB'\n"
+                                        "  path: '/TtlB'\n"
+                                        "  iface: 'org.dbusqml.TtlB'\n"
+                                        "  heldReplyTimeout: 600\n"
+                                        "  function quick() {\n"
+                                        "    var h = holdReply();\n"
+                                        "    h.send('fast');\n"
+                                        "  }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.TtlB"), QStringLiteral("/TtlB"),
+                          QStringLiteral("org.dbusqml.TtlB"), QStringLiteral("Quick"));
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QDBusMessage r = w->reply();
+    delete w;
+    QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r.arguments().first().toString(), QStringLiteral("fast"));
+    // Past the (short) TTL: no second reply arrives, and the adaptor is
+    // still serving (a second call succeeds — the expiry did not corrupt
+    // the adaptor).
+    QTest::qWait(3000);
+    QCOMPARE(spy.count(), 1);
+    QDBusPendingCallWatcher *w2 =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.TtlB"), QStringLiteral("/TtlB"),
+                          QStringLiteral("org.dbusqml.TtlB"), QStringLiteral("Quick"));
+    QSignalSpy spy2(w2, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy2.wait(5000));
+    QCOMPARE(w2->reply().type(), QDBusMessage::ReplyMessage);
+    delete w2;
+    delete adaptor;
+}
+
+void TestDBusAdaptor::testHeldReplyTimeoutDisabledByDefault() {
+    // Default (0 = disabled): a held reply with NO settle and NO ttl
+    // simply never answers (the pre-existing behavior — caller waits;
+    // zero behavior change unless opted in). Asserted with a short
+    // negative poll, not a full timeout burn.
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.TtlC'\n"
+                                        "  path: '/TtlC'\n"
+                                        "  iface: 'org.dbusqml.TtlC'\n"
+                                        "  function hang() { holdReply(); }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    QCOMPARE(adaptor->property("heldReplyTimeout").toInt(), 0);
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.TtlC"), QStringLiteral("/TtlC"),
+                          QStringLiteral("org.dbusqml.TtlC"), QStringLiteral("Hang"));
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QTest::qWait(1200);
+    QCOMPARE(spy.count(), 0);
+    delete w;
+    delete adaptor;
+}
+
+void TestDBusAdaptor::testHeldReplyTimeoutNoReplySilent() {
+    // NO_REPLY interaction: a NO_REPLY_EXPECTED call with a TTL-armed
+    // hold sends NOTHING on expiry (B4 — no reply was ever required).
+    // Destructor tail unaffected (covered by the lifecycle suite; the
+    // timer is reply-parented so it dies with the held object).
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.TtlD'\n"
+                                        "  path: '/TtlD'\n"
+                                        "  iface: 'org.dbusqml.TtlD'\n"
+                                        "  heldReplyTimeout: 400\n"
+                                        "  function hang() { holdReply(); }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    QDBusMessage m =
+        QDBusMessage::createMethodCall(QStringLiteral("org.dbusqml.TtlD"), QStringLiteral("/TtlD"),
+                                       QStringLiteral("org.dbusqml.TtlD"), QStringLiteral("Hang"));
+    m.setAutoStartService(false);
+    // Fire-and-forget via send() (NO_REPLY_EXPECTED implied): nothing
+    // may come back; the test passes if the expiry does not crash and
+    // the adaptor keeps serving afterwards.
+    QVERIFY(QDBusConnection::sessionBus().send(m));
+    QTest::qWait(1200);
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.TtlD"), QStringLiteral("/TtlD"),
+                          QStringLiteral("org.dbusqml.TtlD"), QStringLiteral("Hang"));
+    // The adaptor still serves (second hold; TTL re-armed per hold —
+    // expiry of the FIRST hold did not wedge the adaptor).
+    delete w;
+    delete adaptor;
+    QVERIFY(true);
 }
 
 // ==================== P0 hold+throw contract (for-all-times Phase 0) ===

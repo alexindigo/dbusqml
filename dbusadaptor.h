@@ -35,6 +35,12 @@ class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
     // AccessDenied before any handler runs (xdp-request.c:121-139).
     Q_PROPERTY(
         QString allowedSender READ allowedSender WRITE setAllowedSender NOTIFY allowedSenderChanged)
+    // Phase 9 (features train): held-reply TTL — max lifetime of a held
+    // reply in ms (0 = disabled, the default: zero behavior change
+    // unless opted in). On expiry the held reply settles with Failed
+    // ("reply timed out") + warn; settle cancels the timer.
+    Q_PROPERTY(int heldReplyTimeout READ heldReplyTimeout WRITE setHeldReplyTimeout NOTIFY
+                   heldReplyTimeoutChanged)
     // Explicit wire-surface declarations (the explicit tier of the naming
     // ladder): _signals maps wire signal name → concatenated arg signature;
     // _members maps wire member name → QML function/property name.
@@ -74,6 +80,9 @@ public:
 
     QString allowedSender() const { return m_allowedSender; }
     void setAllowedSender(const QString &v);
+
+    int heldReplyTimeout() const { return m_heldReplyTimeout; }
+    void setHeldReplyTimeout(int v);
     QVariantMap signalSpecs() const { return m_signals; }
 
     // A6: declared per-arg types for a signal (_signals → catalog), for
@@ -140,6 +149,7 @@ Q_SIGNALS:
     void _membersChanged();
     void _optionsChanged();
     void allowedSenderChanged();
+    void heldReplyTimeoutChanged();
     void allowReplacementChanged();
     void replaceExistingChanged();
     void queueOnBusyChanged();
@@ -192,6 +202,7 @@ private:
     QVariantMap m_members;
     QVariantMap m_options;
     QString m_allowedSender;
+    int m_heldReplyTimeout = 0;
     bool m_allowReplacement = false;
     bool m_replaceExisting = false;
     bool m_queueOnBusy = false;

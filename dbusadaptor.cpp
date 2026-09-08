@@ -18,6 +18,7 @@
 #include <QQmlEngine>
 #include <QQmlProperty>
 #include <QRegularExpression>
+#include <QTimer>
 #include <qqmlinfo.h>
 
 // Map a D-Bus PascalCase member name to the QML camelCase convention.
@@ -256,6 +257,16 @@ void DBusAdaptor::setAllowedSender(const QString &v) {
         return;
     m_allowedSender = v;
     emit allowedSenderChanged();
+}
+
+void DBusAdaptor::setHeldReplyTimeout(int v) {
+    // Phase 9: TTL opt-in (ms, 0 = disabled). Negative clamps to 0.
+    if (v < 0)
+        v = 0;
+    if (m_heldReplyTimeout == v)
+        return;
+    m_heldReplyTimeout = v;
+    emit heldReplyTimeoutChanged();
 }
 
 QVariantMap DBusAdaptor::optionWhitelist(const QString &wireMember) const {
@@ -1632,6 +1643,14 @@ DBusHeldReply *DBusAdaptor::holdReply() {
     QQmlEngine::setObjectOwnership(reply, QQmlEngine::CppOwnership);
     m_currentCall.held = true;
     m_currentCall.reply = reply;
+    // Phase 9: TTL opt-in — arm the expiry timer (single-shot). Settle
+    // (send/sendError/expire/destructor-tail) cancels it; expiry settles
+    // with Failed. The timer is parented to the REPLY (dies with it);
+    // the timeout value is read at hold time (changing the property
+    // mid-hold does not re-arm — documented).
+    if (m_heldReplyTimeout > 0) {
+        QTimer::singleShot(m_heldReplyTimeout, reply, [reply] { reply->expire(); });
+    }
     return reply;
 }
 

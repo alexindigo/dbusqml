@@ -5,6 +5,7 @@
 #include <QJSValue>
 #include <QObject>
 #include <QPointer>
+#include <QTimer>
 #include <qqmlregistration.h>
 
 class DBusAdaptor;
@@ -36,6 +37,10 @@ public:
 
 private:
     void settle();
+    // Phase 9: TTL expiry entry point (called by the adaptor's timer).
+    void expire();
+
+    friend class DBusAdaptor;
 
     QPointer<DBusAdaptor> m_adaptor;
     QDBusMessage m_msg;

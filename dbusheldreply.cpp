@@ -54,3 +54,16 @@ void DBusHeldReply::settle() {
     // ownership through dispatch (0.8.0 preservation) — no notification needed.
     QQmlEngine::setObjectOwnership(this, QQmlEngine::JavaScriptOwnership);
 }
+
+void DBusHeldReply::expire() {
+    // Phase 9: held-reply TTL expiry. Settles with Failed ("reply timed
+    // out") + warn; exactly-one-reply preserved (settle marks settled;
+    // a later consumer send() is ignored as already-settled).
+    if (m_settled)
+        return;
+    qWarning("dbusqml: held reply for %s timed out — replying Failed", qPrintable(m_member));
+    if (m_msg.isReplyRequired()) // B4: NO_REPLY_EXPECTED — send nothing
+        m_conn.send(m_msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                                           QStringLiteral("reply timed out")));
+    settle();
+}

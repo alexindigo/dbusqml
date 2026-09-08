@@ -505,7 +505,11 @@ Caveats:
   `org.freedesktop.DBus.Error.Failed` error reply instead of hanging.
 - There is no server-side timeout — the caller owns timeouts. (For
   xdg-desktop-portal backends that means honoring the frontend's
-  `G_MAXINT`-timeout contract: the backend may hold indefinitely.)
+  `G_MAXINT`-timeout contract: the backend may hold indefinitely. The
+  xdp reality behind the opt-in: their synchronous `Close` blocks the
+  calling thread up to 25 s waiting for the response — a consumer that
+  cannot afford that block sets a TTL so the held reply errors out
+  instead of hanging a thread.)
 - A caller on the **same `QDBusConnection`** as the adaptor cannot receive a
   deferred reply — QtDBus dispatches local-loop calls synchronously
   (`sendWithReplyLocal`) and reports `local-loop message cannot have delayed
