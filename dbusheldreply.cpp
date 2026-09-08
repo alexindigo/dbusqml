@@ -13,6 +13,9 @@ void DBusHeldReply::setContext(DBusAdaptor *adaptor, const QDBusMessage &msg,
     m_msg = msg;
     m_conn = conn;
     m_member = member;
+    // Phase 4: capture the caller at hold time (the delivery message's
+    // sender). Queryable via callerService() even after settle-later.
+    m_caller = msg.service();
 }
 
 void DBusHeldReply::send(const QJSValue &value) {

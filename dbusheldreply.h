@@ -26,6 +26,11 @@ public:
                     const QString &member);
     bool isSettled() const { return m_settled; }
 
+    // Caller identification (features train, Phase 4): the unique bus
+    // name captured at hold time. Survives settle-later (the delivery
+    // message is copied into the held reply at holdReply()).
+    Q_INVOKABLE QString callerService() const { return m_caller; }
+
     Q_INVOKABLE void send(const QJSValue &value = QJSValue::UndefinedValue);
     Q_INVOKABLE void sendError(const QString &name, const QString &message = QString());
 
@@ -36,5 +41,6 @@ private:
     QDBusMessage m_msg;
     QDBusConnection m_conn;
     QString m_member;
+    QString m_caller;
     bool m_settled = false;
 };

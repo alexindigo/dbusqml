@@ -317,7 +317,7 @@ void DBusAdaptor::componentComplete() {
             continue;
         const QString mname = QString::fromLatin1(m.name());
         if (mname == QStringLiteral("unregister") || mname == QStringLiteral("holdReply") ||
-            mname == QStringLiteral("emitSignal")) {
+            mname == QStringLiteral("emitSignal") || mname == QStringLiteral("callerService")) {
             qmlInfo(this) << mname
                           << " member cannot be served under this name — declare an "
                              "alias in `_members`";
@@ -684,7 +684,7 @@ QString DBusAdaptor::generateXml() const {
         // A10: library-mechanism names are never served — the XML must not
         // advertise what dispatch refuses (advertised-but-UnknownMethod).
         if (name == QStringLiteral("holdReply") || name == QStringLiteral("unregister") ||
-            name == QStringLiteral("emitSignal"))
+            name == QStringLiteral("emitSignal") || name == QStringLiteral("callerService"))
             continue;
 
         const QString wireName = advertisedName(name);
@@ -1058,7 +1058,8 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         // wire (A10/D1: the load warning for emitSignal becomes true).
         if (methodName == QStringLiteral("holdReply") ||
             methodName == QStringLiteral("unregister") ||
-            methodName == QStringLiteral("emitSignal"))
+            methodName == QStringLiteral("emitSignal") ||
+            methodName == QStringLiteral("callerService"))
             continue;
         if (!memberCandidates.contains(methodName)) {
             continue;
@@ -1419,6 +1420,16 @@ DBusHeldReply *DBusAdaptor::holdReply() {
     m_currentCall.held = true;
     m_currentCall.reply = reply;
     return reply;
+}
+
+QString DBusAdaptor::callerService() const {
+    // Phase 4: the delivery message's sender, valid only synchronously
+    // during dispatch (the DispatchScope owns the message lifetime).
+    if (!m_inDispatch) {
+        qWarning("dbusqml: callerService() called outside method dispatch - returning empty");
+        return {};
+    }
+    return m_currentCall.msg.service();
 }
 
 void DBusAdaptor::unregister() {

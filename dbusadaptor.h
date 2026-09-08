@@ -95,6 +95,14 @@ public:
     // DBusHeldReply is the only handle that can answer the caller.
     Q_INVOKABLE DBusHeldReply *holdReply();
 
+    // Caller identification (features train, Phase 4): the unique bus
+    // name of the caller of the currently-dispatched method. Valid only
+    // synchronously during dispatch (outside: warn + empty). The
+    // delivery message is already held in the RAII DispatchScope — no
+    // QDBusContext inheritance needed. Held-reply path: the caller is
+    // captured at hold time and remains queryable on the DBusHeldReply.
+    Q_INVOKABLE QString callerService() const;
+
     // Deterministic retirement of a dynamically created adaptor: runs the
     // destructor's detach tail (path + service reference via the dispatcher
     // registry — idempotent) and errors out outstanding held replies, leaving

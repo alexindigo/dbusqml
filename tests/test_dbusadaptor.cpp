@@ -367,7 +367,11 @@ private slots:
     void testHoldThrowNoReplyExpectedSilent();
     void testNestedDispatchContextRestored();
     void testHoldReplyOutsideDispatch();
-
+    // Phase 4 (caller identification): in-dispatch callerService(),
+    // outside-dispatch warn+empty, held-reply caller survival.
+    void testCallerServiceInDispatch();
+    void testCallerServiceOutsideDispatch();
+    void testCallerServiceHeldReply();
     void testVariantTypedPayloadStringArray();
     void testVariantTypedPayloadBytes();
     void testVariantTypedPayloadStructEquivalence();
@@ -1941,6 +1945,126 @@ void TestDBusAdaptor::testHoldReplyOutsideDispatch() {
                          "}");
     QVERIFY(adaptor != nullptr);
     QCOMPARE(adaptor->property("grabbedNull").toBool(), true);
+    delete adaptor;
+}
+
+// ==================== Phase 4: caller identification ====================
+//
+// callerService() exposes the delivery message's sender during dispatch
+// (cross-process: the caller observes its own UNIQUE name echoed back —
+// the wire oracle for "who called me"). Outside dispatch: warn + empty.
+// Held-reply path: captured at hold time, queryable after settle-later.
+void TestDBusAdaptor::testCallerServiceInDispatch() {
+    QDBusMessage reply =
+        callQmlAdaptorMethod(QStringLiteral("org.dbusqml.CallerIn"), QStringLiteral("/CallerIn"),
+                             QStringLiteral("org.dbusqml.CallerIn"), QStringLiteral("whoAmI"), {},
+                             "import DBus 1.0\n"
+                             "DBusAdaptor {\n"
+                             "  service: 'org.dbusqml.CallerIn'\n"
+                             "  path: '/CallerIn'\n"
+                             "  iface: 'org.dbusqml.CallerIn'\n"
+                             "  function whoAmI() { return callerService() }\n"
+                             "}");
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    // The caller is THIS test process on the session bus: the reply
+    // carries our own unique name (":1.NNN" — starts with ':').
+    const QString caller = reply.arguments().first().toString();
+    QVERIFY2(caller.startsWith(QStringLiteral(":")),
+             qPrintable(QStringLiteral("expected unique caller name, got '%1'").arg(caller)));
+    QCOMPARE(caller, QDBusConnection::sessionBus().baseService());
+}
+
+void TestDBusAdaptor::testCallerServiceOutsideDispatch() {
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("dbusqml: callerService.*outside")));
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "import QtQml 2.15\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.CallerOut'\n"
+                         "  path: '/CallerOut'\n"
+                         "  iface: 'org.dbusqml.CallerOut'\n"
+                         "  property bool grabbedEmpty: false\n"
+                         "  Component.onCompleted: { grabbedEmpty = (callerService() === '') }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+    QCOMPARE(adaptor->property("grabbedEmpty").toBool(), true);
+    delete adaptor;
+}
+
+void TestDBusAdaptor::testCallerServiceHeldReply() {
+    // The handler holds the reply and stashes the caller on the held
+    // object; a later settle path reads callerService() off the HELD
+    // reply (not the adaptor) — must equal the in-dispatch caller.
+    //
+    // QML-SHAPE NOTE (A15 + P0 parity, empirically pinned): the held
+    // QObject* lives in a `property var` (as the existing hold tests do
+    // — e.g. heldRef in the P0 hold+throw matrix). Assigning it marks
+    // the property invalidated (warns "not marshalable (type QObject*)"
+    // — correct A15 behavior, ignored here), and the stashing handler
+    // must return undefined (NOT ''): with held==true a bare
+    // string/number/bool/null return is treated as a THROW (P0
+    // hold+throw contract) and settles the held reply as Failed.
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.CallerHeld'\n"
+                                        "  path: '/CallerHeld'\n"
+                                        "  iface: 'org.dbusqml.CallerHeld'\n"
+                                        "  property string seenCaller: ''\n"
+                                        "  property string heldCaller: ''\n"
+                                        "  property var _stash: null\n"
+                                        "  function whoHeld() {\n"
+                                        "    var h = holdReply();\n"
+                                        "    _stash = h;\n"
+                                        "    seenCaller = callerService();\n"
+                                        "    heldCaller = h.callerService();\n"
+                                        "  }\n"
+                                        "  function settleHeld() { _stash.send('ok'); }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    // LOOPBACK NOTE (Qt limitation, pinned): a SAME-connection call to a
+    // locally-served path cannot hold (Qt refuses delayed replies on the
+    // local loop — "cannot call local method ... on blocking mode"). The
+    // caller therefore uses a SECOND connection (the cross-process shape
+    // — the wire oracle for "who called me" — which is also what the
+    // plan's test requires).
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *callerConn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(callerConn != nullptr);
+    QDBusConnection callerBus = *callerConn;
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.CallerHeld"), QStringLiteral("/CallerHeld"),
+        QStringLiteral("org.dbusqml.CallerHeld"), QStringLiteral("whoHeld"));
+    QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(callerBus.asyncCall(m));
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    // The reply must NOT arrive while held: pump briefly and assert
+    // still-unfinished (spy.wait would burn the full window either way).
+    QTest::qWait(500);
+    QCOMPARE(spy.count(), 0);
+    const QString seen = adaptor->property("seenCaller").toString();
+    const QString held = adaptor->property("heldCaller").toString();
+    QVERIFY2(seen.startsWith(QStringLiteral(":")), qPrintable(seen));
+    QCOMPARE(held, seen);
+    QCOMPARE(held, callerBus.baseService());
+    // Settle later through the held object; the caller was captured at
+    // hold time (held == seen above). Settle via a second dispatch on
+    // the LOOPBACK connection (same-connection calls CAN settle — only
+    // the HOLD is refused on loopback; the settleHeld handler runs
+    // synchronously and answers immediately).
+    // settleHeld takes no in-args (the value is fixed) — declared-arity
+    // mismatch would route to UnknownMethod.
+    QDBusMessage settle = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.CallerHeld"), QStringLiteral("/CallerHeld"),
+        QStringLiteral("org.dbusqml.CallerHeld"), QStringLiteral("settleHeld"));
+    QDBusMessage settleReply = QDBusConnection::sessionBus().call(settle, QDBus::Block, 5000);
+    QCOMPARE(settleReply.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(spy.wait(5000));
+    QVERIFY(!watcher->isError());
+    QCOMPARE(watcher->reply().arguments().first().toString(), QStringLiteral("ok"));
+    delete watcher;
+    delete callerConn;
     delete adaptor;
 }
 
