@@ -27,9 +27,14 @@ class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
                    connectionChanged FINAL)
     Q_PROPERTY(QVariantMap _signatures READ signatures WRITE setSignatures NOTIFY signaturesChanged)
     // P10a (features train, Phase 5): per-method served option
-    // whitelist — { "MethodName": { "key": "sig", ... } }, applied to
+    // whitelist — { "MethodName": { "key": "sig", … } }, applied to
     // the method's last a{sv} in-arg (xdp xdp_filter_options shape).
     Q_PROPERTY(QVariantMap _options READ optionSpecs WRITE setOptionSpecs NOTIFY _optionsChanged)
+    // P10b (features train, Phase 6): sender authorization — the unique
+    // bus name allowed to call this adaptor (empty = open). Mismatch →
+    // AccessDenied before any handler runs (xdp-request.c:121-139).
+    Q_PROPERTY(
+        QString allowedSender READ allowedSender WRITE setAllowedSender NOTIFY allowedSenderChanged)
     // Explicit wire-surface declarations (the explicit tier of the naming
     // ladder): _signals maps wire signal name → concatenated arg signature;
     // _members maps wire member name → QML function/property name.
@@ -66,6 +71,9 @@ public:
 
     QVariantMap optionSpecs() const { return m_options; }
     void setOptionSpecs(const QVariantMap &v);
+
+    QString allowedSender() const { return m_allowedSender; }
+    void setAllowedSender(const QString &v);
     QVariantMap signalSpecs() const { return m_signals; }
 
     // A6: declared per-arg types for a signal (_signals → catalog), for
@@ -131,6 +139,7 @@ Q_SIGNALS:
     void _signalsChanged();
     void _membersChanged();
     void _optionsChanged();
+    void allowedSenderChanged();
     void allowReplacementChanged();
     void replaceExistingChanged();
     void queueOnBusyChanged();
@@ -182,6 +191,7 @@ private:
     QVariantMap m_signals;
     QVariantMap m_members;
     QVariantMap m_options;
+    QString m_allowedSender;
     bool m_allowReplacement = false;
     bool m_replaceExisting = false;
     bool m_queueOnBusy = false;

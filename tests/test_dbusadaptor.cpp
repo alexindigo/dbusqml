@@ -377,6 +377,11 @@ private slots:
     void testOptionsDropMistypePassthrough();
     void testOptionsNoWhitelistUntouched();
     void testOptionsIgnoredWithoutTrailingDict();
+    // Phase 6 (P10b sender authorization): AccessDenied for the
+    // stranger, pass for the owner, Properties surfaces covered.
+    void testAllowedSenderMethodGate();
+    void testAllowedSenderPropertiesGate();
+    void testAllowedSenderOpenByDefault();
     void testVariantTypedPayloadStringArray();
     void testVariantTypedPayloadBytes();
     void testVariantTypedPayloadStructEquivalence();
@@ -2196,6 +2201,137 @@ void TestDBusAdaptor::testOptionsIgnoredWithoutTrailingDict() {
     delete wC;
     QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(r.arguments().first().toInt(), 42);
+    delete adaptor;
+}
+
+// ==================== Phase 6: P10b sender authorization ====================
+//
+// Adaptor property allowedSender (empty = open): dispatch (methods +
+// Properties) compares the delivery message's sender; mismatch →
+// AccessDenied before any handler runs (xdp-request.c:121-139).
+void TestDBusAdaptor::testAllowedSenderMethodGate() {
+    // Served adaptor locked to a NOBODY sender: the real caller (this
+    // test's connection) is a stranger → AccessDenied, handler never
+    // runs (boomRan stays false).
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.AuthA'\n"
+                                        "  path: '/AuthA'\n"
+                                        "  iface: 'org.dbusqml.AuthA'\n"
+                                        "  allowedSender: ':9.999'\n"
+                                        "  property bool boomRan: false\n"
+                                        "  function ping() { boomRan = true; return 'pong' }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.AuthA"), QStringLiteral("/AuthA"),
+                          QStringLiteral("org.dbusqml.AuthA"), QStringLiteral("Ping"));
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QDBusMessage r = w->reply();
+    delete w;
+    QCOMPARE(r.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(r.errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+    QCOMPARE(adaptor->property("boomRan").toBool(), false);
+    delete adaptor;
+}
+
+void TestDBusAdaptor::testAllowedSenderPropertiesGate() {
+    // Same gate on the Properties surfaces: Get/GetAll/Set from a
+    // stranger → AccessDenied (the value is never read nor written).
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.AuthB'\n"
+                                        "  path: '/AuthB'\n"
+                                        "  iface: 'org.dbusqml.AuthB'\n"
+                                        "  allowedSender: ':9.999'\n"
+                                        "  property int level: 7\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    // PROPERTIES CALL-SHAPE NOTE: Properties.Get/GetAll/Set carry the
+    // target iface as their FIRST ARG (not the message iface). Route
+    // through the deferredCaller connection (separate-connection
+    // callers marshal fine; the loopback caller cannot marshal the
+    // QDBusVariant Set arg — NoReply error class, pinned).
+    QDBusConnection caller = deferredCaller();
+    auto propCall = [&](const QString &member, const QVariantList &args) -> QDBusMessage {
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.AuthB"), QStringLiteral("/AuthB"),
+            QStringLiteral("org.freedesktop.DBus.Properties"), member);
+        m.setArguments(args);
+        QDBusPendingCallWatcher *w = new QDBusPendingCallWatcher(caller.asyncCall(m));
+        QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+        if (!spy.wait(5000))
+            return QDBusMessage::createError(QStringLiteral("org.dbusqml.Test.Timeout"),
+                                             QStringLiteral("propCall timed out"));
+        QDBusMessage reply = w->reply();
+        delete w;
+        return reply;
+    };
+    QDBusMessage g = propCall(QStringLiteral("Get"),
+                              {QStringLiteral("org.dbusqml.AuthB"), QStringLiteral("Level")});
+    QCOMPARE(g.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(g.errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+    QDBusMessage ga = propCall(QStringLiteral("GetAll"), {QStringLiteral("org.dbusqml.AuthB")});
+    QCOMPARE(ga.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(ga.errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+    QDBusMessage s = propCall(QStringLiteral("Set"),
+                              {QStringLiteral("org.dbusqml.AuthB"), QStringLiteral("Level"),
+                               QVariant::fromValue(QDBusVariant(9))});
+    QCOMPARE(s.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(s.errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+    QCOMPARE(adaptor->property("level").toInt(), 7);
+    delete adaptor;
+}
+
+void TestDBusAdaptor::testAllowedSenderOpenByDefault() {
+    // Empty allowedSender (default): owner-sender passes — normal
+    // dispatch, plus a self-locked adaptor that authorizes its OWN
+    // caller via callerService() (the xdp per-caller-object pattern:
+    // allowedSender set from callerService() at Request creation).
+    QObject *adaptor = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.AuthC'\n"
+        "  path: '/AuthC'\n"
+        "  iface: 'org.dbusqml.AuthC'\n"
+        "  property string me: ''\n"
+        "  function who() { me = callerService(); allowedSender = me; return me }\n"
+        "  function ping() { return 'pong:' + callerService() }\n"
+        "}");
+    QVERIFY(adaptor != nullptr);
+    // who() runs OPEN (no lock yet), locks to its caller, returns it.
+    QDBusPendingCallWatcher *w1 =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.AuthC"), QStringLiteral("/AuthC"),
+                          QStringLiteral("org.dbusqml.AuthC"), QStringLiteral("Who"));
+    QSignalSpy spy1(w1, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy1.wait(5000));
+    QDBusMessage r1 = w1->reply();
+    delete w1;
+    QCOMPARE(r1.type(), QDBusMessage::ReplyMessage);
+    const QString owner = r1.arguments().first().toString();
+    QVERIFY2(owner.startsWith(QStringLiteral(":")), qPrintable(owner));
+    QCOMPARE(adaptor->property("me").toString(), owner);
+    // ping() from the SAME caller (deferredCaller connection) passes.
+    QDBusPendingCallWatcher *w2 =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.AuthC"), QStringLiteral("/AuthC"),
+                          QStringLiteral("org.dbusqml.AuthC"), QStringLiteral("Ping"));
+    QSignalSpy spy2(w2, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy2.wait(5000));
+    QDBusMessage r2 = w2->reply();
+    delete w2;
+    QCOMPARE(r2.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r2.arguments().first().toString(), QStringLiteral("pong:") + owner);
+    // A stranger (session-bus loopback caller) is denied.
+    QDBusMessage m3 = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.AuthC"), QStringLiteral("/AuthC"),
+        QStringLiteral("org.dbusqml.AuthC"), QStringLiteral("Ping"));
+    QDBusMessage r3 = QDBusConnection::sessionBus().call(m3, QDBus::Block, 5000);
+    QCOMPARE(r3.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(r3.errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
     delete adaptor;
 }
 

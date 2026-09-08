@@ -250,6 +250,14 @@ void DBusAdaptor::setOptionSpecs(const QVariantMap &v) {
     emit _optionsChanged();
 }
 
+void DBusAdaptor::setAllowedSender(const QString &v) {
+    // P10b: sender authorization (empty = open).
+    if (m_allowedSender == v)
+        return;
+    m_allowedSender = v;
+    emit allowedSenderChanged();
+}
+
 QVariantMap DBusAdaptor::optionWhitelist(const QString &wireMember) const {
     // Ladder-consistent lookup: exact wire name → folded QML name →
     // alias (mirrors declaredOutTypes above).
@@ -1037,6 +1045,18 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         if (replyRequired)
             conn.send(reply);
     };
+
+    // P10b: sender authorization (xdp-request.c:121-139) — methods AND
+    // Properties surfaces, BEFORE any handler runs. Empty = open.
+    // Composes with Phase 4 (consumer sets allowedSender from
+    // callerService() at Request creation — the xdp per-caller-object
+    // pattern).
+    if (!m_allowedSender.isEmpty() && msg.service() != m_allowedSender) {
+        sendReply(
+            msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"),
+                                 QStringLiteral("sender %1 is not authorized").arg(msg.service())));
+        return true;
+    }
 
     // Properties interface
     if (interface == QStringLiteral("org.freedesktop.DBus.Introspectable"))
