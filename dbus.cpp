@@ -524,7 +524,31 @@ void DBusProxy::setProperty(const QString &name, const QVariant &value) {
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
     msg.setArguments({m_iface, wireName, QVariant::fromValue(QDBusVariant(converted))});
-    m_bus.asyncCall(msg, m_callTimeout);
+    // P8: capture the prior QML-visible value; on error reply restore it
+    // (KDE dbusproperties.cpp:154-158) + warn + propertyWriteFailed.
+    // The optimistic value is NOT inserted here (unlike updateValue's
+    // immediate insert — see below): the map already holds the caller's
+    // value when driven through QML bindings; setProperty restores on
+    // failure only.
+    const QVariant prior = QQmlPropertyMap::value(name);
+    QDBusPendingCall call = m_bus.asyncCall(msg, m_callTimeout);
+    auto *watcher = new QDBusPendingCallWatcher(call, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, name, wireName, prior](QDBusPendingCallWatcher *w) {
+                QDBusPendingReply<> reply = *w;
+                w->deleteLater();
+                if (reply.isError()) {
+                    // Roll back the QML-visible value to the prior one.
+                    if (prior.isValid())
+                        insert(name, prior);
+                    else
+                        clear(name);
+                    qWarning("dbusqml: Set of property %s failed (%s: %s) — value restored",
+                             qPrintable(wireName), qPrintable(reply.error().name()),
+                             qPrintable(reply.error().message()));
+                    emit propertyWriteFailed(name, reply.error().name(), reply.error().message());
+                }
+            });
 }
 
 void DBusProxy::send(const QString &method, const QVariantList &args) {
@@ -571,7 +595,31 @@ QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
     msg.setArguments({m_iface, dbusName, QVariant::fromValue(QDBusVariant(converted))});
-    m_bus.asyncCall(msg, m_callTimeout);
+    // P8: the map insert below is optimistic (QQmlPropertyMap reactivity
+    // needs the value synchronously). Capture the PRIOR value first; on
+    // error reply roll back + warn + propertyWriteFailed (KDE shape).
+    // NOTE: updateValue's return value IS the inserted value — the caller
+    // (QQmlPropertyMap::insert) applies it after we return, so the
+    // rollback on failure replaces it asynchronously. That is the KDE
+    // semantic (restore on error), just one event-loop turn later.
+    const QVariant prior = QQmlPropertyMap::value(key);
+    QDBusPendingCall call = m_bus.asyncCall(msg, m_callTimeout);
+    auto *watcher = new QDBusPendingCallWatcher(call, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, key, dbusName, prior](QDBusPendingCallWatcher *w) {
+                QDBusPendingReply<> reply = *w;
+                w->deleteLater();
+                if (reply.isError()) {
+                    if (prior.isValid())
+                        insert(key, prior);
+                    else
+                        clear(key);
+                    qWarning("dbusqml: Set of property %s failed (%s: %s) — value restored",
+                             qPrintable(dbusName), qPrintable(reply.error().name()),
+                             qPrintable(reply.error().message()));
+                    emit propertyWriteFailed(key, reply.error().name(), reply.error().message());
+                }
+            });
     return input;
 }
 

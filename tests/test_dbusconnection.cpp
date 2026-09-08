@@ -2495,6 +2495,134 @@ private slots:
         delete proxy;
     }
 
+    // ==================== P8: failed-Set rollback ====================
+    //
+    // Client proxy: capture the prior value on write; on error reply
+    // restore it in the property map + warn + propertyWriteFailed
+    // (KDE dbusproperties.cpp:154-158). Successful Set leaves the value.
+    void testFailedSetRollbackRestores() {
+        // Served side: plain int property; the CLIENT writes a name the
+        // service does not know → Set replies InvalidArgs "No such
+        // property" (the read-only/inconvertible class: a rejected Set).
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        QQmlComponent comp(&engine);
+        comp.setData("import DBus 1.0\n"
+                     "import QtQml 2.15\n"
+                     "DBusAdaptor {\n"
+                     "  service: 'org.dbusqml.P8Level'\n"
+                     "  path: '/P8Level'\n"
+                     "  iface: 'org.dbusqml.P8Level'\n"
+                     "  property int level: 7\n"
+                     "}",
+                     QUrl());
+        QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+        QObject *adaptor = comp.create();
+        QVERIFY(adaptor != nullptr);
+
+        // Client side: proxy bound to the same iface; prime the map via
+        // GetAll round-trip (fetchProperties inserts level=7).
+        auto *proxy = new DBusProxy;
+        proxy->setService(QStringLiteral("org.dbusqml.P8Level"));
+        proxy->setPath(QStringLiteral("/P8Level"));
+        proxy->setIface(QStringLiteral("org.dbusqml.P8Level"));
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->status() == DBusProxy::Ready, 10000);
+        QCOMPARE(proxy->property("level").toInt(), 7);
+
+        QSignalSpy failSpy(proxy, &DBusProxy::propertyWriteFailed);
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
+                                               "dbusqml: Set of property.*failed.*restored")));
+        proxy->setProperty(QStringLiteral("noSuchProp"), 99);
+        // The failed write restores: the map has no noSuchProp afterwards
+        // (prior was invalid → cleared) and the signal fired.
+        QTRY_VERIFY_WITH_TIMEOUT(failSpy.count() >= 1, 10000);
+        QCOMPARE(failSpy.first().first().toString(), QStringLiteral("noSuchProp"));
+        QVERIFY(!proxy->property("noSuchProp").isValid());
+        // The real property is untouched.
+        QCOMPARE(proxy->property("level").toInt(), 7);
+
+        // Successful Set leaves the value in place (no rollback, no
+        // signal): write level=42 through the proxy, read it back.
+        proxy->setProperty(QStringLiteral("level"), 42);
+        QTest::qWait(1500);
+        QCOMPARE(failSpy.count(), 1);
+        QCOMPARE(adaptor->property("level").toInt(), 42);
+        delete proxy;
+        delete adaptor;
+    }
+
+    void testFailedSetRollbackUpdateValueQml() {
+        // Same rollback through the QML-binding path (updateValue).
+        // QML source (not C++): a binding write to an unknown property
+        // routes through QQmlPropertyMap::updateValue → failing Set →
+        // rollback + propertyWriteFailed. The QML engine is the caller
+        // here, so the updateValue path is genuinely exercised (C++
+        // insert()/operator[] never reach it by Qt design).
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        QQmlComponent comp(&engine);
+        comp.setData("import DBus 1.0\n"
+                     "import QtQml 2.15\n"
+                     "DBusAdaptor {\n"
+                     "  service: 'org.dbusqml.P8Upd'\n"
+                     "  path: '/P8Upd'\n"
+                     "  iface: 'org.dbusqml.P8Upd'\n"
+                     "  property int level: 3\n"
+                     "}",
+                     QUrl());
+        QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+        QObject *adaptor = comp.create();
+        QVERIFY(adaptor != nullptr);
+
+        QQmlComponent proxyComp(&engine);
+        proxyComp.setData("import DBus 1.0\n"
+                          "DBus {\n"
+                          "  service: 'org.dbusqml.P8Upd'\n"
+                          "  path: '/P8Upd'\n"
+                          "  iface: 'org.dbusqml.P8Upd'\n"
+                          "}",
+                          QUrl());
+        QVERIFY2(proxyComp.isReady(), qPrintable(proxyComp.errorString()));
+        QObject *proxyObj = proxyComp.create();
+        QVERIFY(proxyObj != nullptr);
+        auto *proxy = qobject_cast<DBusProxy *>(proxyObj);
+        QVERIFY(proxy != nullptr);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->status() == DBusProxy::Ready, 10000);
+        QCOMPARE(proxy->property("level").toInt(), 3);
+        // The BINDING WRITE is QML: a QtObject whose JS writes THROUGH
+        // the proxy (writer.go() runs in the engine, so the write routes
+        // via QQmlPropertyMap::updateValue — C++ insert()/operator[]
+        // never reach it by Qt design).
+        QSignalSpy failSpy(proxy, &DBusProxy::propertyWriteFailed);
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
+                                               "dbusqml: Set of property.*failed.*restored")));
+        QQmlComponent writerComp(&engine);
+        writerComp.setData("import QtQml 2.15\n"
+                           "QtObject {\n"
+                           "  property var target: null\n"
+                           "  function go() { target.bogus = 11 }\n"
+                           "}",
+                           QUrl());
+        QVERIFY2(writerComp.isReady(), qPrintable(writerComp.errorString()));
+        QObject *writer = writerComp.create();
+        QVERIFY(writer != nullptr);
+        writer->setProperty("target", QVariant::fromValue(proxy));
+        QMetaObject::invokeMethod(writer, "go");
+        // The binding write failed the Set: rollback cleared it, the
+        // signal fired with the name, the real property is untouched.
+        QTRY_VERIFY_WITH_TIMEOUT(failSpy.count() >= 1, 10000);
+        QCOMPARE(failSpy.first().first().toString(), QStringLiteral("bogus"));
+        QVERIFY(!proxy->property("bogus").isValid());
+        QCOMPARE(proxy->property("level").toInt(), 3);
+        delete writer;
+        delete proxyObj;
+        delete adaptor;
+    }
+
     // ==================== P5: bus connection-loss handling ====================
     //
     // A private dbus-daemon is killed mid-session: the DBusConnection

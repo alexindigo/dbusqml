@@ -126,6 +126,10 @@ Q_SIGNALS:
     void propertiesEnabledChanged();
     void signaturesChanged();
     void callTimeoutChanged();
+    // P8 (features train, Phase 7): a property write the service
+    // rejected (failed Set). The QML-visible value is rolled back to
+    // the prior value (KDE dbusproperties.cpp:154-158).
+    void propertyWriteFailed(const QString &name, const QString &errorName, const QString &message);
 
 private Q_SLOTS:
     void onPropertiesChanged(const QDBusMessage &msg);
