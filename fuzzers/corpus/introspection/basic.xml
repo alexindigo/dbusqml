@@ -1,0 +1,1 @@
+<node><interface name="org.freedesktop.DBus.Properties"><method name="Get"><arg direction="in" type="s"/><arg direction="out" type="v"/></method></interface></node>

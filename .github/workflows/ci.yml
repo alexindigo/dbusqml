@@ -13,6 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Floor 6.8 + rolling latest only (for-all-times Phase 3: the
+        # 17-version matrix is overbuilt for a one-consumer library).
         qt: ["6.8.2", "6.10.0"]
 
     steps:
@@ -38,7 +40,7 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      - name: Run C++ tests
+      - name: Run C++ tests (all four targets — E0: run-tests used to skip test_adaptor/test_introspect)
         run: ctest --test-dir build --output-on-failure
 
       - name: Run QML tests
@@ -51,3 +53,92 @@ jobs:
           QMLTESTRUNNER=$(find "$QT_ROOT_DIR" -name qmltestrunner -type f | head -n1)
           test -n "$QMLTESTRUNNER" || { echo "qmltestrunner not found under $QT_ROOT_DIR"; exit 1; }
           dbus-run-session -- "$QMLTESTRUNNER" -input tests/test_api.qml
+
+      - name: qmllint (examples + tests)
+        run: |
+          QT_BIN=$(find "$QT_ROOT_DIR" -name qmllint -type f | head -n1)
+          test -n "$QT_BIN" || { echo "qmllint not found"; exit 1; }
+          "$QT_BIN" $(find . -name '*.qml' -not -path './build*/*')
+
+      - name: Examples compile (qmlimportscan smoke)
+        run: |
+          QMLIMPORTSCAN=$(find "$QT_ROOT_DIR" -name qmlimportscan -type f | head -n1)
+          test -n "$QMLIMPORTSCAN" || { echo "qmlimportscan not found"; exit 1; }
+          for f in $(find examples -name '*.qml'); do
+            QML_IMPORT_PATH=${{ github.workspace }}/build "$QMLIMPORTSCAN" -importPath examples -importPath build "$f" > /dev/null || exit 1
+          done
+
+  sanitizers:
+    name: Sanitizers (ASan+LSan, TSan — the T1-class catcher)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: ["address,undefined", "thread"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build clang \
+            dbus dbus-x11 \
+            libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
+
+      - name: Install Qt 6.8.2
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          cache: true
+
+      - name: Configure with sanitizer
+        run: |
+          cmake -S . -B build-san -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer" \
+            -DCMAKE_C_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.sanitizer }}" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
+
+      - name: Build
+        run: cmake --build build-san
+
+      - name: Run C++ tests under sanitizer
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build-san --output-on-failure
+
+  fuzzers:
+    name: Fuzz remote-facing parsers (short CI run)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build clang \
+            dbus dbus-x11
+
+      - name: Install Qt 6.8.2
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          cache: true
+
+      - name: Build fuzz targets (seed-corpus smoke mains)
+        run: |
+          cmake -S fuzzers -B build-fuzz -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-fuzz
+
+      - name: Run fuzzers over seed corpus (must terminate, must pass)
+        run: |
+          ./build-fuzz/fuzz_introspection_xml ./fuzzers/corpus/introspection/
+          ./build-fuzz/fuzz_signature ./fuzzers/corpus/signatures/
+
+      # NOTE: the libFuzzer long-run variant (clang + -fsanitize=fuzzer,
+      # -max_total_time=60 per target) is a manual/occasional job, not a
+      # per-PR gate — GCC (the matrix compiler) has no -fsanitize=fuzzer.
+      # Same for the dfuzzer live-service job against the gate backend
+      # (plan: ~/Documents/dbusqml/plans/for-all-times/gate/).

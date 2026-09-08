@@ -85,6 +85,56 @@ wall-clock luck:
 - Precedent: F4 (dispatcher detach/attach embraces, D8 barriers, churn
   stress).
 
+## 5. Exactly-one-reply-per-serial (for-all-times Phase 0)
+
+Every dispatch path (sync return, throw-after-hold, held settle,
+teardown/unregister erroring) emits EXACTLY ONE reply per incoming
+message serial — asserted at the wire through the raw-libdbus oracle
+(`tests/wire-oracle/`: per-serial reply counter; not Qt marshalling
+both ways, so vacuous passes die structurally):
+
+- `holdReply()` registers the held object in the dispatch context; the
+  error branch settles THAT object via `sendError`, never direct-replies
+  (direct + unsettled-held = double-reply hazard).
+- Non-Error throws after hold are normalized to Failed errors (no
+  silent swallows, anywhere).
+- Dispatch context is a STACK (RAII scope per invocation) — nested
+  dispatches restore, never clobber, the outer call.
+- Every `conn.send` result is checked (replies as C0 did signals).
+- Held-path skips are loud (member named in the warning).
+- Precedent: P0 (for-all-times Phase 0 fix + hold+throw matrix).
+
+## 6. No emission from foreign threads
+
+Ownership notifications (`nameAcquired`/`nameLost`) and any future
+cross-thread delivery go through teardown-synchronized primitives
+(per-claim notifier with real connections, holder as context) — never a
+`QPointer` check-then-deref on the manager thread. Queued `invokeMethod`
+on a raw pointer is NOT teardown-safe (still check-then-post). Status:
+TRACKED (prototype reverted with diagnosis — churn SEGV + spy timing;
+needs a dedicated cycle with lifetime tests, not a drive-by).
+
+## 7. No future-work files in-repo (D12)
+
+Roadmaps live in plans-land. No surveyed prior-art repo keeps a
+future-work file in-repo (quickshell: `changelog/next.md` accumulator
+only). `FutureDevelopment.md` was removed; its one live item (caller
+identification via `QDBusContext`) is scheduled in the 0.10 train.
+
+## 8. KNOWN_ISSUES floor-pruning
+
+Entries for Qt below the library floor (6.8) are pruned — history lives
+in git. Resolved-history sections are pruned the same way; only live
+entries affecting floor-or-newer Qt stay.
+
+## 9. Flake policy
+
+A flake that recurs is a defect with luck — root-cause it (the takeover
+flake was a real deadlock, accepted twice). Timing-sensitive tests use
+sync barriers on bus STATE, never fixed sleeps; stress shapes with
+wall-clock bounds convert hangs into loud failures. TSan in CI catches
+the thread class nobody had listed.
+
 ## Threading contract (attach/detach)
 
 Attach/detach for a given (connection, service) are consumer-serialized —
