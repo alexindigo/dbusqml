@@ -607,7 +607,9 @@ private slots:
     void testSetPropertyConversionParity() {
         // B12: setProperty converts gadget values before the marshalable
         // guard — parity with updateValue (pre-fix: DBus.* gadgets dropped).
+        // (Statics reset: earlier tests re-point s_iface/s_level.)
         PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServer");
+        PropertyServerObject::s_level = 7u;
         auto *server = new PropertyServerObject();
         QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/PcServerB12"),
                                                                     server));
@@ -850,6 +852,13 @@ private slots:
         // A3/D3: the client must re-Get invalidated names (our own adaptor
         // emits invalidated by design); on re-Get error the stale value is
         // kept with one warning — never silently dropped, never silently kept.
+        // NOTE: PropertyServerObject statics are shared across tests —
+        // reset them (the P9 tests leave s_level=30/s_iface=P9Set; the
+        // PcServer2 test leaves declare/servePayload set).
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServer");
+        PropertyServerObject::s_level = 7u;
+        PropertyServerObject::s_declarePayload = false;
+        PropertyServerObject::s_servePayload = false;
         auto *server = new PropertyServerObject();
         QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/PcServer"),
                                                                     server));
@@ -899,6 +908,7 @@ private slots:
         // map must go out under the wire name, not the camelCase fallback.
         PropertyServerObject::s_declarePayload = true;
         PropertyServerObject::s_servePayload = false; // GetAll stays empty
+        PropertyServerObject::s_level = 7u;
         PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServer2");
         auto *server = new PropertyServerObject();
         QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/PcServer2"),
