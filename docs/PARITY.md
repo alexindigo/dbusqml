@@ -106,13 +106,16 @@ both ways, so vacuous passes die structurally):
 
 ## 6. No emission from foreign threads
 
-Ownership notifications (`nameAcquired`/`nameLost`) and any future
-cross-thread delivery go through teardown-synchronized primitives
-(per-claim notifier with real connections, holder as context) — never a
-`QPointer` check-then-deref on the manager thread. Queued `invokeMethod`
-on a raw pointer is NOT teardown-safe (still check-then-post). Status:
-TRACKED (prototype reverted with diagnosis — churn SEGV + spy timing;
-needs a dedicated cycle with lifetime tests, not a drive-by).
+Ownership notifications (`nameAcquired`/`nameLost`) are delivered on the
+main thread via the process-lifetime `OwnerChangeRelay` — no adaptor
+pointer ever crosses a thread (features train, Phase 2). The manager
+thread only records the claim transition and marshals a value-only note;
+the relay re-resolves holders under the lock on the main thread, drops
+the lock, then delivers. Never a `QPointer` check-then-deref on the
+manager thread; queued `invokeMethod` on a raw pointer is NOT
+teardown-safe (still check-then-post). Precedent: T1 (notifier corpse
+067aa01, postEvent corpse t1-spike-findings.md F3, concilium-unanimous
+candidate 4).
 
 ## 7. No future-work files in-repo (D12)
 
@@ -126,6 +129,23 @@ identification via `QDBusContext`) is scheduled in the 0.10 train.
 Entries for Qt below the library floor (6.8) are pruned — history lives
 in git. Resolved-history sections are pruned the same way; only live
 entries affecting floor-or-newer Qt stay.
+
+## 9b. Connection loss is reported, never reconnected (P5)
+
+Loss is observed through failing calls (`QDBusError::Disconnected`), not
+`org.freedesktop.DBus.Local.Disconnected` — QtDBus consumes the local
+signal internally and never delivers it to match rules (fork-VM-proven).
+One daemon-facing ping per connection-moment detects death; `connected`
+flips + `disconnected()` fires once; proxies flip to `Error` and drop
+match subscriptions; served claims emit `nameLost` through the T1 relay.
+No resubscribe/reconnect, ever.
+
+## 9c. Failed writes roll back; concurrent ops dedupe (P8/P9)
+
+A rejected `Set` restores the prior QML-visible value + warns +
+`propertyWriteFailed` (KDE shape). Duplicate in-flight `Get` coalesces
+(one wire call, all waiters answered); `Set` dedupe is latest-wins
+(interleaved set/set converges to the last value).
 
 ## 9. Flake policy
 
@@ -142,7 +162,6 @@ in practice both run on the QML/main thread, which is the only
 configuration the teardown markers protect. A C++ consumer driving
 attach/detach for the SAME name from two threads concurrently is
 unsupported: the registry mutex guards the manager thread, not concurrent
-consumer threads. (Tracked hazard: `handleServiceOwnerChange` invokes
-`nameAcquired`/`nameLost` on the manager thread — QPointer check-then-deref
-vs main-thread deletion, and `Qt::DirectConnection` consumers would run JS
-on QtDBus's thread. Recorded, not fixed: see the release report.)
+consumer threads. Ownership notifications arrive on the main thread (the
+T1 relay); adaptors on foreign threads get main-thread delivery + a loud
+warning (unsupported, T2 contract).

@@ -113,6 +113,7 @@ Properties auto-update via `PropertiesChanged` signals. Property names follow QM
 | `send(method, args)` | `string method`, `list args` | — | Fire-and-forget call (`NO_REPLY_EXPECTED`); no reply object. |
 | `getProperty(name)` | `string name` | `DBusPendingReply` | Read a single D-Bus property directly via `Properties.Get`. |
 | `setProperty(name, value)` | `string name`, `variant value` | — | Write a D-Bus property directly via `Properties.Set`. |
+| `propertyWriteFailed(name, errorName, message)` | `string`, `string`, `string` | Signal: a `Set` the proxy issued was rejected (P8 — the QML-visible value is rolled back). |
 | `emitSignal(name, args)` | `string name`, `list args` | — | Emit a D-Bus signal from this proxy's path/interface. |
 | `connectToBus(address)` | `string address` | `DBusConnection` | (static) Connect to a custom D-Bus address. Returns null on failure. |
 | `reloadTypes()` | — | — | (static) Re-scan the type catalog after drop-in changes. See `docs/TYPES.md`. |
@@ -142,6 +143,7 @@ falls back to inference.
 | `statusChanged` | | Emitted when `status` changes (Null/Loading/Ready/Error). |
 | `introspectionCompleted` | | Emitted after introspection finishes and dynamic methods/properties are ready. |
 | `serviceAvailableChanged` | | Emitted when `serviceAvailable` changes (requires `watchServiceStatus`). |
+| `propertyWriteFailed(name, errorName, message)` | `string`, `string`, `string` | Emitted when a property `Set` the proxy issued is rejected (P8 — the QML-visible value is rolled back). |
 
 #### Data Signals
 
@@ -202,6 +204,13 @@ custom.asyncCall({...})
 | :--- | :--- | :--- |
 | `asyncCall(message)` | `dbusMessage message` | Returns a `DBusPendingReply`. |
 | `asyncCall(message, resolve, reject)` | `dbusMessage message`, `function resolve`, `function reject` | Promise-style asynchronous call. |
+
+#### Connection properties and signals (P5)
+
+| Property / Signal | Type | Description |
+| :--- | :--- | :--- |
+| `connected` | `bool` | Liveness of the bus connection (false after the loss is observed). Never reconnects (documented). |
+| `disconnected()` | signal | Emitted once when the bus connection drops. Proxies flip to `Error` + `serviceAvailable=false`; served claims emit `nameLost`. |
 
 Example usage — pending reply style:
 ```qml
@@ -432,10 +441,13 @@ DBusAdaptor {
 | `iface` | `string` | The interface name to expose. |
 | `connection` | `DBusConnection` | The bus to register on (default session bus). |
 | `_signatures` | `var` (object) | Explicit reply signatures, keyed by D-Bus member name (see Shape Selection). |
+| `_options` | `var` (object) | Per-method served option whitelist `{ Method: { key: sig } }` applied to the method's last `a{sv}` in-arg (P10a: unknown keys dropped, mistyped keys → `InvalidArgs`). |
+| `allowedSender` | `string` | Unique bus name allowed to call this adaptor (empty = open); mismatch → `AccessDenied` before any handler runs (P10b). |
+| `heldReplyTimeout` | `int` | Max held-reply lifetime in ms (`0` = disabled default); expiry settles with `Failed` ("reply timed out"). |
 
 **Private properties:** any adaptor property whose name starts with `_` is
-library meta-config (`_signatures`, or your own helpers) and is never served
-over D-Bus — it is excluded from `generateXml()` and
+library meta-config (`_signatures`, `_options`, or your own helpers) and is
+never served over D-Bus — it is excluded from `generateXml()` and
 `Properties.Get/GetAll/Set`.
 
 **Declared reply signatures:** when the served interface is in the bundled or
@@ -463,6 +475,7 @@ introspection.
 | :--- | :--- | :--- |
 | `emitSignal(name, args)` | `string name`, `list args` | Emit a D-Bus signal on this adaptor's path/interface. |
 | `holdReply()` | — | Defer the current method call; returns a `DBusHeldReply` (see below). |
+| `callerService()` | — | Unique bus name of the current caller (dispatch only; empty + warn outside). Held replies capture it at hold time. |
 | `unregister()` | — | Retire this adaptor's bus registration immediately (see *Per-call adaptor lifecycle* below). |
 
 #### Deferred replies
@@ -503,13 +516,16 @@ Caveats:
   warns and does nothing.
 - If the adaptor is destroyed while a reply is still held, the caller gets an
   `org.freedesktop.DBus.Error.Failed` error reply instead of hanging.
-- There is no server-side timeout — the caller owns timeouts. (For
+- There is no server-side timeout **by default** — the caller owns timeouts. (For
   xdg-desktop-portal backends that means honoring the frontend's
   `G_MAXINT`-timeout contract: the backend may hold indefinitely. The
   xdp reality behind the opt-in: their synchronous `Close` blocks the
   calling thread up to 25 s waiting for the response — a consumer that
   cannot afford that block sets a TTL so the held reply errors out
   instead of hanging a thread.)
+  Opt in per-adaptor with `heldReplyTimeout` (ms, `0` = disabled): on expiry
+  the held reply settles with `Failed` ("reply timed out") + warn; settle
+  cancels the timer.
 - A caller on the **same `QDBusConnection`** as the adaptor cannot receive a
   deferred reply — QtDBus dispatches local-loop calls synchronously
   (`sendWithReplyLocal`) and reports `local-loop message cannot have delayed
@@ -562,6 +578,10 @@ Threading: attach/detach for a given (connection, service) are
 consumer-serialized — in practice both run on the QML/main thread. Driving
 attach/detach for the SAME name from two threads concurrently is
 unsupported (see `docs/PARITY.md`, threading contract).
+Ownership notifications (`nameAcquired`/`nameLost`) are delivered on the
+main thread via a process-lifetime relay — never on QtDBus's manager thread
+(T1: no adaptor pointer ever crosses a thread). Adaptors on foreign threads
+are unsupported (loud warning, main-thread delivery).
 
 #### Per-call adaptor lifecycle
 
@@ -874,11 +894,13 @@ watchers, ObjectManager, fds, lossless 64-bit).
 - **Empty container inference.** `[]` infers `av` and `{}` infers `a{sv}`
   — stable, deterministic inference. Declared signatures are the answer
   when a receiver needs a concrete element type.
-- **No bus-restart reconnection.** A `DBus` proxy does not watch for
-  `Disconnected` on the bus connection (session-bus death usually ends
-  the session anyway); the service watcher recovers cleanly across
-  service restarts. If the bus ITSELF dies and returns, destroy and
-  recreate the proxy.
+- **Connection loss is reported, never reconnected (P5).** A `DBusConnection`
+  exposes `connected` + `disconnected()`; proxies flip to `Error` +
+  `serviceAvailable=false` and tear down match subscriptions; served claims
+  emit `nameLost`. There is no automatic resubscribe/reconnect (session-bus
+  death usually ends the session; custom-bus consumers rebuild on their own
+  signal). If the bus ITSELF dies and returns, destroy and recreate the
+  proxy/connection.
 - **Signature recursion depth is capped at 32.** Hostile or pathological
   signatures (remote-influenced) fail loud with a warning instead of
   exhausting the stack.

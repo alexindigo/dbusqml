@@ -1,5 +1,46 @@
 # Changelog
 
+## [VERSION-TBD]
+
+### Added
+
+- **T1 owner-change delivery via main-thread relay** (defect fix): the
+  manager thread no longer touches adaptors — value-only notes to a
+  process-lifetime relay, holders re-resolved on the main thread
+  (concilium-unanimous candidate 4; G1–G5 gate green).
+- **P5 bus connection-loss handling**: `connected` property +
+  `disconnected()` signal on connections; proxies flip `status=Error` +
+  `serviceAvailable=false` with match teardown; adaptor claims emit
+  `nameLost`. No automatic resubscribe (documented).
+- **Caller identification**: `callerService()` on adaptor (dispatch
+  only) + caller on `DBusHeldReply` (captured at hold time).
+- **P10a served option-whitelist**: `_options` per-method map, xdp
+  drop/error semantics; `InvalidArgs` on mistype.
+- **P10b sender authorization**: `allowedSender` adaptor property,
+  `AccessDenied` on mismatch (methods + Properties).
+- **P8 failed-Set rollback**: prior value restored + warn + optional
+  `propertyWriteFailed(name, errorName, message)` signal.
+- **P9 concurrent Get/Set dedupe**: in-flight Get coalesced (one wire
+  call); Set latest-wins queue. No new surface.
+- **Held-reply TTL**: `heldReplyTimeout` (ms, default 0=off); expiry
+  settles with `Failed` ("reply timed out") + warn; settle cancels.
+
+### Changed
+
+- **Deferred-deletion window documented as defined behavior** (was:
+  tracked ambiguity): adaptor serves until its destructor runs (pin
+  test); API.md lifecycle note.
+
+### Quality
+
+- Four exploratory campaigns (engine-reload/hot-restart, GC pressure,
+  multi-connection aliasing, large-payload smoke) — all quiet except
+  one FD2b-tracked finding (QQmlEngine teardown with a hold
+  outstanding does not error the caller; raw adaptor delete does).
+- API.md current-state additions per shipped phase; PARITY.md gains
+  axioms 6 (rewritten), 9b, 9c.
+
+
 All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
