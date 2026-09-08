@@ -92,6 +92,7 @@ Properties auto-update via `PropertiesChanged` signals. Property names follow QM
 | `path` | `string` | The D-Bus object path. |
 | `iface` | `string` | The D-Bus interface name. |
 | `connection` | `DBusConnection` | The connection associated with this proxy. |
+| `callTimeout` | `int` | Per-call timeout in milliseconds (`-1` = default). See §`DBus` (Proxy Element). |
 | `_signatures` | `var` (object) | Explicit call-argument signatures, keyed by D-Bus member name (see Shape Selection). |
 
 #### Runtime Properties
@@ -109,10 +110,12 @@ Properties auto-update via `PropertiesChanged` signals. Property names follow QM
 | Method | Arguments | Returns | Description |
 | :--- | :--- | :--- | :--- |
 | `call(method, args)` | `string method`, `list args` | `DBusPendingReply` | Call any D-Bus method. Returns a pending reply for error/result feedback. |
+| `send(method, args)` | `string method`, `list args` | — | Fire-and-forget call (`NO_REPLY_EXPECTED`); no reply object. |
 | `getProperty(name)` | `string name` | `DBusPendingReply` | Read a single D-Bus property directly via `Properties.Get`. |
 | `setProperty(name, value)` | `string name`, `variant value` | — | Write a D-Bus property directly via `Properties.Set`. |
 | `emitSignal(name, args)` | `string name`, `list args` | — | Emit a D-Bus signal from this proxy's path/interface. |
 | `connectToBus(address)` | `string address` | `DBusConnection` | (static) Connect to a custom D-Bus address. Returns null on failure. |
+| `reloadTypes()` | — | — | (static) Re-scan the type catalog after drop-in changes. See `docs/TYPES.md`. |
 
 **Boundary errors:** arguments that cannot be marshaled (a
 `QObject*` in a map, a JS function, an unregistered type) fail the call

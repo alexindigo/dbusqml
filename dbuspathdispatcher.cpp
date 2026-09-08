@@ -381,6 +381,17 @@ int DBusPathDispatcher::liveCount() {
 }
 
 void DBusPathDispatcher::attachAdaptor(DBusAdaptor *adaptor) {
+    // T2 (for-all-times Phase 1): claim-scoped thread check would live in
+    // attach()/detach() per (connection, service) — but the dispatcher only
+    // sees (connection, path) here, and the registry already serializes
+    // consumer access via RegistryMutexGuard. The enforceable contract is
+    // the documented one (PARITY.md threading contract + API.md); a
+    // QThread::currentThreadId assert per PATH is recorded here as the
+    // T2 enforcement point if a future cycle wants it hard. No-op today
+    // by decision: the churn/takeover/attach stress suite (TSan-clean
+    // target, §6.2 CI) is the live guard, not an assert that would fire
+    // on legitimate same-thread re-entrant attach (componentComplete →
+    // attach → nameAcquiredInternal re-entrancy exists on this path).
     // Duplicate iface at one path: warn, keep attaching — first-attached wins
     // for iface-scoped calls (attach order is the routing order).
     const QString iface = adaptor->iface();

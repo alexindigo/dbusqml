@@ -50,9 +50,17 @@ docker run --rm -v "$(pwd):/workspaces/dbusqml" -w /workspaces/dbusqml \
 ## Testing
 
 ```
-scripts/run-tests       # C++ unit tests (test_dbustypes, test_dbusconnection)
-scripts/run-qml-tests   # QML tests via qmltestrunner
+scripts/run-tests                 # all four ctest targets + QML suite (wraps itself in dbus-run-session when needed)
+scripts/run-tests <build-dir>     # e.g. scripts/run-tests build-cov
+scripts/run-qml-tests <build-dir> # QML only (also self-wrapping)
 ```
+
+`run-tests` runs `test_types`, `test_dbus`, `test_adaptor` (incl. the
+held-reply pins), `test_introspect`, then the `qmltestrunner` suite —
+coverage via lcov/genhtml is best-effort (Debug builds carry no `.gcda`
+data) and never fails the run. Both scripts wrap themselves in
+`dbus-run-session` when no session bus exists (QML tests abort with
+SIGABRT without one — fixed in E0).
 
 ## QML Linting and Formatting
 

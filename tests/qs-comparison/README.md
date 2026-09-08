@@ -1,4 +1,10 @@
-# Quickshell Reactive-Binding Comparison Spike
+# Quickshell Reactive-Binding Comparison Spike (HISTORICAL)
+
+> **Status (for-all-times Phase 2, 2026-09-08):** this harness is
+> history. The bug it describes died in 0.3.0 (always-on
+> catalog/introspection pre-population); the referenced
+> `SessionTransfer.md` never existed. Kept for archaeology — do not
+> treat as a live diagnostic.
 
 Diagnostic harness: verifies whether upstream Quickshell exhibits the
 same reactive-binding-with-`undefined` behavior we see in dbusqml when

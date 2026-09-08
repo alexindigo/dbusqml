@@ -40,18 +40,36 @@ Button {
 
 - **`DBus {}` proxy element** — methods and properties appear on the object as
   soon as introspection completes; PascalCase D-Bus names become camelCase QML.
-- **Auto-updating properties** — bound to `PropertiesChanged`, no wiring needed.
+- **Auto-updating properties** — bound to `PropertiesChanged` (interface-arg
+  filtered; `invalidated_properties` re-fetched), no wiring needed.
 - **Async replies** — every call returns a `DBusPendingReply` with `finished`,
-  `isError`, `error`, `value`.
+  `isError`, `error`, `value`. Fire-and-forget `send(method, args)` plus
+  `callTimeout`; `DBusConnection.send(message)` for message objects.
 - **`DBusAdaptor`** — export QML objects onto the bus with methods, properties,
   and signals declared inline. PascalCase D-Bus members dispatch to camelCase
   QML functions; variant/struct return types marshal correctly (portal-grade
   serving — e.g. `org.freedesktop.impl.portal.Settings`).
+- **Deferred replies** — `holdReply()` defers the reply; the returned
+  `DBusHeldReply` settles later with `send(value)` / `sendError(name, msg)`.
+  A throw after `holdReply()` settles the held reply with the error (never
+  silent, never a double reply). Per-call `Request` adaptors + `unregister()`
+  cover the portal cancel lifecycle.
+- **Co-location** — multiple adaptors share one path/service; `_signals`
+  declares signal arg types, `_members` aliases wire↔QML names, catalog XML
+  fills in services with poor introspection (both scan paths: bundled +
+  user drop-ins).
+- **Service identity** — `DBusConnection` naming, well-known-name acquisition
+  (`allowReplacement` / `replaceExisting` / `queueOnBusy`), `nameAcquired` /
+  `nameLost`, `DBusServiceWatcher`, `DBusObjectManager`.
+- **Call options** — `DBusConnection.asyncCall(message)` (+ promise-style
+  resolve/reject), `DBusMessage` structured values, per-call `_signatures`
+  overrides, `reloadTypes()` for the catalog.
 - **Reactive property bindings** — catalog/introspection pre-population makes
   intermediate `readonly property` layers reactive out of the box (0.3.0+).
 - **Signature-driven marshaling** — method args marshal against the
   introspected signature; `a{sa{sv}}`, `ay`, and nested containers work with
-  plain JS objects (0.3.0+).
+  plain JS objects (0.3.0+). Declared container elements are producible via
+  the signature-slot pool (0.9.1+); recursion depth capped at 32.
 - **User-land type catalog** — drop XML descriptors into
   `$XDG_CONFIG_HOME/dbusqml/types/` for services that don't publish
   introspection (Chromium-based MPRIS players, for example). See [`docs/TYPES.md`](docs/TYPES.md).
@@ -59,11 +77,15 @@ Button {
   struct arrays arrive as real JS `Array` / `Object` instances you can
   traverse directly.
 - **`DBusUtils`** — `textFromBytes()` / `bytesFromText()` for `ay` payloads
-  (0.3.0+).
+  (0.3.0+); fd quartet + `fdUrl` (see above).
 - **`SessionBus` and `SystemBus`** singletons; `connectToBus(address)` for
   peer/custom connections.
 - **Value types** — `dbusVariant`, `dbusMessage`, `dbusError`, `bytes`,
-  `struct_`, etc., via `import DBus 1.0 as DBusQML`.
+  `struct_`, `objectPath`, `signature`, `int16`…`uint64`, `boolean`, `dict`,
+  `variant`, etc., via `import DBus 1.0 as DBusQML`. 64-bit integers keep
+  full precision on the JS path.
+- **`DBusUtils`** — `textFromBytes()` / `bytesFromText()` for `ay` payloads
+  (0.3.0+); `DBusUtils.error(name, message)` for named error throws.
 
 ## Install
 
@@ -109,7 +131,7 @@ Thirteen runnable examples covering the common patterns:
 | Tier          | Examples                                                         |
 |---------------|------------------------------------------------------------------|
 | simple        | ListNames · KeyboardLayout · NetworkMonitor · PortalSettings     |
-| intermediate  | BatteryMonitor · Notify · ServiceMonitor · Caffeine · PortalDemo |
+| intermediate  | BatteryMonitor · Notify · ServiceMonitor · Caffeine (inhibit) · PortalDemo |
 | advanced      | MprisPlayer · KDEConnect · PowerControl · SystemdManager         |
 
 ```sh
@@ -121,8 +143,9 @@ scripts/run-examples MprisPlayer   # or a category: `advanced`
 - [`API.md`](API.md) — full API reference
 - [`DESIGN.md`](DESIGN.md) — architecture and rationale
 - [`docs/TYPES.md`](docs/TYPES.md) — user-land type catalog
+- [`docs/PARITY.md`](docs/PARITY.md) — design-time checklists for every future mechanism
+- [`RELEASING.md`](RELEASING.md) — release gates and ceremony
 - [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) — upstream Qt bugs and workarounds
-- [`FutureDevelopment.md`](FutureDevelopment.md) — roadmap
 
 ## License
 

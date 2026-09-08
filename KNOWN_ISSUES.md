@@ -1,9 +1,10 @@
 # Known Issues
 
 Upstream Qt bugs that affect dbusqml usage patterns, discovered while
-building test coverage against a matrix of Qt versions. Neither is
-caused by dbusqml, and both are fixed in current Qt; they are recorded
-here so users on older Qt know what to avoid.
+building test coverage. The library floor is Qt 6.8: entries for older
+Qt are pruned (floor-pruning policy — history lives in git, not here).
+Neither entry below is caused by dbusqml, and both are fixed in current
+Qt; they are recorded so users on the floor know what to avoid.
 
 ---
 
@@ -67,56 +68,19 @@ destroy`. dbusqml's own `tests/test_api.qml` uses this pattern.
 
 ---
 
-## Qt bug: `new ValueType({...})` throws `Type error` for `QVariantMap`-arg constructors
+## Resolved-history section (pruned per floor policy)
 
-**Affects:** Qt 6.5.x through 6.7.x
-**Fixed in:** Qt 6.8
-**Symptom:** `Uncaught exception: Type error` on the JS `new` expression.
-
-Reproducer:
-
-```qml
-import DBus 1.0 as DBusQML
-var msg = new DBusQML.dbusMessage({    // Type error on Qt 6.5–6.7
-    service: "org.freedesktop.DBus",
-    path: "/",
-    iface: "org.freedesktop.DBus",
-    member: "ListNames",
-})
-```
-
-Qt 6.8 added the implicit JS-object → `QVariantMap` coercion at the
-value-type constructor dispatch site.
-
-### Workaround
-
-Use QML structured-value assignment instead of JS `new`. Any function
-or property that takes a `dbusMessage` accepts a plain JS object with
-matching keys, converted implicitly via `QML_STRUCTURED_VALUE`:
-
-```qml
-// Works on Qt 6.5+:
-DBusQML.SessionBus.asyncCall({
-    service: "org.freedesktop.DBus",
-    path: "/",
-    iface: "org.freedesktop.DBus",
-    member: "ListNames",
-})
-```
-
-For a standalone value, assign to a typed property:
-
-```qml
-property DBusQML.dbusMessage msg: ({
-    service: "...", path: "...", iface: "...", member: "..."
-})
-```
+The `new ValueType({...})` entry (Qt 6.5–6.7, fixed in 6.8 — below the
+library floor) was removed; its workaround (QML structured-value
+assignment) is the normal form everywhere in `API.md`. The reactive
+bindings note below stays: it documents a behavior change users
+upgrading across 0.3.0 still hit.
 
 ---
 
 ## Reporting upstream
 
-Both bugs have minimal reproducers (above). Filing on
+The remaining entry has a minimal reproducer (above). Filing on
 https://bugreports.qt.io would help other Qt/QML users. If you file
 one, please link it here.
 

@@ -31,7 +31,8 @@ qml6 examples/simple/ListNames.qml
 | `intermediate/Notify.qml` | `DBus` proxy element, `call()`, `signalReceived` signal for `ActionInvoked`/`NotificationClosed` |
 | `intermediate/ServiceMonitor.qml` | `ListNames` + `NameHasOwner` + `NameOwnerChanged` signal monitoring — recreates the noctalia service discovery pattern natively |
 | `intermediate/BatteryMonitor.qml` | `SystemBus.asyncCall()`, `org.freedesktop.DBus.Properties.GetAll`, UPower device enumeration — recreates the noctalia UPower battery monitoring pattern natively |
-| `intermediate/ScreenSaver.qml` | `org.freedesktop.ScreenSaver.Inhibit`/`UnInhibit` — prevent screen blanking. Replaces the `dbus-send --type=signal` and gnome-screensaver-command subprocess approach |
+| `intermediate/Caffeine.qml` | `org.freedesktop.ScreenSaver.Inhibit`/`UnInhibit` — prevent screen blanking. Replaces the `dbus-send --type=signal` and gnome-screensaver-command subprocess approach |
+| `intermediate/PortalDemo.qml` | Portal-styled demo shell wiring Settings + FileChooser shapes |
 
 ### Advanced
 

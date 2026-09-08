@@ -146,8 +146,8 @@ Bus (session or system)
 A D-Bus **service** owns a well-known name (like `org.freedesktop.portal.Desktop`). Under that service, there can be multiple **object paths** (like `/org/freedesktop/portal/desktop`). Each path can expose multiple **interfaces** (like `org.freedesktop.portal.Settings`).
 
 Registering means:
-1. **Service** (optional) — Claim a well-known name on the bus via `registerService()`. Without it, connections are reachable only by their unique name (`:1.42`).
-2. **Path** — Register an object handler for a specific path via `registerObject()`. This is required to receive method calls.
+1. **Service** (optional) — Claim a well-known name on the bus. Without it, connections are reachable only by their unique name (`:1.42`).
+2. **Path** — Register an object handler for a specific path. This is required to receive method calls.
 3. **Interface** — Part of the registered object's introspection XML. Defines which methods, signals, and properties the object exposes.
 
 The sender's unique name is included in every D-Bus message. A receiver can identify the caller via `QDBusMessage::sender()`, regardless of whether the sender owns a well-known name.
@@ -168,8 +168,9 @@ DBusAdaptor {
     // QML properties → D-Bus properties (read/write)
     property int preferredDarkMode: 0
 
-    // QML functions → D-Bus methods
-    function Read(namespace, key) {
+    // QML functions → D-Bus methods (lowercase-initial: QML forbids
+    // uppercase-initial function names)
+    function read(namespace, key) {
         return settings[key] ?? ""
     }
 
@@ -179,13 +180,20 @@ DBusAdaptor {
 ```
 
 The adaptor:
-- Claims `service` via `registerService()` (if specified)
-- Registers on `path` via `registerObject()` with `QDBusVirtualObject`
+- Claims `service` via the dispatcher service-claim registry (first claimant
+  wins; co-located adaptors share the name; `allowReplacement` /
+  `replaceExisting` / `queueOnBusy` opt into daemon-mediated transfer)
+- Registers on `path` via `registerVirtualObject()` with a shared
+  `DBusPathDispatcher` (one virtual object per path; co-located adaptors
+  route through it in attach order)
 - Exposes `iface` methods from QML functions
 - Exposes `iface` signals from QML signals
 - Exposes `iface` properties from QML properties
-- Handles incoming method calls: `QDBusVirtualObject::handleMethodCall()` dispatches to the matching QML function
-- Handles property get/set: `QDBusVirtualObject::property()` or custom dispatch
+- Handles incoming method calls: `QDBusVirtualObject::handleMessage()`
+  dispatches to the matching QML function (explicit `_members` alias →
+  exact → first-char fold)
+- Handles property get/set via the Properties interface dispatch in
+  `handleMessage()` (Get/GetAll/Set with catalog-typed XML)
 - Emits signals via `QDBusConnection::send(QDBusMessage::createSignal(...))`
 
 Multiple interfaces on the same path use multiple `DBusAdaptor` instances with the same `service` and `path` but different `iface`.
@@ -216,11 +224,24 @@ QML
   │
   ├── DBusAdaptor (server-side, subclass of QDBusVirtualObject)
   │     ├── Builds introspection XML from Q_PROPERTY / method / signal
-  │     │   metadata of the enclosing QML component.
+  │     │   metadata of the enclosing QML component (declared out-arg
+  │     │   types via `declaredOutTypes`: explicit `_signatures` →
+  │     │   catalog declaration → stable inference; catalog in-arg
+  │     │   types; `_signals` signal arg types; `_members` wire-name
+  │     │   aliases; folded signal wire names).
   │     ├── handleMessage dispatches to matching QML method via
   │     │   QJSValue::callWithInstance (arguments passed as native JS
-  │     │   values through engine->toScriptValue).
-  │     └── Properties.Get / Get / GetAll served from QMetaProperty.
+  │     │   values through precision-safe conversion; throw-after-hold
+  │     │   settles the held reply; RAII dispatch-context stack for
+  │     │   re-entrant dispatches; send results checked).
+  │     ├── Deferred replies via holdReply() → DBusHeldReply (send /
+  │     │   sendError; exactly-one-reply-per-serial structural).
+  │     ├── Co-located adaptors share one path dispatcher + service
+  │     │   claim (tombstone/pending-state teardown markers; per-call
+  │     │   Request adaptors + unregister() for the cancel lifecycle).
+  │     └── Properties.Get / GetAll / Set served from QMetaProperty
+  │         (+ PropertiesChanged emission on notify; declared signal
+  │         types applied at emission; relay guard on relayed args).
   │
   ├── DBusConnection (raw wrapper)
   │     └── asyncCall(message) → QDBusPendingCallWatcher
@@ -245,19 +266,12 @@ Some services (Chromium-based MPRIS players, minimal system daemons)
 return an empty `<node></node>` from `Introspect()` but still implement
 their documented interface. The catalog lets dbusqml call those services
 by name without forcing the user to fall back to `proxy.call(...)`.
+Two scan paths: descriptors bundled with the library (`qrc:/dbusqml/types/`)
+plus user/system drop-ins (`$XDG_CONFIG_HOME/dbusqml/types/`,
+`$XDG_DATA_DIRS/*/dbusqml/types/`, `$DBUSQML_TYPES_PATH` override) —
+see `docs/TYPES.md`.
 
-## Non-Goals (v1)
-
-- Qt5 / Qt7 support (single source, forkable)
-- Service activation (caller uses existing D-Bus activation)
-
-## Build
-
-- CMake, `find_package(Qt6 REQUIRED COMPONENTS DBus Qml)`
-- Standard Qt6 QML plugin (qmldir + .so)
-- Installed to Qt's QML import path
-
-## Dependencies
+## Dependencies (`DBus` proxy + `DBusAdaptor`)
 
 | Dependency | Why |
 |------------|-----|
@@ -269,14 +283,3 @@ Zero KDE deps. Zero other deps.
 ## License
 
 GPLv3
-
-## Implementation Order
-
-1. `DBusMessage` (value type, wraps args + metadata)
-2. `DBusConnection` + `SessionBus`/`SystemBus` + `connectToBus()`
-3. `DBusPendingReply` (wraps `QDBusPendingCallWatcher`)
-4. Typed wrappers (`uint32`, `string`, `variant`, etc.)
-5. `DBusError`
-6. `DBus` — introspection + dynamic methods (JS closures in
-   QQmlPropertyMap) + properties + signal forwarding
-7. Plugin registration + CMake build

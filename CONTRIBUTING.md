@@ -24,20 +24,20 @@ cmake --build build-debug
 ## Test
 
 C++ tests use `QTest`; QML tests use `qmltestrunner`. Both need a
-running D-Bus session — the scripts wrap them with `dbus-run-session`.
+running D-Bus session — the scripts wrap themselves with
+`dbus-run-session` when none exists.
 
 ```sh
-scripts/run-tests        # C++ + QML, dbus session provided
-scripts/run-qml-tests    # QML only
+scripts/run-tests        # all four ctest targets + QML suite
+scripts/run-qml-tests    # QML only (takes the build dir)
 ```
 
-Coverage:
+Coverage (lcov/genhtml, best-effort — Debug builds carry no `.gcda` data):
 
 ```sh
 cmake -B build-cov -DENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
 cmake --build build-cov
 scripts/run-tests build-cov
-gcovr -r . --exclude 'tests/.*' --exclude 'build-.*' --html-details coverage/index.html
 ```
 
 ## Add a bundled type descriptor

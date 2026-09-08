@@ -111,6 +111,13 @@ The current approach uses `currentSignature()` dispatch + `asVariant()`
 fallback, which should handle any combination. But we haven't proven
 exhaustive coverage.
 
+> **CLOSED (for-all-times Phase 2, 2026-09-08):** the signature-slot pool
+> (0.9.1, F1) made every well-formed element signature producible, and
+> the walker position-parity matrix (B2–B6) plus the depth-32 cap (B1)
+> pin the recursion behavior. Residual risk is tracked by the narrowed
+> fuzzing program (`fuzzers/` — remote introspection XML + signature
+> strings), not by this doc. This file stays as history.
+
 ## What We Need From Experts
 
 1. **Is there a Qt/libdbus API we're missing?** Is there a canonical way
@@ -129,6 +136,9 @@ exhaustive coverage.
 4. **Is this a known Qt bug?** Should we file it upstream? The crash is
    reproducible and deterministic — it seems like a libdbus/Qt integration
    issue that should be tracked.
+
+> **CLOSED (for-all-times Phase 2, 2026-09-08):** superseded by the
+> shipped fixes above — no longer blocking. Kept for the archaeology.
 
 ## Files
 
