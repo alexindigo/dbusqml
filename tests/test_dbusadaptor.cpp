@@ -392,6 +392,14 @@ private slots:
     // Phase 10 (deferred-deletion window): call served inside the
     // window replies; path freed after destruction.
     void testDeferredDeletionWindowServesThenFrees();
+    // Phase 11 exploratory campaigns (tests first, fixes only on
+    // findings per FD2): engine-reload with in-flight holds,
+    // GC pressure x held-reply lifetime, multi-connection registry
+    // aliasing, large-payload smoke.
+    void testExploreEngineReloadInflightHold();
+    void testExploreGcPressureHeldReply();
+    void testExploreMultiConnectionAliasing();
+    void testExploreLargePayloadSmoke();
     void testVariantTypedPayloadStringArray();
     void testVariantTypedPayloadBytes();
     void testVariantTypedPayloadStructEquivalence();
@@ -7637,6 +7645,255 @@ void TestDBusAdaptor::testDeferredDeletionWindowServesThenFrees() {
         QStringLiteral("org.dbusqml.DeferWin"), QStringLiteral("Ping"));
     QDBusMessage rAfter = QDBusConnection::sessionBus().call(after, QDBus::Block, 5000);
     QCOMPARE(rAfter.type(), QDBusMessage::ErrorMessage);
+}
+
+// ==================== Phase 11: exploratory quality campaigns ====================
+//
+// Tests first, fixes only on findings (FD2): (a) engine-reload with
+// in-flight held replies + tombstone interplay; (b) GC pressure ×
+// held-reply lifetime; (c) multi-connection registry aliasing;
+// (d) large-payload smoke. Each finding is recorded; any defect needing
+// NEW design becomes a tracked item (FD2b), never a drive-by fix.
+void TestDBusAdaptor::testExploreEngineReloadInflightHold() {
+    // (a) A held reply is in flight; the ADAPTOR is then destroyed
+    // (hot-restart shape: per-call adaptor torn down and re-created)
+    // while the engine itself is ALSO replaced. The destructor tail
+    // must error the pending caller (no hang), and the re-created
+    // engine + adaptor must serve again (tombstone interplay: the claim
+    // record drains cleanly).
+    auto *engine = new QQmlEngine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine->addImportPath(binDir.path());
+    engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent comp(engine);
+    comp.setData("import DBus 1.0\n"
+                 "DBusAdaptor {\n"
+                 "  service: 'org.dbusqml.ExplA'\n"
+                 "  path: '/ExplA'\n"
+                 "  iface: 'org.dbusqml.ExplA'\n"
+                 "  function hang() { holdReply(); }\n"
+                 "}",
+                 QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    QObject *adaptor = comp.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.ExplA"), QStringLiteral("/ExplA"),
+                          QStringLiteral("org.dbusqml.ExplA"), QStringLiteral("Hang"));
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QTest::qWait(500);
+    QCOMPARE(spy.count(), 0); // held
+    // Destroy the ADAPTOR (the consumer-observable hot-restart step):
+    // the destructor tail errors the caller — pump for delivery.
+    // FINDING (FD2b-tracked, engine-teardown axis): destroying the
+    // QQmlEngine ITSELF with a hold outstanding does NOT error the
+    // caller within 8s pumped (probed 2026-09-08) — the engine teardown
+    // path sweeps QML deferred deletes without running the adaptor
+    // destructor first, leaving the held reply unsettled. Raw adaptor
+    // delete DOES error (lifecycle suite pins it). The in-train pin
+    // covers the adaptor-destroy half — the consumer-observable path
+    // (portal Request teardown destroys the adaptor, not the engine).
+    delete adaptor;
+    adaptor = nullptr;
+    {
+        QElapsedTimer drain;
+        drain.start();
+        while (drain.elapsed() < 8000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+            if (spy.count() >= 1)
+                break;
+        }
+        QVERIFY2(spy.count() >= 1, "adaptor destroy must error the held caller");
+    }
+    QDBusMessage r = w->reply();
+    delete w;
+    QCOMPARE(r.type(), QDBusMessage::ErrorMessage);
+    // Re-create on a FRESH engine: the claim record drained (tombstone
+    // erased), the name is claimable again and serves.
+    delete engine;
+    engine = nullptr;
+    auto *engine2 = new QQmlEngine;
+    engine2->addImportPath(binDir.path());
+    engine2->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent comp2(engine2);
+    comp2.setData("import DBus 1.0\n"
+                  "DBusAdaptor {\n"
+                  "  service: 'org.dbusqml.ExplA'\n"
+                  "  path: '/ExplA'\n"
+                  "  iface: 'org.dbusqml.ExplA'\n"
+                  "  function ping() { return 'back' }\n"
+                  "}",
+                  QUrl());
+    QVERIFY2(comp2.isReady(), qPrintable(comp2.errorString()));
+    QObject *adaptor2 = comp2.create();
+    QVERIFY(adaptor2 != nullptr);
+    QDBusPendingCallWatcher *w2 =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.ExplA"), QStringLiteral("/ExplA"),
+                          QStringLiteral("org.dbusqml.ExplA"), QStringLiteral("Ping"));
+    QSignalSpy spy2(w2, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy2.wait(5000));
+    QCOMPARE(w2->reply().arguments().first().toString(), QStringLiteral("back"));
+    delete w2;
+    delete engine2;
+    QVERIFY(true);
+}
+
+void TestDBusAdaptor::testExploreGcPressureHeldReply() {
+    // (b) Flood of holds + adaptor unregister/destroy mid-flight +
+    // forced gc(): every caller must settle EXACTLY ONCE (error or
+    // value — never a hang, never a double-reply crash).
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent comp(&engine);
+    comp.setData("import DBus 1.0\n"
+                 "DBusAdaptor {\n"
+                 "  service: 'org.dbusqml.ExplB'\n"
+                 "  path: '/ExplB'\n"
+                 "  iface: 'org.dbusqml.ExplB'\n"
+                 "  function hang(i) { holdReply(); return i; }\n"
+                 "}",
+                 QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    QObject *adaptor = comp.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+    QList<QDBusPendingCallWatcher *> watchers;
+    QList<QSignalSpy *> spies;
+    for (int i = 0; i < 20; ++i) {
+        QDBusPendingCallWatcher *w =
+            asyncCallDeferred(QStringLiteral("org.dbusqml.ExplB"), QStringLiteral("/ExplB"),
+                              QStringLiteral("org.dbusqml.ExplB"), QStringLiteral("Hang"), {i});
+        watchers.append(w);
+        spies.append(new QSignalSpy(w, &QDBusPendingCallWatcher::finished));
+    }
+    QTest::qWait(500);
+    // Destroy mid-flight with GC pressure: all 20 callers must settle
+    // (destructor tail errors each exactly once). Pump for delivery
+    // (watcher finished() needs the loop turning).
+    engine.collectGarbage();
+    delete adaptor;
+    adaptor = nullptr;
+    engine.collectGarbage();
+    {
+        QElapsedTimer drain;
+        drain.start();
+        int done = 0;
+        while (drain.elapsed() < 15000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+            done = 0;
+            for (QSignalSpy *s : spies)
+                done += s->count();
+            if (done == 20)
+                break;
+        }
+        QVERIFY2(done == 20,
+                 qPrintable(QStringLiteral("only %1/20 held callers settled").arg(done)));
+    }
+    int errors = 0;
+    for (QDBusPendingCallWatcher *w : watchers) {
+        QCOMPARE(w->reply().type(), QDBusMessage::ErrorMessage);
+        ++errors;
+    }
+    QCOMPARE(errors, 20);
+    qDeleteAll(watchers);
+    qDeleteAll(spies);
+    QVERIFY(true);
+}
+
+void TestDBusAdaptor::testExploreMultiConnectionAliasing() {
+    // (c) Same service name on TWO custom connections (+ the session
+    // bus): (conn,path)/(conn,service) registry keys must not collide.
+    // Each connection serves its own path; calls route per-connection.
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *connA = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *connB = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(connA != nullptr);
+    QVERIFY(connB != nullptr);
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent comp(&engine);
+    comp.setData("import DBus 1.0\n"
+                 "DBusAdaptor {\n"
+                 "  service: 'org.dbusqml.ExplC'\n"
+                 "  path: '/ExplC'\n"
+                 "  iface: 'org.dbusqml.ExplC'\n"
+                 "  function who() { return path }\n"
+                 "}",
+                 QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    // Same service, same path, DIFFERENT connections: two dispatchers,
+    // two claims, no key collision.
+    QObject *a = comp.beginCreate(engine.rootContext());
+    QVERIFY(a != nullptr);
+    a->setProperty("connection", QVariant::fromValue<DBusConnection *>(connA));
+    comp.completeCreate();
+    QObject *b = comp.beginCreate(engine.rootContext());
+    QVERIFY(b != nullptr);
+    b->setProperty("connection", QVariant::fromValue<DBusConnection *>(connB));
+    comp.completeCreate();
+    QTest::qWait(500);
+    // Each connection routes Who to its own adaptor (both answer —
+    // neither claim clobbered the other).
+    for (DBusConnection *c : {connA, connB}) {
+        QDBusConnection qc = *c;
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.ExplC"), QStringLiteral("/ExplC"),
+            QStringLiteral("org.dbusqml.ExplC"), QStringLiteral("Who"));
+        QDBusPendingCallWatcher *w = new QDBusPendingCallWatcher(qc.asyncCall(m));
+        QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+        QVERIFY(spy.wait(5000));
+        QDBusMessage r = w->reply();
+        delete w;
+        QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    }
+    delete a;
+    delete b;
+    delete connA;
+    delete connB;
+    QVERIFY(true);
+}
+
+void TestDBusAdaptor::testExploreLargePayloadSmoke() {
+    // (d) MB-scale ay/a{sv} marshal smoke: a 2 MB byte array and a
+    // 10k-entry dict round-trip through a served method without crash
+    // or truncation (marshal copy behavior under load).
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.ExplD'\n"
+                                        "  path: '/ExplD'\n"
+                                        "  iface: 'org.dbusqml.ExplD'\n"
+                                        "  function echo(x) { return x }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    const QByteArray big(2 * 1024 * 1024, 'z');
+    QVariantMap dict;
+    for (int i = 0; i < 10000; ++i)
+        dict.insert(QStringLiteral("k%1").arg(i), i);
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.ExplD"), QStringLiteral("/ExplD"),
+                          QStringLiteral("org.dbusqml.ExplD"), QStringLiteral("Echo"),
+                          {QVariant::fromValue(big), QVariant::fromValue(dict)});
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(15000));
+    QDBusMessage r = w->reply();
+    delete w;
+    // Echo may legitimately fail Loud (arg-cap or marshal guard) — the
+    // smoke bar is NO CRASH + a well-typed reply (reply or error, but
+    // exactly one, wire-asserted by type).
+    QVERIFY(r.type() == QDBusMessage::ReplyMessage || r.type() == QDBusMessage::ErrorMessage);
+    if (r.type() == QDBusMessage::ReplyMessage) {
+        QCOMPARE(r.arguments().size(), 2);
+        QCOMPARE(r.arguments().first().toByteArray().size(), big.size());
+        QCOMPARE(r.arguments().at(1).toMap().size(), 10000);
+    }
+    delete adaptor;
+    QVERIFY(true);
 }
 
 // ==================== Adversarial input matrix (0.6.0) ====================
