@@ -85,6 +85,17 @@ QHash<ServiceKey, ServiceClaim> &serviceClaims() {
 
 // Owner-change watch: a name we claimed was acquired (possibly after
 // queueing) or lost to another owner.
+//
+// T1 DIAGNOSIS (for-all-times Phase 1, 2026-09-08): a per-claim notifier
+// QObject with real queued connections was prototyped here (D9 shape)
+// and REVERTED before commit: the churn stress SEGVs inside QML signal
+// delivery (isSignalConnected on a half-destroyed declarative adaptor),
+// and the anchor's flagged-claim nameAcquired never reaches its QSignalSpy
+// (queued notifier delivery + beginCreate spy timing interact — 46s
+// QTRY timeout, 3/3 deterministic). The direct manager-thread call below
+// is therefore KEPT (pre-existing behavior, churn-green); the notifier
+// shape needs a dedicated cycle with lifetime tests, NOT a drive-by.
+// The T1 hazard stays TRACKED (audit-2 addendum).
 void DBusPathDispatcher::handleServiceOwnerChange(const QString &connName, const QString &service,
                                                   const QString &newOwner) {
     QList<QPointer<DBusAdaptor>> holders;
