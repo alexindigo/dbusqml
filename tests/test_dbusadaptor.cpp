@@ -397,6 +397,7 @@ private slots:
     // GC pressure x held-reply lifetime, multi-connection registry
     // aliasing, large-payload smoke.
     void testExploreEngineReloadInflightHold();
+    void testEngineTeardownErrorsHeldCaller();
     void testExploreGcPressureHeldReply();
     void testExploreMultiConnectionAliasing();
     void testExploreLargePayloadSmoke();
@@ -7731,6 +7732,86 @@ void TestDBusAdaptor::testExploreEngineReloadInflightHold() {
     QDBusPendingCallWatcher *w2 =
         asyncCallDeferred(QStringLiteral("org.dbusqml.ExplA"), QStringLiteral("/ExplA"),
                           QStringLiteral("org.dbusqml.ExplA"), QStringLiteral("Ping"));
+    QSignalSpy spy2(w2, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy2.wait(5000));
+    QCOMPARE(w2->reply().arguments().first().toString(), QStringLiteral("back"));
+    delete w2;
+    delete engine2;
+    QVERIFY(true);
+}
+
+// L1 (ledger-zero): engine-teardown errors the held caller — the
+// live-reload shape. A held reply is in flight; the QQmlEngine ITSELF
+// is destroyed (the consumer-observable hot-restart step Quickshell
+// live-reload performs) while the process lives. The caller must
+// receive the Failed error (no hang to timeout), and a FRESH engine's
+// adaptor must serve the same name again (claim drained cleanly).
+// Root cause (fork-VM-proven): engine teardown orphans the declarative
+// adaptor (no parent, no JS heap) without running its destructor —
+// the destructor's error-pendings tail never runs. Fix: the adaptor
+// hooks the engine's destroyed() signal at attach and runs the
+// unregister tail (error pendings + detach) queued on it.
+void TestDBusAdaptor::testEngineTeardownErrorsHeldCaller() {
+    auto *engine = new QQmlEngine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine->addImportPath(binDir.path());
+    engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent comp(engine);
+    comp.setData("import DBus 1.0\n"
+                 "DBusAdaptor {\n"
+                 "  service: 'org.dbusqml.L1Reload'\n"
+                 "  path: '/L1Reload'\n"
+                 "  iface: 'org.dbusqml.L1Reload'\n"
+                 "  function hang() { holdReply(); }\n"
+                 "}",
+                 QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    QObject *adaptor = comp.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.L1Reload"), QStringLiteral("/L1Reload"),
+                          QStringLiteral("org.dbusqml.L1Reload"), QStringLiteral("Hang"));
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QTest::qWait(500);
+    QCOMPARE(spy.count(), 0); // held
+    // Live-reload: destroy the ENGINE (not the adaptor). The caller
+    // must be errored — pump for delivery (the engine-destroyed hook
+    // is queued).
+    delete engine;
+    engine = nullptr;
+    {
+        QElapsedTimer drain;
+        drain.start();
+        while (drain.elapsed() < 8000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+            if (spy.count() >= 1)
+                break;
+        }
+        QVERIFY2(spy.count() >= 1, "engine destroy must error the held caller");
+    }
+    QDBusMessage r = w->reply();
+    delete w;
+    QCOMPARE(r.type(), QDBusMessage::ErrorMessage);
+    // Second half of live-reload: a FRESH engine serves the same name.
+    auto *engine2 = new QQmlEngine;
+    engine2->addImportPath(binDir.path());
+    engine2->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent comp2(engine2);
+    comp2.setData("import DBus 1.0\n"
+                  "DBusAdaptor {\n"
+                  "  service: 'org.dbusqml.L1Reload'\n"
+                  "  path: '/L1Reload'\n"
+                  "  iface: 'org.dbusqml.L1Reload'\n"
+                  "  function ping() { return 'back' }\n"
+                  "}",
+                  QUrl());
+    QVERIFY2(comp2.isReady(), qPrintable(comp2.errorString()));
+    QObject *adaptor2 = comp2.create();
+    QVERIFY(adaptor2 != nullptr);
+    QDBusPendingCallWatcher *w2 =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.L1Reload"), QStringLiteral("/L1Reload"),
+                          QStringLiteral("org.dbusqml.L1Reload"), QStringLiteral("Ping"));
     QSignalSpy spy2(w2, &QDBusPendingCallWatcher::finished);
     QVERIFY(spy2.wait(5000));
     QCOMPARE(w2->reply().arguments().first().toString(), QStringLiteral("back"));

@@ -454,6 +454,36 @@ void DBusAdaptor::componentComplete() {
     if (!m_attached)
         return;
 
+    // L1 (ledger-zero): engine-teardown safety. A declarative adaptor has
+    // no C++ owner — destroying its QQmlEngine orphans it (no parent, no
+    // JS heap) without running the destructor, leaving held replies
+    // unsettled (FD2b root cause, fork-VM-proven: orphan alive after
+    // engine delete, spy=0). Hook the engine's destroyed() signal: when
+    // the engine goes, run the same tail as unregister() — error pending
+    // held replies, detach the claim — so live-reload (engine destroy +
+    // recreate in one process) never hangs the caller. Queued, idempotent
+    // (detach is idempotent; settled replies are skipped), and harmless
+    // when the adaptor dies first (guarded QPointer context + m_attached
+    // check — the lambda never runs on a dead adaptor).
+    if (QQmlEngine *engine = qmlEngine(this)) {
+        QObject::connect(
+            engine, &QObject::destroyed, this,
+            [this] {
+                const auto heldReplies = findChildren<DBusHeldReply *>();
+                for (DBusHeldReply *reply : heldReplies) {
+                    if (!reply->isSettled()) {
+                        reply->sendError(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                                         QStringLiteral("engine destroyed with reply pending"));
+                    }
+                }
+                if (m_attached) {
+                    DBusPathDispatcher::detach(bus(), m_path, m_service, this);
+                    m_attached = false;
+                }
+            },
+            Qt::QueuedConnection);
+    }
+
     // Auto-connect user-defined QML signals to D-Bus
     const QMetaObject *meta = metaObject();
     static const QStringList builtInSignals = {
