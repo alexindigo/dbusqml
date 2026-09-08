@@ -242,6 +242,137 @@ void DBusAdaptor::setMemberAliases(const QVariantMap &v) {
     emit _membersChanged();
 }
 
+void DBusAdaptor::setOptionSpecs(const QVariantMap &v) {
+    // P10a: per-method option whitelist { Method: { key: sig } }.
+    if (m_options == v)
+        return;
+    m_options = v;
+    emit _optionsChanged();
+}
+
+QVariantMap DBusAdaptor::optionWhitelist(const QString &wireMember) const {
+    // Ladder-consistent lookup: exact wire name → folded QML name →
+    // alias (mirrors declaredOutTypes above).
+    auto it = m_options.constFind(wireMember);
+    if (it == m_options.constEnd())
+        it = m_options.constFind(dbusMemberToQml(wireMember));
+    if (it == m_options.constEnd()) {
+        const QString aliased = m_members.value(wireMember).toString();
+        if (!aliased.isEmpty())
+            it = m_options.constFind(aliased);
+    }
+    if (it == m_options.constEnd())
+        return {};
+    // The value must be a map { key: sig }; anything else is a typo —
+    // loud, and treated as no whitelist.
+    if (!it.value().canConvert<QVariantMap>()) {
+        qWarning("dbusqml: _options entry for %s is not a map — ignored", qPrintable(wireMember));
+        return {};
+    }
+    return it.value().toMap();
+}
+
+void DBusAdaptor::validateOptionSpecs() {
+    // FD4: an _options entry is validated against the method's
+    // metaobject arity (the only in-arg shape visible without a
+    // catalog): an entry naming an UNKNOWN method, or a method with
+    // ZERO in-args (no trailing dict possible), → attach-time warning,
+    // entry ignored. A method WITH in-args keeps its entry — the
+    // dispatch-time shape check (last arg must be a QVariantMap)
+    // decides per call.
+    const QMetaObject *meta = metaObject();
+    for (auto it = m_options.begin(); it != m_options.end();) {
+        const QString key = it.key();
+        const QStringList candidates = candidateQmlNames(key);
+        const QMetaMethod *found = nullptr;
+        for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
+            QMetaMethod m = meta->method(i);
+            if (m.methodType() != QMetaMethod::Method && m.methodType() != QMetaMethod::Slot)
+                continue;
+            if (candidates.contains(QString::fromLatin1(m.name()))) {
+                found = &m;
+                break;
+            }
+        }
+        // Copy the arity out (found points at a loop-local copy).
+        int arity = -1;
+        if (found)
+            arity = found->parameterCount();
+        if (arity <= 0) {
+            qWarning("dbusqml: _options entry for %s names a method without in-args — ignored",
+                     qPrintable(key));
+            it = m_options.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+QVariantMap DBusAdaptor::filterOptions(const QVariantMap &whitelist, const QVariantMap &options,
+                                       QString *error) const {
+    // xdp xdp_filter_options shape (xdp-utils.c:248-305): unknown keys
+    // silently dropped (forward-compat); present-but-mistyped keys → the
+    // caller sends InvalidArgs. The FILTERED dict is what the handler
+    // receives.
+    //
+    // Mistype rule (sound for the whitelist's scalar slots): marshal the
+    // value against the declared sig, then check the marshaled value
+    // still converts back through the same slot. The telling case is a
+    // JS string where a numeric slot is declared: toUInt()/toInt() on a
+    // non-numeric string yields 0 — silent corruption. So: a declared
+    // numeric/bool slot rejects non-numeric/non-bool JS strings (and
+    // vice versa: a declared string slot accepts anything via
+    // toString()). Container slots (a*, (...), {...}) require the
+    // value to already be a list/map of the right shape — checked by
+    // attempting the marshal and requiring a valid, same-kind result.
+    QVariantMap out;
+    for (auto it = options.begin(); it != options.end(); ++it) {
+        auto wit = whitelist.constFind(it.key());
+        if (wit == whitelist.constEnd())
+            continue; // unknown: silently dropped
+        const QString sig = wit.value().toString();
+        const QVariant &v = it.value();
+        bool mistyped = false;
+        if (sig == QStringLiteral("s") || sig == QStringLiteral("o") ||
+            sig == QStringLiteral("g")) {
+            mistyped = false; // everything stringifies
+        } else if (sig == QStringLiteral("b")) {
+            mistyped = v.userType() != QMetaType::Bool && v.userType() != QMetaType::QString &&
+                       v.userType() != QMetaType::Int && v.userType() != QMetaType::UInt;
+        } else if (sig == QStringLiteral("y") || sig == QStringLiteral("n") ||
+                   sig == QStringLiteral("q") || sig == QStringLiteral("i") ||
+                   sig == QStringLiteral("u") || sig == QStringLiteral("x") ||
+                   sig == QStringLiteral("t") || sig == QStringLiteral("d")) {
+            // Numeric slots: bools never coerce; strings must be numeric.
+            if (v.userType() == QMetaType::Bool) {
+                mistyped = true;
+            } else if (v.userType() == QMetaType::QString) {
+                bool ok = false;
+                v.toString().toDouble(&ok);
+                mistyped = !ok;
+            } else if (v.userType() != QMetaType::Int && v.userType() != QMetaType::UInt &&
+                       v.userType() != QMetaType::LongLong &&
+                       v.userType() != QMetaType::ULongLong && v.userType() != QMetaType::Double) {
+                mistyped = true;
+            }
+        } else {
+            // Container slots: the value must already be shaped (list
+            // for arrays, map for dicts/structs-as-maps); the marshal
+            // must produce a valid result.
+            const QVariant marshaled = marshalBySignature(sig, v);
+            mistyped = !marshaled.isValid();
+        }
+        if (mistyped) {
+            if (error)
+                *error =
+                    QStringLiteral("option '%1' has wrong type (expected %2)").arg(it.key(), sig);
+            return {};
+        }
+        out.insert(it.key(), v);
+    }
+    return out;
+}
+
 void DBusAdaptor::setAllowReplacement(bool v) {
     if (m_allowReplacement == v)
         return;
@@ -290,6 +421,10 @@ void DBusAdaptor::componentComplete() {
             ++it;
         }
     }
+    // P10a/FD4: an _options entry naming a method without a trailing
+    // a{sv} in-arg is an attach-time warning + ignored entry (the
+    // whitelist can only filter a trailing options dict).
+    validateOptionSpecs();
     if (m_iface.isEmpty())
         qmlInfo(this)
             << "DBusAdaptor: iface is empty — introspection XML will have an empty interface name";
@@ -307,7 +442,7 @@ void DBusAdaptor::componentComplete() {
         QStringLiteral("serviceChanged"),    QStringLiteral("pathChanged"),
         QStringLiteral("ifaceChanged"),      QStringLiteral("connectionChanged"),
         QStringLiteral("signaturesChanged"), QStringLiteral("_signalsChanged"),
-        QStringLiteral("_membersChanged")};
+        QStringLiteral("_membersChanged"),   QStringLiteral("_optionsChanged")};
 
     // A7a: warn when a QML method folds onto a library mechanism name — the
     // dispatch skip list would silently turn wire calls into UnknownMethod.
@@ -349,6 +484,11 @@ void DBusAdaptor::componentComplete() {
         if (pname == QStringLiteral("objectName") || pname == QStringLiteral("service") ||
             pname == QStringLiteral("path") || pname == QStringLiteral("iface") ||
             pname == QStringLiteral("connection"))
+            continue;
+        // P10a: library config maps never get PropertiesChanged relays
+        // (they are not served properties — same exclusion as Get/GetAll).
+        if (pname == QStringLiteral("_options") || pname == QStringLiteral("_signatures") ||
+            pname == QStringLiteral("_signals") || pname == QStringLiteral("_members"))
             continue;
         notifies.append({i, ns});
     }
@@ -922,6 +1062,15 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                                          QStringLiteral("No such property: %1").arg(propName)));
                 return true;
             }
+            // P10a: library config maps are not served properties.
+            if (propName == QStringLiteral("_options") ||
+                propName == QStringLiteral("_signatures") ||
+                propName == QStringLiteral("_signals") || propName == QStringLiteral("_members")) {
+                sendReply(
+                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                                         QStringLiteral("No such property: %1").arg(propName)));
+                return true;
+            }
             // A2: dual lookup — exact QML name, then the folded wire name
             // (Get("iface", "Version") must find `property int version`),
             // mirroring the method dispatch's exact→folded order.
@@ -978,6 +1127,13 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 // V-providing slot: each a{sv} map value carries its own "v",
                 // so gadget values contribute their payload (single wrap).
                 val = toDbusVariantNested(val);
+                // P10a: _options/_signatures/_signals/_members are
+                // library config, not served properties (offset
+                // discipline already protects the XML; GetAll joins it
+                // so busctl never sees a bogus "Options" property).
+                if (name == QStringLiteral("_options") || name == QStringLiteral("_signatures") ||
+                    name == QStringLiteral("_signals") || name == QStringLiteral("_members"))
+                    continue;
                 if (!wireMarshalable(val)) {
                     // GetAll cannot represent a per-property error — skip.
                     // Skipping also keeps introspection (busctl populates its
@@ -995,6 +1151,15 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         if (member == QStringLiteral("Set") && args.size() >= 3) {
             QString propName = args[1].toString();
             if (isPrivateProperty(propName)) {
+                sendReply(
+                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                                         QStringLiteral("No such property: %1").arg(propName)));
+                return true;
+            }
+            // P10a: library config maps are not served properties.
+            if (propName == QStringLiteral("_options") ||
+                propName == QStringLiteral("_signatures") ||
+                propName == QStringLiteral("_signals") || propName == QStringLiteral("_members")) {
                 sendReply(
                     msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
                                          QStringLiteral("No such property: %1").arg(propName)));
@@ -1039,6 +1204,34 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
     // (arrays, dicts, structs) instead of opaque QDBusArgument objects.
     for (QVariant &a : dbusArgs)
         a = unwrapDbus(a);
+
+    // P10a: served option-whitelist. When the method declares an
+    // _options entry AND the last in-arg is a{sv}, filter the dict
+    // BEFORE dispatch: unknown keys silently dropped, mistyped keys →
+    // InvalidArgs error reply (xdp semantics). The FILTERED dict is
+    // what the handler receives.
+    {
+        const QVariantMap whitelist = optionWhitelist(member);
+        if (!whitelist.isEmpty() && !dbusArgs.isEmpty()) {
+            const QVariant &last = dbusArgs.last();
+            QVariantMap opts;
+            bool isOptionsDict = false;
+            if (last.userType() == qMetaTypeId<QVariantMap>()) {
+                opts = last.toMap();
+                isOptionsDict = true;
+            }
+            if (isOptionsDict) {
+                QString filterError;
+                const QVariantMap filtered = filterOptions(whitelist, opts, &filterError);
+                if (!filterError.isEmpty()) {
+                    sendReply(msg.createErrorReply(
+                        QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"), filterError));
+                    return true;
+                }
+                dbusArgs.last() = filtered;
+            }
+        }
+    }
 
     // D-Bus members are PascalCase; QML methods are camelCase (QML
     // forbids uppercase-initial names). Resolution order (the naming

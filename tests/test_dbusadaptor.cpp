@@ -372,6 +372,11 @@ private slots:
     void testCallerServiceInDispatch();
     void testCallerServiceOutsideDispatch();
     void testCallerServiceHeldReply();
+    // Phase 5 (P10a option whitelist): drop/mistype/pass-through
+    // matrix + attach-time FD4 warning pin.
+    void testOptionsDropMistypePassthrough();
+    void testOptionsNoWhitelistUntouched();
+    void testOptionsIgnoredWithoutTrailingDict();
     void testVariantTypedPayloadStringArray();
     void testVariantTypedPayloadBytes();
     void testVariantTypedPayloadStructEquivalence();
@@ -2068,9 +2073,133 @@ void TestDBusAdaptor::testCallerServiceHeldReply() {
     delete adaptor;
 }
 
-// ==================== P0 hold+throw contract (for-all-times Phase 0) ===
+// ==================== Phase 5: P10a served option-whitelist ====================
 //
-// A throw AFTER holdReply() must settle the HELD reply with the error —
+// Declarative, ladder-consistent: _options { Method: { key: sig } },
+// applied to the method's last a{sv} in-arg (xdp xdp_filter_options
+// shape, xdp-utils.c:248-305). Unknown keys silently dropped
+// (forward-compat); present-but-mistyped keys → InvalidArgs error
+// reply; the FILTERED dict is what the handler receives.
+void TestDBusAdaptor::testOptionsDropMistypePassthrough() {
+    // The handler echoes back what it RECEIVED (post-filter) as a
+    // string, so the test observes the filter outcome on the wire.
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "import QtQml 2.15\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.OptA'\n"
+                         "  path: '/OptA'\n"
+                         "  iface: 'org.dbusqml.OptA'\n"
+                         "  _options: ({ DoIt: ({ count: 'u', label: 's' }) })\n"
+                         "  function doIt(options) {\n"
+                         "    var keys = [];\n"
+                         "    for (var k in options) keys.push(k + '=' + options[k]);\n"
+                         "    keys.sort();\n"
+                         "    return keys.join(',');\n"
+                         "  }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+    // CALL-SHAPE NOTE: the caller is a SEPARATE connection
+    // (asyncCallDeferred — the deferred-reply helper's dedicated
+    // caller). Same-connection setArguments(QVariantMap) infers NO
+    // signature on the local loop (Qt warns "Cannot marshal parameter
+    // 1 of type [QVariantMap]" and the call dies before dispatch); the
+    // separate-connection caller marshals QVariantMap as a{sv} on the
+    // wire, which is also the portal options shape under test.
+    auto callDo = [&](const QVariantMap &opts) -> QDBusPendingCallWatcher * {
+        return asyncCallDeferred(QStringLiteral("org.dbusqml.OptA"), QStringLiteral("/OptA"),
+                                 QStringLiteral("org.dbusqml.OptA"), QStringLiteral("DoIt"),
+                                 QVariantList{opts});
+    };
+    auto awaitDo = [&](const QVariantMap &opts) -> QDBusMessage {
+        QDBusPendingCallWatcher *w = callDo(opts);
+        QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+        if (!spy.wait(5000))
+            return QDBusMessage::createError(QStringLiteral("org.dbusqml.Test.Timeout"),
+                                             QStringLiteral("awaitDo timed out"));
+        QDBusMessage reply = w->reply();
+        delete w;
+        return reply;
+    };
+    // Pass-through: whitelisted keys with correct types reach the handler.
+    QDBusMessage ok = awaitDo(QVariantMap{{QStringLiteral("count"), uint(3)},
+                                          {QStringLiteral("label"), QStringLiteral("x")}});
+    QCOMPARE(ok.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(ok.arguments().first().toString(), QStringLiteral("count=3,label=x"));
+    // Drop: unknown keys silently vanish (handler sees only whitelisted).
+    QDBusMessage dropped = awaitDo(QVariantMap{{QStringLiteral("count"), uint(3)},
+                                               {QStringLiteral("future"), QStringLiteral("zzz")}});
+    QCOMPARE(dropped.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(dropped.arguments().first().toString(), QStringLiteral("count=3"));
+    // Mistype: present-but-wrong-typed key → InvalidArgs error reply.
+    QDBusMessage bad =
+        awaitDo(QVariantMap{{QStringLiteral("count"), QStringLiteral("not-a-number")}});
+    QCOMPARE(bad.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(bad.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    QVERIFY(bad.errorMessage().contains(QStringLiteral("count")));
+    delete adaptor;
+}
+
+void TestDBusAdaptor::testOptionsNoWhitelistUntouched() {
+    // No _options entry: the dict passes through UNFILTERED (zero
+    // behavior change unless opted in).
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.OptB'\n"
+                                        "  path: '/OptB'\n"
+                                        "  iface: 'org.dbusqml.OptB'\n"
+                                        "  function doIt(options) {\n"
+                                        "    var keys = [];\n"
+                                        "    for (var k in options) keys.push(k);\n"
+                                        "    keys.sort();\n"
+                                        "    return keys.join(',');\n"
+                                        "  }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    QDBusPendingCallWatcher *wB = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.OptB"), QStringLiteral("/OptB"),
+        QStringLiteral("org.dbusqml.OptB"), QStringLiteral("DoIt"),
+        {QVariantMap{{QStringLiteral("anything"), 1}, {QStringLiteral("else"), 2}}});
+    QSignalSpy spyB(wB, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spyB.wait(5000));
+    QDBusMessage r = wB->reply();
+    delete wB;
+    QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r.arguments().first().toString(), QStringLiteral("anything,else"));
+    delete adaptor;
+}
+
+void TestDBusAdaptor::testOptionsIgnoredWithoutTrailingDict() {
+    // FD4: an _options entry naming a method whose QML arity is ZERO
+    // (no in-args — no trailing dict possible) → attach-time warning,
+    // entry ignored, method serves normally.
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral(
+                             "dbusqml: _options entry for DoIt.*without in-args.*ignored")));
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.OptC'\n"
+                                        "  path: '/OptC'\n"
+                                        "  iface: 'org.dbusqml.OptC'\n"
+                                        "  _options: ({ DoIt: ({ count: 'u' }) })\n"
+                                        "  function doIt() { return 42; }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    QDBusPendingCallWatcher *wC =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.OptC"), QStringLiteral("/OptC"),
+                          QStringLiteral("org.dbusqml.OptC"), QStringLiteral("DoIt"));
+    QSignalSpy spyC(wC, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spyC.wait(5000));
+    QDBusMessage r = wC->reply();
+    delete wC;
+    QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r.arguments().first().toInt(), 42);
+    delete adaptor;
+}
+
+// ==================== P0 hold+throw contract (for-all-times Phase 0) ===
 // exactly one reply per serial, never a direct reply + unsettled held
 // (double-reply hazard), never silence (the total-swallow hole for
 // non-Error primitives). Tests-first: these FAIL at the parent tree.

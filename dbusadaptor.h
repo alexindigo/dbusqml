@@ -26,6 +26,10 @@ class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
     Q_PROPERTY(DBusConnection *connection READ connection WRITE setConnection NOTIFY
                    connectionChanged FINAL)
     Q_PROPERTY(QVariantMap _signatures READ signatures WRITE setSignatures NOTIFY signaturesChanged)
+    // P10a (features train, Phase 5): per-method served option
+    // whitelist — { "MethodName": { "key": "sig", ... } }, applied to
+    // the method's last a{sv} in-arg (xdp xdp_filter_options shape).
+    Q_PROPERTY(QVariantMap _options READ optionSpecs WRITE setOptionSpecs NOTIFY _optionsChanged)
     // Explicit wire-surface declarations (the explicit tier of the naming
     // ladder): _signals maps wire signal name → concatenated arg signature;
     // _members maps wire member name → QML function/property name.
@@ -60,6 +64,8 @@ public:
     QVariantMap signatures() const { return m_signatures; }
     void setSignatures(const QVariantMap &v);
 
+    QVariantMap optionSpecs() const { return m_options; }
+    void setOptionSpecs(const QVariantMap &v);
     QVariantMap signalSpecs() const { return m_signals; }
 
     // A6: declared per-arg types for a signal (_signals → catalog), for
@@ -124,6 +130,7 @@ Q_SIGNALS:
     void signaturesChanged();
     void _signalsChanged();
     void _membersChanged();
+    void _optionsChanged();
     void allowReplacementChanged();
     void replaceExistingChanged();
     void queueOnBusyChanged();
@@ -143,6 +150,19 @@ private:
     QString generateXml() const;
     QDBusConnection bus() const;
     QStringList declaredOutTypes(const QString &member, bool *found = nullptr) const;
+    // P10a: validate _options entries against the method's in-arg shape
+    // (FD4); warn + drop entries without a trailing a{sv}. Also resolves
+    // the entry's method-name key through the naming ladder.
+    void validateOptionSpecs();
+    // P10a: the whitelist for a wire method name ({ key: sig }), or empty
+    // when the method has no entry. Name resolution: exact wire name →
+    // folded QML name → alias (same ladder as dispatch).
+    QVariantMap optionWhitelist(const QString &wireMember) const;
+    // P10a: xdp_filter_options shape — drop unknown keys, type-check the
+    // rest against the declared sigs. Returns the filtered dict; sets
+    // *error to InvalidArgs detail on mistype (caller sends the reply).
+    QVariantMap filterOptions(const QVariantMap &whitelist, const QVariantMap &options,
+                              QString *error) const;
 
     // The naming ladder (explicit _members → catalog → first-char-upper fold):
     // the wire name advertised for a QML member name (methods and properties).
@@ -161,6 +181,7 @@ private:
     QVariantMap m_signatures;
     QVariantMap m_signals;
     QVariantMap m_members;
+    QVariantMap m_options;
     bool m_allowReplacement = false;
     bool m_replaceExisting = false;
     bool m_queueOnBusy = false;
