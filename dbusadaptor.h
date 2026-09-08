@@ -5,6 +5,8 @@
 #include <QObject>
 #include <QPointer>
 #include <QQmlParserStatus>
+#include <QStack>
+#include <QVarLengthArray>
 #include <qqmlregistration.h>
 
 #include "dbusconnection.h"
@@ -156,17 +158,26 @@ private:
     bool m_attached = false;
 
     // Dispatch context for holdReply(): the in-flight call's message,
-    // connection, and member name. Set around the handler invocation, cleared
-    // after; `held` records that the handler deferred the reply.
+    // connection, member name, and the held-reply object (if any). A stack:
+    // nested dispatches (re-entrant handleMessage on the same adaptor)
+    // push/restore rather than clobber the outer call. `held` records that
+    // the handler deferred the reply.
     struct PendingCall {
         QDBusMessage msg;
         QDBusConnection conn;
         QString member;
         bool held = false;
+        QPointer<DBusHeldReply> reply = nullptr;
     };
     PendingCall m_currentCall;
+    QStack<PendingCall> m_callStack;
     bool m_inDispatch = false;
-};
+    // RAII guard: pushes a fresh PendingCall for the duration of one
+    // handler invocation, restoring the outer context on exit (nested
+    // dispatches must not clobber the outer call's held flag/message).
+    // Also owns the m_inDispatch flag save/restore.
+    class DispatchScope;
+}; // end DBusAdaptor
 
 // Convert a QJSValue to QVariant for D-Bus marshaling (preserves DBus.*
 // gadget types). Shared between the sync dispatch path and DBusHeldReply.

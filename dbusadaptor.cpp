@@ -143,9 +143,39 @@ private:
     int m_prop;
 };
 
+// P0 (for-all-times Phase 0): RAII dispatch-context stack. Each handler
+// invocation pushes a fresh PendingCall; destruction restores the outer
+// context. Nested dispatches (re-entrant handleMessage on the same
+// adaptor) must not clobber the outer call's message/held flag — the
+// single-slot m_currentCall did exactly that (inner dispatch overwrote
+// it; inner exit cleared m_inDispatch mid-outer-handler).
+class DBusAdaptor::DispatchScope {
+public:
+    explicit DispatchScope(DBusAdaptor *adaptor, const QDBusMessage &msg,
+                           const QDBusConnection &conn, const QString &member)
+        : m_adaptor(adaptor) {
+        m_adaptor->m_callStack.push(m_adaptor->m_currentCall);
+        m_adaptor->m_currentCall.msg = msg;
+        m_adaptor->m_currentCall.conn = conn;
+        m_adaptor->m_currentCall.member = member;
+        m_adaptor->m_currentCall.held = false;
+        m_adaptor->m_currentCall.reply = nullptr;
+        m_savedInDispatch = m_adaptor->m_inDispatch;
+        m_adaptor->m_inDispatch = true;
+    }
+    ~DispatchScope() {
+        m_adaptor->m_currentCall = m_adaptor->m_callStack.pop();
+        m_adaptor->m_inDispatch = m_savedInDispatch;
+    }
+
+private:
+    DBusAdaptor *m_adaptor;
+    bool m_savedInDispatch = false;
+};
+
 DBusAdaptor::DBusAdaptor(QObject *parent)
     : QDBusVirtualObject(parent),
-      m_currentCall{QDBusMessage(), QDBusConnection::sessionBus(), QString(), false} {}
+      m_currentCall{QDBusMessage(), QDBusConnection::sessionBus(), QString(), false, nullptr} {}
 
 DBusAdaptor::~DBusAdaptor() {
     // Error out any held reply that was never settled. The adaptor is being
@@ -1041,131 +1071,191 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
         QVariant retVal;
         bool invoked = false;
+        // P0 tail state: captured INSIDE the DispatchScope lifetime (the
+        // scope object below), read AFTER it ends. The scope restores the
+        // outer context on destruction, so the tail must not read
+        // m_currentCall afterwards.
+        bool heldForThisCall = false;
 
-        // Establish the dispatch context so holdReply() works synchronously
-        // inside the handler. Cleared immediately after invocation.
-        m_currentCall.msg = msg;
-        m_currentCall.conn = conn;
-        m_currentCall.member = member;
-        m_currentCall.held = false;
-        m_inDispatch = true;
-
-        QQmlEngine *engine = qmlEngine(this);
-        if (engine) {
-            // Ownership preservation (0.8.0): the only hazard is
-            // newQObject()'s side effect — it re-marks the wrapped QObject as
-            // JavaScriptOwnership. Record the current ownership, wrap, and
-            // restore immediately: the adaptor keeps its pre-dispatch
-            // ownership through the call. Declarative adaptors stay
-            // CppOwnership (no-op); dynamically created adaptors stay
-            // JavaScriptOwnership — so QML destroy() works anywhere,
-            // including inside the dispatched handler (deletion is deferred
-            // until after the current script block, i.e. after the dispatch
-            // returns), and GC collects an abandoned adaptor even while a
-            // reply it can no longer answer is pending (the destructor errors
-            // pending callers). Spike-verified: the thisObj QJSValue is a GC
-            // root for the duration of the dispatch (plans/
-            // ownership-preserve-v0.8.0/spike-findings.md).
-            //
-            // The adaptor is wrapped as a QJSValue and invoked through
-            // callWithInstance. This avoids building a JS source string
-            // (which mishandles arrays/dicts and stringifies numeric args
-            // without escaping) and works cleanly for multiple adaptor
-            // instances sharing one engine.
-            const QQmlEngine::ObjectOwnership priorOwnership = QQmlEngine::objectOwnership(this);
-            QJSValue thisObj = engine->newQObject(this);
-            QQmlEngine::setObjectOwnership(this, priorOwnership);
-            // A1: the matched QML name (the _members alias) goes FIRST —
-            // aliased handlers must run through the JS path (named error
-            // replies + precision-safe 64-bit delivery), never fall to the
-            // C++ invoke fallback, which swallows thrown errors into an
-            // empty success reply and loses int64 precision to a JS Number.
-            QJSValue fn = thisObj.property(matchedName);
-            if (!fn.isCallable() && member != matchedName)
-                fn = thisObj.property(member);
-            if (!fn.isCallable() && qmlMember != member && qmlMember != matchedName)
-                fn = thisObj.property(qmlMember);
-            if (fn.isCallable()) {
-                QJSValueList jsArgs;
-                jsArgs.reserve(dbusArgs.size());
-                for (const QVariant &arg : std::as_const(dbusArgs))
-                    jsArgs << precisionSafeToScriptValue(engine, arg);
-                QJSValue result = fn.callWithInstance(thisObj, jsArgs);
-                // S2: a thrown DBusQML.DBusUtils.error(name, message) value
-                // surfaces as an object carrying the dbusError marker (QV4
-                // does not flag thrown non-Error objects via isError()).
-                const bool thrownErrorShape = [&result] {
-                    if (!result.isObject() && !result.isVariant())
-                        return false;
-                    const QJSValue marker = result.property(QStringLiteral("dbusError"));
-                    if (marker.isUndefined() || marker.isNull() || !marker.toBool())
-                        return false;
-                    // A name that fails the grammar still shapes as an error
-                    // throw — B11's validation falls back to Failed for it.
-                    const QJSValue n = result.property(QStringLiteral("name"));
-                    return n.isString();
-                }();
-                if (result.isError() || thrownErrorShape) {
-                    // S2: named error replies from handlers. A thrown value
-                    // with a D-Bus error shape (DBusQML.DBusUtils.error() —
-                    // a map carrying a dotted `name` and a `message`) becomes
-                    // that exact error reply; any other JS exception becomes
-                    // org.freedesktop.DBus.Error.Failed with the exception
-                    // message. Never a silent empty reply, and the handler is
-                    // never re-run through the C++ invoke path.
-                    QString errorName = QStringLiteral("org.freedesktop.DBus.Error.Failed");
-                    QString errorMessage = result.toString();
-                    const QJSValue nameVal = result.property(QStringLiteral("name"));
-                    const QJSValue msgVal = result.property(QStringLiteral("message"));
-                    if (nameVal.isString()) {
-                        const QString n = nameVal.toString();
-                        // B11: the name must satisfy the D-Bus error-name
-                        // grammar (dot-separated identifiers, each starting
-                        // with a letter or underscore). An invalid name would
-                        // fail at reply marshal — the caller would just time
-                        // out. Fall back to Failed with a warning.
-                        const bool validName = [n]() {
-                            const QStringList parts = n.split(QLatin1Char('.'));
-                            if (parts.size() < 2)
-                                return false;
-                            for (const QString &p : parts) {
-                                if (p.isEmpty() || !p.at(0).isLetter())
+        // P0 (for-all-times Phase 0): RAII dispatch scope — pushes a fresh
+        // context so holdReply() works synchronously inside the handler;
+        // destruction restores the outer context (nested dispatches must
+        // not clobber it).
+        {
+            DispatchScope scope(this, msg, conn, member);
+            QQmlEngine *engine = qmlEngine(this);
+            if (engine) {
+                // Ownership preservation (0.8.0): the only hazard is
+                // newQObject()'s side effect — it re-marks the wrapped QObject as
+                // JavaScriptOwnership. Record the current ownership, wrap, and
+                // restore immediately: the adaptor keeps its pre-dispatch
+                // ownership through the call. Declarative adaptors stay
+                // CppOwnership (no-op); dynamically created adaptors stay
+                // JavaScriptOwnership — so QML destroy() works anywhere,
+                // including inside the dispatched handler (deletion is deferred
+                // until after the current script block, i.e. after the dispatch
+                // returns), and GC collects an abandoned adaptor even while a
+                // reply it can no longer answer is pending (the destructor errors
+                // pending callers). Spike-verified: the thisObj QJSValue is a GC
+                // root for the duration of the dispatch (plans/
+                // ownership-preserve-v0.8.0/spike-findings.md).
+                //
+                // The adaptor is wrapped as a QJSValue and invoked through
+                // callWithInstance. This avoids building a JS source string
+                // (which mishandles arrays/dicts and stringifies numeric args
+                // without escaping) and works cleanly for multiple adaptor
+                // instances sharing one engine.
+                const QQmlEngine::ObjectOwnership priorOwnership =
+                    QQmlEngine::objectOwnership(this);
+                QJSValue thisObj = engine->newQObject(this);
+                QQmlEngine::setObjectOwnership(this, priorOwnership);
+                // A1: the matched QML name (the _members alias) goes FIRST —
+                // aliased handlers must run through the JS path (named error
+                // replies + precision-safe 64-bit delivery), never fall to the
+                // C++ invoke fallback, which swallows thrown errors into an
+                // empty success reply and loses int64 precision to a JS Number.
+                QJSValue fn = thisObj.property(matchedName);
+                if (!fn.isCallable() && member != matchedName)
+                    fn = thisObj.property(member);
+                if (!fn.isCallable() && qmlMember != member && qmlMember != matchedName)
+                    fn = thisObj.property(qmlMember);
+                if (fn.isCallable()) {
+                    QJSValueList jsArgs;
+                    jsArgs.reserve(dbusArgs.size());
+                    for (const QVariant &arg : std::as_const(dbusArgs))
+                        jsArgs << precisionSafeToScriptValue(engine, arg);
+                    QJSValue result = fn.callWithInstance(thisObj, jsArgs);
+                    // P0 (for-all-times Phase 0): thrown-vs-returned
+                    // discrimination. Empirically (VM probe, QJSEngine):
+                    // callWithInstance reports isError()==false for thrown
+                    // primitives AND hasError()==false afterwards — a thrown
+                    // 'x' is IDENTICAL to a returned 'x' at this layer
+                    // (string QJSValue either way; thrown undefined identical
+                    // to returned undefined). So pure classification is
+                    // impossible here — instead the SCOPE of the throw
+                    // contract is the dispatch shape: a handler that called
+                    // holdReply() has no legitimate bare-primitive return
+                    // (held replies settle via the held object, and a bare
+                    // return with held==true is already warned+ignored).
+                    // Treat string/number/bool/null results as THROWS
+                    // exactly when held==true (P0: the silence was always
+                    // and only on the held path); otherwise preserve the
+                    // legacy return-value behavior. A bare `undefined`
+                    // result is NOT a throw — it is the normal void return
+                    // (a handler that only calls holdReply() completes with
+                    // undefined); thrown-undefined is undetectable at this
+                    // layer and remains a documented limitation. Arrays
+                    // (isArray) and plain objects are legitimate multi-out
+                    // / map returns even when held — only the scalar bare
+                    // kinds route to the error path.
+                    const bool heldNow = m_currentCall.held;
+                    const bool thrownPrimitive = heldNow && !result.isError() &&
+                                                 !result.isArray() && !result.isObject() &&
+                                                 (result.isString() || result.isNumber() ||
+                                                  result.isBool() || result.isNull());
+                    QJSValue thrownValue;
+                    const bool callThrew = thrownPrimitive;
+                    if (callThrew)
+                        thrownValue = result;
+                    const bool thrownErrorShape = [&result] {
+                        if (!result.isObject() && !result.isVariant())
+                            return false;
+                        const QJSValue marker = result.property(QStringLiteral("dbusError"));
+                        if (marker.isUndefined() || marker.isNull() || !marker.toBool())
+                            return false;
+                        // A name that fails the grammar still shapes as an error
+                        // throw — B11's validation falls back to Failed for it.
+                        const QJSValue n = result.property(QStringLiteral("name"));
+                        return n.isString();
+                    }();
+                    if (result.isError() || thrownErrorShape || thrownPrimitive) {
+                        // S2: named error replies from handlers. A thrown value
+                        // with a D-Bus error shape (DBusQML.DBusUtils.error() —
+                        // a map carrying a dotted `name` and a `message`) becomes
+                        // that exact error reply; any other JS exception becomes
+                        // org.freedesktop.DBus.Error.Failed with the exception
+                        // message. Never a silent empty reply, and the handler is
+                        // never re-run through the C++ invoke path.
+                        //
+                        // P0 (for-all-times Phase 0): when the handler deferred
+                        // via holdReply(), the error settles the HELD reply via
+                        // sendError — never a direct reply on the serial (which
+                        // would leave the held object unsettled for a later
+                        // double-reply). Exactly-one-reply-per-serial becomes
+                        // structural: sendError marks the held object settled.
+                        QString errorName = QStringLiteral("org.freedesktop.DBus.Error.Failed");
+                        // P0: a thrown primitive carries its string form as
+                        // the message (verified: 'primitive-boom' reaches
+                        // the caller).
+                        QString errorMessage;
+                        if (thrownPrimitive)
+                            errorMessage = thrownValue.toString();
+                        else
+                            errorMessage = result.toString();
+                        const QJSValue nameVal = result.property(QStringLiteral("name"));
+                        const QJSValue msgVal = result.property(QStringLiteral("message"));
+                        if (nameVal.isString()) {
+                            const QString n = nameVal.toString();
+                            // B11: the name must satisfy the D-Bus error-name
+                            // grammar (dot-separated identifiers, each starting
+                            // with a letter or underscore). An invalid name would
+                            // fail at reply marshal — the caller would just time
+                            // out. Fall back to Failed with a warning.
+                            const bool validName = [n]() {
+                                const QStringList parts = n.split(QLatin1Char('.'));
+                                if (parts.size() < 2)
                                     return false;
-                                for (const QChar &c : p) {
-                                    if (!(c.isLetterOrNumber() || c == QLatin1Char('_')))
+                                for (const QString &p : parts) {
+                                    if (p.isEmpty() || !p.at(0).isLetter())
                                         return false;
+                                    for (const QChar &c : p) {
+                                        if (!(c.isLetterOrNumber() || c == QLatin1Char('_')))
+                                            return false;
+                                    }
                                 }
+                                return true;
+                            }();
+                            if (validName) {
+                                errorName = n;
+                                if (msgVal.isString())
+                                    errorMessage = msgVal.toString();
+                            } else if (n.contains(QLatin1Char('.')) || thrownErrorShape) {
+                                // B11: a THROWER-declared named error with bad
+                                // grammar warns + falls back; a plain JS Error
+                                // ("Error") is not a named error — silent Failed.
+                                qWarning("dbusqml: invalid error name '%s' — falling back to "
+                                         "org.freedesktop.DBus.Error.Failed",
+                                         qPrintable(n));
+                                if (msgVal.isString())
+                                    errorMessage = msgVal.toString();
                             }
-                            return true;
-                        }();
-                        if (validName) {
-                            errorName = n;
-                            if (msgVal.isString())
-                                errorMessage = msgVal.toString();
-                        } else if (n.contains(QLatin1Char('.')) || thrownErrorShape) {
-                            // B11: a THROWER-declared named error with bad
-                            // grammar warns + falls back; a plain JS Error
-                            // ("Error") is not a named error — silent Failed.
-                            qWarning("dbusqml: invalid error name '%s' — falling back to "
-                                     "org.freedesktop.DBus.Error.Failed",
-                                     qPrintable(n));
-                            if (msgVal.isString())
-                                errorMessage = msgVal.toString();
                         }
+                        qWarning("dbusqml: handler for %s threw %s: %s", qPrintable(member),
+                                 qPrintable(errorName), qPrintable(errorMessage));
+                        if (m_currentCall.held && !m_currentCall.reply.isNull()) {
+                            // P0: settle the HELD reply, not the serial. B4
+                            // honored: sendError sends nothing when the caller
+                            // set NO_REPLY_EXPECTED.
+                            m_currentCall.reply->sendError(errorName, errorMessage);
+                        } else if (msg.isReplyRequired()) {
+                            if (!conn.send(msg.createErrorReply(errorName, errorMessage)))
+                                qWarning("dbusqml: error reply for %s failed to send: %s",
+                                         qPrintable(member),
+                                         qPrintable(conn.lastError().message()));
+                        }
+                        return true;
                     }
-                    qWarning("dbusqml: handler for %s threw %s: %s", qPrintable(member),
-                             qPrintable(errorName), qPrintable(errorMessage));
-                    if (msg.isReplyRequired())
-                        conn.send(msg.createErrorReply(errorName, errorMessage));
-                    m_inDispatch = false;
-                    return true;
+                    if (!result.isError() && !thrownErrorShape && !callThrew) {
+                        retVal = result.isUndefined() ? QVariant() : qjsValueToVariant(result);
+                        invoked = true;
+                    }
                 }
-                if (!result.isError()) {
-                    retVal = result.isUndefined() ? QVariant() : qjsValueToVariant(result);
-                    invoked = true;
-                }
-            }
-        }
+            } // end if (fn.isCallable())
+            // Capture THIS call's held flag before the scope ends (the
+            // destructor restores the outer context; the tail below must
+            // not read m_currentCall afterwards).
+            heldForThisCall = m_currentCall.held;
+        } // end DispatchScope
         if (!invoked) {
             QByteArray methodName = matchedName.toLatin1();
             // C++ Q_INVOKABLEs take QVariant args (matching the Q_ARG dispatch
@@ -1275,19 +1365,22 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 qWarning("dbusqml: method %s takes %d arguments — the C++ dispatch path supports "
                          "at most 5; declare fewer parameters",
                          qPrintable(matchedName), int(dbusArgs.size()));
-                m_inDispatch = false;
                 return false;
             }
         }
 
-        m_inDispatch = false;
-
         // If the handler deferred the reply via holdReply(), the held reply
         // will settle it later — skip the synchronous tail. The handler's
-        // return value (if any) is ignored in that case.
-        if (m_currentCall.held) {
+        // return value (if any) is ignored in that case. Reads the
+        // captured flag (NOT m_currentCall — the scope restored the outer
+        // context on exit). Loud when the handler ALSO returned a value
+        // (fable): a held-path skip with a value is a caller-observable
+        // decision, never silent.
+        if (heldForThisCall) {
             if (retVal.isValid()) {
-                qWarning("dbusqml: handler return value ignored when holdReply() was called");
+                qWarning("dbusqml: handler return value ignored when holdReply() was called "
+                         "(member %s — the held reply settles the caller)",
+                         qPrintable(member));
             }
             return true;
         }
@@ -1300,16 +1393,15 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                      qPrintable(member));
             sendReply(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
                                            QStringLiteral("Handler invocation failed")));
-            m_inDispatch = false;
             return true;
         }
 
         sendMethodReply(conn, msg, member, retVal);
         return true;
-    }
+    } // end for (candidate methods)
 
     return false;
-}
+} // end handleMessage
 
 DBusHeldReply *DBusAdaptor::holdReply() {
     if (!m_inDispatch) {
@@ -1325,6 +1417,7 @@ DBusHeldReply *DBusAdaptor::holdReply() {
     // object is never collected and it is destroyed with the adaptor.
     QQmlEngine::setObjectOwnership(reply, QQmlEngine::CppOwnership);
     m_currentCall.held = true;
+    m_currentCall.reply = reply;
     return reply;
 }
 
@@ -1359,6 +1452,14 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
     // error) when the caller didn't ask for one.
     if (!msg.isReplyRequired())
         return;
+    // P0 (v): every send-site result is checked (C0 did this for signals;
+    // the reply tail never did). A failed send is loud, never a silent
+    // caller timeout.
+    auto checkedSend = [&](const QDBusMessage &reply, const char *what) {
+        if (!conn.send(reply))
+            qWarning("dbusqml: %s for %s failed to send: %s", what, qPrintable(member),
+                     qPrintable(conn.lastError().message()));
+    };
     const QVariant value = toDbusVariant(retVal);
     if (value.isValid()) {
         // Robustness guard: an unmarshalable payload (e.g. a returned JS
@@ -1367,8 +1468,9 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
         if (!wireMarshalable(value)) {
             qWarning("dbusqml: reply for %s is not marshalable (type %s) — sending error reply",
                      qPrintable(member), QMetaType(value.userType()).name());
-            conn.send(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
-                                           QStringLiteral("Reply value is not marshalable")));
+            checkedSend(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                                             QStringLiteral("Reply value is not marshalable")),
+                        "error reply");
             return;
         }
 
@@ -1383,11 +1485,12 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
         const QStringList outTypes = declaredOutTypes(member, &declared);
         if (declared && outTypes.isEmpty()) {
             qWarning("dbusqml: %s is declared void — dropping return value", qPrintable(member));
-            conn.send(msg.createReply());
+            checkedSend(msg.createReply(), "declared-void reply");
             return;
         }
         if (outTypes.size() == 1) {
-            conn.send(msg.createReply({marshalBySignature(outTypes.first(), value)}));
+            checkedSend(msg.createReply({marshalBySignature(outTypes.first(), value)}),
+                        "method reply");
             return;
         }
         if (outTypes.size() > 1) {
@@ -1397,12 +1500,12 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
             for (int i = 0; i < outTypes.size(); ++i)
                 reply << marshalBySignature(outTypes.at(i),
                                             i < values.size() ? values.at(i) : QVariant());
-            conn.send(msg.createReply(reply));
+            checkedSend(msg.createReply(reply), "multi-out reply");
             return;
         }
-        conn.send(msg.createReply({value})); // stable inference
+        checkedSend(msg.createReply({value}), "method reply"); // stable inference
     } else {
-        conn.send(msg.createReply()); // void return — no reply args
+        checkedSend(msg.createReply(), "void reply"); // void return — no reply args
     }
 }
 

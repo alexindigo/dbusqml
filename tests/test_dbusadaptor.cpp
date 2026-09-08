@@ -24,6 +24,7 @@
 
 #include "dbusadaptor.h"
 #include "dbusconnection.h"
+#include "dbusheldreply.h"
 #include "dbusmessage.h"
 #include "dbusservicewatcher.h"
 #include "dbusobjectmanager.h"
@@ -359,6 +360,11 @@ private slots:
     void testDeferredInterleaving();
     void testDeferredTeardown();
     void testDeferredOnceOnly();
+    void testHoldThrowErrorSettlesHeld();
+    void testHoldThrowPrimitiveSettlesHeld();
+    void testHoldThrowDeclaredShapeError();
+    void testHoldThrowNoReplyExpectedSilent();
+    void testNestedDispatchContextRestored();
     void testHoldReplyOutsideDispatch();
 
     void testVariantTypedPayloadStringArray();
@@ -1926,6 +1932,199 @@ void TestDBusAdaptor::testHoldReplyOutsideDispatch() {
                          "}");
     QVERIFY(adaptor != nullptr);
     QCOMPARE(adaptor->property("grabbedNull").toBool(), true);
+    delete adaptor;
+}
+
+// ==================== P0 hold+throw contract (for-all-times Phase 0) ===
+//
+// A throw AFTER holdReply() must settle the HELD reply with the error —
+// exactly one reply per serial, never a direct reply + unsettled held
+// (double-reply hazard), never silence (the total-swallow hole for
+// non-Error primitives). Tests-first: these FAIL at the parent tree.
+
+// T7 — hold + synchronous Error throw → exactly one named error reply on
+// the serial, held object marked settled.
+void TestDBusAdaptor::testHoldThrowErrorSettlesHeld() {
+    QObject *adaptor = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.HoldT7'\n"
+        "  path: '/HoldT7'\n"
+        "  iface: 'org.dbusqml.HoldT7'\n"
+        "  property var heldRef: null\n"
+        "  function boom() { heldRef = holdReply(); throw new Error('sync-boom') }\n"
+        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusPendingCallWatcher *watcher =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.HoldT7"), QStringLiteral("/HoldT7"),
+                          QStringLiteral("org.dbusqml.HoldT7"), QStringLiteral("boom"));
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QDBusMessage reply = watcher->reply();
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+    QVERIFY(reply.errorMessage().contains(QStringLiteral("sync-boom")));
+
+    // The held object must be settled (exactly-one-reply is structural):
+    // read isSettled() off the C++ object held in the QML property.
+    QObject *heldObj = adaptor->property("heldRef").value<QObject *>();
+    QVERIFY(heldObj != nullptr);
+    DBusHeldReply *held = qobject_cast<DBusHeldReply *>(heldObj);
+    QVERIFY(held != nullptr);
+    QVERIFY(held->isSettled());
+
+    delete watcher;
+    delete adaptor;
+}
+
+// T8 — hold + thrown string primitive → SAME contract via normalization
+// (today: total swallow, caller times out).
+void TestDBusAdaptor::testHoldThrowPrimitiveSettlesHeld() {
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "import QtQml 2.15\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.HoldT8'\n"
+                         "  path: '/HoldT8'\n"
+                         "  iface: 'org.dbusqml.HoldT8'\n"
+                         "  function boom() { holdReply(); throw 'primitive-boom' }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusPendingCallWatcher *watcher =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.HoldT8"), QStringLiteral("/HoldT8"),
+                          QStringLiteral("org.dbusqml.HoldT8"), QStringLiteral("boom"));
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QDBusMessage reply = watcher->reply();
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QVERIFY(reply.errorMessage().contains(QStringLiteral("primitive-boom")));
+
+    delete watcher;
+    delete adaptor;
+}
+
+// T10 — declared (u,a{sv}) hold + throw → error reply (byte-pinned: an
+// ErrorMessage carries no out-args; the shape contract holds at settle).
+void TestDBusAdaptor::testHoldThrowDeclaredShapeError() {
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "import QtQml 2.15\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.HoldT10'\n"
+                         "  path: '/HoldT10'\n"
+                         "  iface: 'org.freedesktop.impl.portal.FileChooser'\n"
+                         "  function openFile(handle, appId, parentWindow, title, options) {\n"
+                         "    holdReply()\n"
+                         "    throw new Error('declared-boom')\n"
+                         "  }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.HoldT10"), QStringLiteral("/HoldT10"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QVariant::fromValue(QDBusObjectPath(QStringLiteral("/req/1"))), QStringLiteral("app"),
+         QStringLiteral(""), QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QDBusMessage reply = watcher->reply();
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QVERIFY(reply.errorMessage().contains(QStringLiteral("declared-boom")));
+
+    delete watcher;
+    delete adaptor;
+}
+
+// T11 — NO_REPLY_EXPECTED hold + throw → nothing sent (B4 honored even on
+// the error path).
+void TestDBusAdaptor::testHoldThrowNoReplyExpectedSilent() {
+    QObject *adaptor = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.HoldT11'\n"
+        "  path: '/HoldT11'\n"
+        "  iface: 'org.dbusqml.HoldT11'\n"
+        "  property bool boomRan: false\n"
+        "  function boom() { boomRan = true; holdReply(); throw new Error('noreply-boom') }\n"
+        "}");
+    QVERIFY(adaptor != nullptr);
+
+    // Fire-and-forget send(): the message carries NO_REPLY_EXPECTED, so
+    // isReplyRequired() is false server-side. The handler must still run
+    // (side effect observable) while the library sends nothing at all —
+    // neither the old direct error reply nor a held settle.
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.HoldT11"), QStringLiteral("/HoldT11"),
+        QStringLiteral("org.dbusqml.HoldT11"), QStringLiteral("boom"));
+    QVERIFY(QDBusConnection::sessionBus().send(msg));
+    QTRY_VERIFY_WITH_TIMEOUT(adaptor->property("boomRan").toBool() == true, 3000);
+    // The adaptor must still be alive and serving (no fatal from the throw).
+    QDBusMessage ping = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.HoldT11"), QStringLiteral("/HoldT11"),
+        QStringLiteral("org.dbusqml.HoldT11"), QStringLiteral("boomRan"));
+    QDBusMessage pingReply = QDBusConnection::sessionBus().call(ping, QDBus::Block, 3000);
+    QVERIFY(pingReply.type() != QDBusMessage::ErrorMessage ||
+            !pingReply.errorMessage().contains(QStringLiteral("noreply-boom")));
+
+    delete adaptor;
+}
+
+// T12 — nested-dispatch context save/restore: an inner dispatch to the same
+// adaptor must not clobber the outer call's held flag (RAII stack).
+// The inner call is a synchronous nested dispatch through the test's own
+// nested event loop: outer() holds, then pumps events while a parallel
+// async inner() call dispatches re-entrantly on the same adaptor object.
+// Pre-fix (single m_currentCall slot) the inner dispatch overwrites the
+// outer context; the outer tail then sees held==false and sends a
+// synchronous reply AND the outer caller later also settles → the spy
+// sees the outer reply arrive EARLY (before settleOuter).
+void TestDBusAdaptor::testNestedDispatchContextRestored() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  id: root\n"
+                                        "  service: 'org.dbusqml.HoldT12'\n"
+                                        "  path: '/HoldT12'\n"
+                                        "  iface: 'org.dbusqml.HoldT12'\n"
+                                        "  property var held: null\n"
+                                        "  function outer() {\n"
+                                        "    held = holdReply()\n"
+                                        "  }\n"
+                                        "  function inner() { return 'inner-sync' }\n"
+                                        "  function settleOuter() { held.send(['settled']) }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    // Outer call holds on the deferred caller connection; while it is in
+    // flight, a synchronous inner call dispatches re-entrantly through the
+    // same adaptor (same thread, nested handleMessage via the local loop).
+    QDBusPendingCallWatcher *outerWatcher =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.HoldT12"), QStringLiteral("/HoldT12"),
+                          QStringLiteral("org.dbusqml.HoldT12"), QStringLiteral("outer"));
+    QSignalSpy outerSpy(outerWatcher, &QDBusPendingCallWatcher::finished);
+    // Pump: let the outer dispatch land (held), then run the inner call
+    // to completion while outer is still held.
+    QTest::qWait(500);
+    QDBusMessage inner = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.HoldT12"), QStringLiteral("/HoldT12"),
+        QStringLiteral("org.dbusqml.HoldT12"), QStringLiteral("inner"));
+    QDBusMessage innerReply = QDBusConnection::sessionBus().call(inner, QDBus::Block, 3000);
+    QCOMPARE(innerReply.type(), QDBusMessage::ReplyMessage);
+    // The outer reply must NOT have arrived yet (still held) — a
+    // clobbered context would have sent it synchronously.
+    QCOMPARE(outerSpy.count(), 0);
+
+    QDBusMessage settle = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.HoldT12"), QStringLiteral("/HoldT12"),
+        QStringLiteral("org.dbusqml.HoldT12"), QStringLiteral("settleOuter"));
+    QDBusConnection::sessionBus().call(settle, QDBus::NoBlock);
+    QVERIFY(outerSpy.wait(5000));
+    QCOMPARE(outerWatcher->reply().type(), QDBusMessage::ReplyMessage);
+
+    delete outerWatcher;
     delete adaptor;
 }
 
