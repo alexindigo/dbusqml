@@ -1,13 +1,47 @@
 #pragma once
 
+#include <QCoreApplication>
 #include <QDBusConnection>
 #include <QDBusVirtualObject>
+#include <QEvent>
 #include <QMetaObject>
 #include <QList>
 #include <QPointer>
 #include <QString>
 
 class DBusAdaptor;
+
+// OwnerChangeRelay delivers service-ownership transitions on the main
+// thread; it needs the same private entry points as the dispatcher.
+class OwnerChangeRelay;
+
+// T1 watch context: the QObject that QtDBus's signal delivery targets
+// for one flagged claim's serviceOwnerChanged watch. It is created on
+// the consumer (attach) thread and deliberately NEVER moved — QtDBus
+// posts matched-signal delivery events to hook.obj's thread, and the
+// hook.obj here is the QDBusConnectionPrivate (manager thread), so the
+// lambda runs on the manager thread with this object as its context.
+// Using a library-owned context (instead of conn.interface()) keeps the
+// connect-time BlockingQueued metacall out of attach's registry-locked
+// path: with iface as context, QObject::connect blocks the attaching
+// thread on the manager thread while the manager thread may itself be
+// blocked delivering an earlier owner-change into handleServiceOwnerChange
+// under registryMutex — a self-deadlock through Qt internals, not our
+// lock. Owned by the claim record; destroyed via deleteLater on
+// teardown (its delivery affinity is the manager thread).
+class OwnerChangeWatch : public QObject {
+    Q_OBJECT
+
+public:
+    OwnerChangeWatch(const QString &connName, const QString &service, QObject *parent = nullptr)
+        : QObject(parent), m_connName(connName), m_service(service) {}
+    QString connName() const { return m_connName; }
+    QString service() const { return m_service; }
+
+private:
+    QString m_connName;
+    QString m_service;
+};
 
 // Library-private: routes incoming D-Bus calls on a shared (connection, path)
 // to the co-located DBusAdaptor instances attached to it, and shares service
@@ -48,8 +82,19 @@ public:
     bool handleMessage(const QDBusMessage &message, const QDBusConnection &connection) override;
 
     // Owner-change watch receiver (library-private; connected per claim).
+    // Runs on QtDBus's manager thread: records the claim transition and
+    // marshals delivery to the main thread (see OwnerChangeRelay below) —
+    // it NEVER touches adaptors itself (T1).
     static void handleServiceOwnerChange(const QString &connName, const QString &service,
                                          const QString &newOwner);
+
+    // P5 (features train, Phase 3): connection-loss fan-out. The
+    // DBusConnection that observed Local.Disconnected calls this with its
+    // QDBusConnection identity; every claim on that connection flips to
+    // unowned and its holders get nameLost on the CALLING thread's event
+    // loop via the relay (same lifetime discipline as owner-changes — no
+    // adaptor pointer crosses a thread). Idempotent per connection.
+    static void handleConnectionLost(const QString &connName);
 
 private:
     DBusPathDispatcher(const QString &connName, const QString &path, const QDBusConnection &conn);
@@ -61,4 +106,65 @@ private:
     QString m_path;
     QDBusConnection m_conn;
     QList<QPointer<DBusAdaptor>> m_adaptors;
+};
+
+// T1 (features train, Phase 2 — concilium-blessed candidate 4, the
+// main-thread relay): no adaptor pointer ever crosses a thread. The
+// manager thread only updates claim state + sets a coalescing flag and
+// posts a value-only note to this process-lifetime, main-thread-affine
+// relay; the relay re-takes the lock ON THE MAIN THREAD, re-resolves
+// the claim (miss or !notifyQueued → drop), clears the flag, diffs
+// `owned` against `lastNotifiedOwned` (coalescing makes stale/duplicate
+// posts harmless), copies holders, drops the lock, then delivers.
+// QPointer checks there are safe because adaptor destruction is
+// main-thread-serialized by the event loop.
+//
+// Lifetime: intentionally never deleted (leaked at exit). That is what
+// makes the F3 poster race structurally impossible —
+// QObjectPrivate::threadData stays permanently valid, so a concurrent
+// postEvent can never dereference half-torn-down ~QObject state.
+// Affinity: moveToThread(qApp) at creation (a function-local static
+// inherits its CREATOR's affinity, which may be foreign).
+class OwnerChangeRelay : public QObject {
+    Q_OBJECT
+
+public:
+    // A value-only ownership note: identifies the claim whose state
+    // changed. The transition itself is NEVER carried — the relay
+    // re-resolves owned/acquired-lost from the claim record under the
+    // lock, so stale or duplicate posts collapse harmlessly.
+    struct Note {
+        QString connName;
+        QString service;
+    };
+
+    static int eventType() {
+        static int t = QEvent::registerEventType();
+        return t;
+    }
+
+    // Caller MUST hold registryMutex (creation is under the lock so the
+    // relay is published before any watch can fire).
+    static OwnerChangeRelay *instance() {
+        static OwnerChangeRelay *r = [] {
+            auto *p = new OwnerChangeRelay;
+            if (auto *app = QCoreApplication::instance())
+                p->moveToThread(app->thread());
+            return p;
+        }();
+        return r;
+    }
+
+    // Manager-thread marshal: enqueue + wake. Takes the queue mutex
+    // alone (NEVER nested inside registryMutex) and posts AFTER the
+    // caller released the registry lock: postEvent to a live relay is
+    // not I/O and never blocks, but keeping it outside preserves the
+    // trivial lock order (registryMutex -> postEventList.mutex only).
+    static void postNote(Note n);
+
+protected:
+    bool event(QEvent *e) override;
+
+private:
+    OwnerChangeRelay() = default;
 };

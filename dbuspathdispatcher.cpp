@@ -4,12 +4,15 @@
 
 #include <QDBusConnectionInterface>
 
+#include <QCoreApplication>
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPair>
+#include <QQueue>
+#include <atomic>
 #include <qqmlinfo.h>
 
 namespace {
@@ -39,7 +42,18 @@ struct ServiceClaim {
     bool replaceExisting = false;
     bool queueOnBusy = false;
     QString baseService; // our unique bus name at claim time
+    // T1 relay state (blessed shape): notifyQueued coalesces manager-
+    // thread observations into one pending wake; lastNotifiedOwned is
+    // the ownership the relay last delivered, so the relay diffs and
+    // only delivers real transitions (stale/duplicate posts harmless).
+    bool notifyQueued = false;
+    bool lastNotifiedOwned = false;
     QMetaObject::Connection watch;
+    // T1 watch context (library-owned delivery target for the claim's
+    // serviceOwnerChanged watch). Never moved after creation; freed via
+    // deleteLater on teardown. Raw pointer (QHash values must stay
+    // copyable; the claim record owns it exclusively).
+    OwnerChangeWatch *watchContext = nullptr;
     QList<QPointer<DBusAdaptor>> holders;
 };
 
@@ -81,26 +95,125 @@ QHash<ServiceKey, ServiceClaim> &serviceClaims() {
     return h;
 }
 
+// T1 relay mailbox: value-only notes, guarded by their own mutex. The
+// queue mutex is NEVER nested inside registryMutex (enqueue takes the
+// queue mutex alone; the claim-state update above runs under the registry
+// lock but touches no queue state); the manager thread posts after
+// unlock.
+QQueue<OwnerChangeRelay::Note> &ownerChangeNotes() {
+    static QQueue<OwnerChangeRelay::Note> q;
+    return q;
+}
+
+QMutex &ownerChangeNotesMutex() {
+    static QMutex m;
+    return m;
+}
+
+std::atomic<bool> &ownerChangeDrainPosted() {
+    static std::atomic<bool> f{false};
+    return f;
+}
+
 } // namespace
+
+void OwnerChangeRelay::postNote(Note n) {
+    {
+        QMutexLocker l(&ownerChangeNotesMutex());
+        ownerChangeNotes().enqueue(std::move(n));
+    }
+    // Coalescing wake: at most one undelivered wake event in flight (the
+    // flag resets at the top of event(); a note enqueued between the
+    // drain's last dequeue and the reset still gets its own post — a
+    // duplicate wake is harmless: the drain re-checks the queue).
+    //
+    // CALLER CONTRACT: call AFTER releasing registryMutex (postEvent to a
+    // live relay never blocks, but keeping it outside preserves the
+    // trivial lock order registryMutex -> postEventList.mutex only).
+    if (!ownerChangeDrainPosted().exchange(true))
+        QCoreApplication::postEvent(instance(), new QEvent(static_cast<QEvent::Type>(eventType())));
+}
+
+bool OwnerChangeRelay::event(QEvent *e) {
+    if (e->type() != static_cast<QEvent::Type>(eventType()))
+        return QObject::event(e);
+    ownerChangeDrainPosted().store(false);
+    for (;;) {
+        Note note;
+        {
+            QMutexLocker l(&ownerChangeNotesMutex());
+            if (ownerChangeNotes().isEmpty())
+                return true;
+            note = ownerChangeNotes().dequeue();
+        }
+        QList<QPointer<DBusAdaptor>> holders;
+        bool acquired = false;
+        bool drop = false;
+        {
+            RegistryMutexGuard locker(registryMutex());
+            auto it = serviceClaims().find({note.connName, note.service});
+            if (it == serviceClaims().end())
+                drop = true; // Claim gone → drop the note. A detached
+                             // adaptor wants no notification.
+            else if (!it.value().notifyQueued)
+                drop = true; // Stale/duplicate post — already delivered.
+            else {
+                ServiceClaim &claim = it.value();
+                claim.notifyQueued = false;
+                if (claim.owned == claim.lastNotifiedOwned)
+                    drop = true; // Coalesced burst, no net transition.
+                else {
+                    claim.lastNotifiedOwned = claim.owned;
+                    acquired = claim.owned;
+                    holders = claim.holders;
+                }
+            }
+        }
+        if (drop)
+            continue;
+        // Lock DROPPED before delivery (audit #4): QML handlers run
+        // unlocked, so re-entrant attach/detach re-acquires the
+        // non-recursive mutex uncontended-by-self, and blocking bus calls
+        // in handlers stay legal under the commit-11/12 rule.
+        assertNoRegistryMutex("OwnerChangeRelay::event");
+        // MAIN thread: adaptor destruction is event-loop-serialized, so
+        // the per-iteration QPointer re-check closes the
+        // handler-deletes-a-later-holder window. Never touch `h` after
+        // the emit (a handler may deleteLater it).
+        for (const auto &h : holders) {
+            if (!h)
+                continue;
+            // Foreign-thread adaptors (unsupported per the T2 contract):
+            // main-thread delivery + loud warning (blessed plan shape;
+            // qwen's refuse-to-arm alternative recorded as D-item for V1).
+            if (h->thread() != thread()) {
+                qWarning("dbusqml: owner-change notification for adaptor on foreign thread "
+                         "(service delivery on main thread; attach/detach off the adaptor's "
+                         "thread is unsupported)");
+            }
+            if (acquired)
+                h->nameAcquiredInternal();
+            else
+                h->nameLostInternal();
+        }
+    }
+}
 
 // Owner-change watch: a name we claimed was acquired (possibly after
 // queueing) or lost to another owner.
 //
-// T1 DIAGNOSIS (for-all-times Phase 1, 2026-09-08): a per-claim notifier
-// QObject with real queued connections was prototyped here (D9 shape)
-// and REVERTED before commit: the churn stress SEGVs inside QML signal
-// delivery (isSignalConnected on a half-destroyed declarative adaptor),
-// and the anchor's flagged-claim nameAcquired never reaches its QSignalSpy
-// (queued notifier delivery + beginCreate spy timing interact — 46s
-// QTRY timeout, 3/3 deterministic). The direct manager-thread call below
-// is therefore KEPT (pre-existing behavior, churn-green); the notifier
-// shape needs a dedicated cycle with lifetime tests, NOT a drive-by.
-// The T1 hazard stays TRACKED (audit-2 addendum).
+// T1 (features train, Phase 2 — candidate 4, concilium-unanimous): this
+// runs on QtDBus's MANAGER thread and NEVER touches adaptors. Under the
+// lock it updates the claim state and sets the coalescing notifyQueued
+// flag — holders are NOT copied here; the main-thread relay re-resolves
+// them. Unlock; post a value-only note (drop if !qApp). No bus calls,
+// no adaptor calls, no posts under the lock.
 void DBusPathDispatcher::handleServiceOwnerChange(const QString &connName, const QString &service,
                                                   const QString &newOwner) {
-    QList<QPointer<DBusAdaptor>> holders;
-    bool acquired = false;
-    bool lost = false;
+    if (!QCoreApplication::instance())
+        return;
+    OwnerChangeRelay::Note note;
+    bool haveNote = false;
     {
         RegistryMutexGuard locker(registryMutex());
         auto it = serviceClaims().find({connName, service});
@@ -110,23 +223,52 @@ void DBusPathDispatcher::handleServiceOwnerChange(const QString &connName, const
         if (newOwner == claim.baseService && !claim.owned) {
             claim.owned = true;
             claim.queued = false;
-            acquired = true;
         } else if (claim.owned && newOwner != claim.baseService) {
             claim.owned = false;
-            lost = true;
         } else {
             return;
         }
-        holders = claim.holders;
+        // Coalesce: the relay diffs owned vs lastNotifiedOwned, so any
+        // number of posts collapse into the net transition.
+        claim.notifyQueued = true;
+        note = {connName, service};
+        haveNote = true;
+        // Publish the relay before any watch can fire (creation under the
+        // lock). Enqueue + post run AFTER unlock (below).
+        OwnerChangeRelay::instance();
     }
-    for (const auto &h : holders) {
-        if (!h)
-            continue;
-        if (acquired)
-            h->nameAcquiredInternal();
-        else if (lost)
-            h->nameLostInternal();
+    if (haveNote)
+        OwnerChangeRelay::postNote(std::move(note));
+}
+
+void DBusPathDispatcher::handleConnectionLost(const QString &connName) {
+    // P5 fan-out: every owned claim on the dead connection flips to
+    // unowned; one value-only note per claim wakes the relay (which
+    // re-resolves and delivers nameLost to the claim's holders on the
+    // main thread — the same lifetime discipline as owner-changes).
+    // Claims already unowned produce no note. Idempotent: a second call
+    // finds no owned claims.
+    if (!QCoreApplication::instance())
+        return;
+    QList<OwnerChangeRelay::Note> notes;
+    {
+        RegistryMutexGuard locker(registryMutex());
+        for (auto it = serviceClaims().begin(); it != serviceClaims().end(); ++it) {
+            if (it.key().first != connName)
+                continue;
+            ServiceClaim &claim = it.value();
+            if (!claim.owned)
+                continue;
+            claim.owned = false;
+            claim.queued = false;
+            claim.notifyQueued = true;
+            notes.append({it.key().first, it.key().second});
+        }
+        if (!notes.isEmpty())
+            OwnerChangeRelay::instance();
     }
+    for (auto &n : notes)
+        OwnerChangeRelay::postNote(std::move(n));
 }
 
 DBusPathDispatcher::DBusPathDispatcher(const QString &connName, const QString &path,
@@ -144,15 +286,29 @@ inline void armClaimWatch(const QDBusConnection &conn, const QString &connName,
     // acquisitions and nameLost for takeovers are driven by the daemon's
     // owner changes. An unflagged claim cannot be taken away and releases
     // its name only on its own teardown, so it needs no watch.
+    //
+    // T1 (features train, Phase 2): the watch context is a heap
+    // OwnerChangeWatch object, NOT conn.interface(). QtDBus delivers
+    // matched signals by posting to hook.obj's thread; with iface as the
+    // context the delivery is a BlockingQueued metacall from the manager
+    // thread into armClaimWatch's QObject::connect (connectImpl blocks on
+    // the receiver's thread) — attach deadlocks against its own watch
+    // delivery. A dedicated context confines that coupling to a QObject
+    // the library owns; the manager thread invokes the lambda directly
+    // (same affinity), and the lambda only enqueues + wakes the relay.
     if (claim.watch)
         return;
-    auto *iface = conn.interface();
-    claim.watch = QObject::connect(
-        iface, &QDBusConnectionInterface::serviceOwnerChanged, iface,
-        [connName, service](const QString &name, const QString &, const QString &newOwner) {
-            if (name == service)
-                DBusPathDispatcher::handleServiceOwnerChange(connName, service, newOwner);
-        });
+    auto *watcher = new OwnerChangeWatch(connName, service);
+    claim.watch =
+        QObject::connect(conn.interface(), &QDBusConnectionInterface::serviceOwnerChanged, watcher,
+                         [watcher](const QString &name, const QString &, const QString &newOwner) {
+                             if (name == watcher->service())
+                                 DBusPathDispatcher::handleServiceOwnerChange(
+                                     watcher->connName(), watcher->service(), newOwner);
+                         });
+    claim.watchContext = watcher;
+    // The watcher's thread IS the delivery thread: it must live where the
+    // manager thread invokes it (its own affinity), never moved.
 }
 
 inline void sendFlaggedRequest(const QDBusConnection &conn, DBusPathDispatcher *disp,
@@ -235,6 +391,8 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
                 claim.owned = false;
                 claim.queued = false;
                 claim.pending = false;
+                claim.notifyQueued = false;
+                claim.lastNotifiedOwned = false;
                 claim.baseService = conn.baseService();
             }
             if (claim.pending || claim.refs > 0) {
@@ -249,9 +407,17 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
                 claim.holders.append(adaptor);
                 claim.baseService = conn.baseService();
                 claim.pending = !flaggedForClaim(allowReplacement, replaceExisting, queueOnBusy);
+                claim.notifyQueued = false;
+                claim.lastNotifiedOwned = false;
                 doRegister = claim.pending;
                 if (flaggedForClaim(allowReplacement, replaceExisting, queueOnBusy)) {
                     armClaimWatch(conn, connName, service, claim);
+                    // Publish the relay at first flagged attach, before
+                    // any watch can fire (blessed shape): by the time the
+                    // manager thread observes an owner change, instance()
+                    // is already published — creation on the fire path is
+                    // only the idempotent fallback.
+                    OwnerChangeRelay::instance();
                     // Flagged path unchanged: async RequestName, observed
                     // through the watch.
                     sendFlaggedRequest(conn, disp, service, adaptor, allowReplacement,
@@ -281,6 +447,11 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
             claim.pending = false;
             if (ok) {
                 claim.owned = true;
+                // Direct (synchronous) acquisition: the relay's diff
+                // baseline must agree, or a later duplicate post would
+                // re-deliver a stale acquired. notifyQueued stays false —
+                // nothing for the relay to do.
+                claim.lastNotifiedOwned = true;
                 locker.m_locker.unlock();
                 adaptor->nameAcquiredInternal();
             } else {
@@ -331,6 +502,14 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
                     if (claim.watch) {
                         QObject::disconnect(claim.watch);
                         claim.watch = QMetaObject::Connection();
+                    }
+                    // The watch context is manager-thread-affine by
+                    // delivery; destroy it on its own thread. deleteLater
+                    // from any thread is thread-safe (posts
+                    // DeferredDelete to the object's thread).
+                    if (claim.watchContext) {
+                        claim.watchContext->deleteLater();
+                        claim.watchContext = nullptr;
                     }
                     claim.refs = 0;
                     claim.holders.clear();

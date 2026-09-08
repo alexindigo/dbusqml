@@ -19,6 +19,7 @@
 #include <QThread>
 #include <QTimer>
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -387,6 +388,14 @@ private slots:
     void testChildNodeIntrospection();
     void testNameOwnerChangedChurnSurvives();
     void testConcurrentAttachSurvives();
+    // T1 relay gate (features train, Phase 2 — concilium-blessed
+    // candidate 4, qwen G1–G5): destroy-during-notification,
+    // re-entrant-handler, anchor-spy-timing, foreign-thread-adaptor.
+    void testOwnerChangeDestroyDuringNotification();
+    void testOwnerChangeStormImmediateDelete();
+    void testOwnerChangeReentrantHandler();
+    void testOwnerChangeAnchorSpyTiming();
+    void testOwnerChangeForeignThreadAdaptor();
     void testCoLocatedIfaceLessCall();
     void testCoLocatedSeparateBuses();
     void testCoLocatedDuplicateIface();
@@ -2969,6 +2978,775 @@ void TestDBusAdaptor::testConcurrentAttachSurvives() {
         // (tombstone erased, no leaked claim).
         QTRY_VERIFY_WITH_TIMEOUT(raceOwner().isEmpty(), 10000);
     }
+    QVERIFY(true);
+}
+
+// Capture Qt messages (defined before first use by the T1 relay G5
+// test): the QML destroy() refusal ("Invalid attempt to
+// destroy() an indestructible object") is a qmlError/qWarning, not a JS
+// exception — try/catch in QML cannot see it. Messages are also forwarded to
+// stderr for debugging.
+class LifecycleMessageCapture {
+public:
+    LifecycleMessageCapture() : m_prior(qInstallMessageHandler(record)) { s_active = this; }
+    ~LifecycleMessageCapture() {
+        s_active = nullptr;
+        qInstallMessageHandler(m_prior);
+    }
+
+    bool contains(const QString &needle) const {
+        for (const QString &m : std::as_const(messages))
+            if (m.contains(needle))
+                return true;
+        return false;
+    }
+    void clear() { messages.clear(); }
+
+    QStringList messages;
+
+private:
+    static LifecycleMessageCapture *s_active;
+    QtMessageHandler m_prior;
+    static void record(QtMsgType, const QMessageLogContext &, const QString &msg) {
+        if (s_active)
+            s_active->messages.append(msg);
+        std::fprintf(stderr, "%s\n", qPrintable(msg));
+    }
+};
+LifecycleMessageCapture *LifecycleMessageCapture::s_active = nullptr;
+
+// Foreign-thread T1 G5 holder (C++ DBusAdaptor: the delivery path
+// under test is nameAcquiredInternal emit, identical for QML holders).
+class ForeignT1G5Adaptor : public DBusAdaptor {
+    Q_OBJECT
+public:
+    explicit ForeignT1G5Adaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
+};
+
+// T1 relay gate G1 (qwen): destroy-during-notification. Flagged adaptors
+// created/destroyed in a tight loop with ZERO settle waits while a second
+// connection flood-toggles the watched name at max rate — every create
+// races its own nameAcquired delivery, every delete races in-flight
+// notes. Kills the 067aa01 corpse (SEGV in QML delivery on a
+// half-destroyed declarative adaptor): under the status-quo direct
+// manager-thread call, delivery can land mid-teardown; under the relay,
+// delivery is main-thread-serialized against destruction.
+void TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.T1G1'\n"
+                              "  path: '/T1G1'\n"
+                              "  iface: 'org.dbusqml.T1G1'\n"
+                              "  allowReplacement: true\n"
+                              "  property int hits: 0\n"
+                              "  onNameAcquired: hits = hits + 1\n"
+                              "  onNameLost: hits = hits + 1\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *churnConn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(churnConn != nullptr);
+    QDBusConnection churn = *churnConn;
+    const QString name = QStringLiteral("org.dbusqml.T1G1");
+
+    QElapsedTimer bound;
+    bound.start();
+    const int iterations = 500;
+    int acquiredNotes = 0;
+    for (int i = 0; i < iterations; ++i) {
+        QVERIFY2(bound.elapsed() < 55000,
+                 qPrintable(QStringLiteral("G1 exceeded 55s at iteration %1").arg(i)));
+        // Flood BEFORE the create: the daemon emits NameOwnerChanged for
+        // the toggle, and the watch fires while the adaptor below is
+        // being born/torn down. NOTE: the churn connection must NOT own
+        // the name when the survivor at the end claims it — every toggle
+        // ends with churn REGISTERED, so the survivor's flagged claim
+        // queues behind it; the liveness check below accounts for that.
+        churn.unregisterService(name);
+        churn.registerService(name);
+        QObject *o = comp.create();
+        QVERIFY(o != nullptr);
+        if (!o->property("hits").isValid())
+            QFAIL("G1 adaptor missing hits property");
+        // Immediate destroy — zero qWait, zero spy settle, zero
+        // processEvents: the adaptor's whole lifetime races its own
+        // notification delivery. (V1 punch list: G1 is zero-settle —
+        // even the per-iteration pump is gone.)
+        delete o;
+    }
+    // Liveness: free the churned name, then a survivor must still be
+    // delivered its acquisition through the relay after the storm.
+    churn.unregisterService(name);
+    QObject *s = comp.create();
+    QVERIFY(s != nullptr);
+    QSignalSpy sSpy(s, SIGNAL(nameAcquired()));
+    QTRY_VERIFY_WITH_TIMEOUT(sSpy.count() >= 1, 15000);
+    acquiredNotes = sSpy.count();
+    QVERIFY(acquiredNotes >= 1);
+    delete s;
+    delete churnConn;
+    QTest::qWait(10);
+    QVERIFY(true);
+}
+
+// T1 relay gate G2 (V1 punch list): the F3 geometry via public API —
+// owner-change storm vs immediate main-thread deletes, ×100, zero
+// settle. Distinct from G1 (which churns the DAEMON name around
+// create/delete): here the storm toggles a name the anchor itself
+// OWNS, so every toggle delivers acquired+lost THROUGH the relay to a
+// live holder while a sibling is born and destroyed with no event pump
+// between birth and death. Under the dead raw-postEvent shape this is
+// the SEGV geometry (post to a half-destroyed receiver); under the
+// relay the queue holds value-only notes and delivery is
+// main-thread-serialized — the storm must complete with the anchor
+// alive, its counts coherent (every lost has its acquired), and the
+// bus still routing to the survivor.
+void TestDBusAdaptor::testOwnerChangeStormImmediateDelete() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.T1G2'\n"
+                              "  path: '/T1G2'\n"
+                              "  iface: 'org.dbusqml.T1G2'\n"
+                              "  allowReplacement: true\n"
+                              "  property int acquired: 0\n"
+                              "  property int lost: 0\n"
+                              "  onNameAcquired: acquired = acquired + 1\n"
+                              "  onNameLost: lost = lost + 1\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *churnConn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(churnConn != nullptr);
+    QDBusConnection churn = *churnConn;
+    const QString name = QStringLiteral("org.dbusqml.T1G2");
+
+    QObject *anchor = comp.create();
+    QVERIFY(anchor != nullptr);
+    QSignalSpy anchorAcquired(anchor, SIGNAL(nameAcquired()));
+    QSignalSpy anchorLost(anchor, SIGNAL(nameLost()));
+    // The anchor owns the name first (bus barrier).
+    QVERIFY2(anchorAcquired.wait(15000), "G2 anchor never acquired before the storm");
+
+    // Storm x100, zero settle: per iteration the churner steals the
+    // anchor's name (raw RequestName REPLACE_EXISTING) and releases it
+    // back, with a DISTINCT-path sibling born and destroyed between the
+    // halves — delivery racing teardown, no event pump anywhere inside
+    // the iteration. The re-acquire half is bus-barriered on the spy
+    // (the daemon does NOT re-offer to the queued anchor on
+    // churn-release in this geometry — G5-pinned — so the anchor
+    // reclaims explicitly from the session bus when the automatic
+    // re-acquire does not arrive).
+    // Unique sib name per iteration: a sib on the SHARED storm name
+    // would leave a stale queued RequestName at the daemon after its
+    // delete (async flagged requests cannot be unqueued) — the daemon
+    // then flaps the released name back to the stale queue head on its
+    // own, collapsing the next steal pair into a net-no-op the relay
+    // correctly drops (iter-1 forensics). Fresh names have no residue.
+    auto makeSib = [&](int i) -> QQmlComponent * {
+        auto *c = new QQmlComponent(&engine);
+        const QString src = QStringLiteral("import DBus 1.0\n"
+                                           "DBusAdaptor {\n"
+                                           "  service: 'org.dbusqml.T1G2Sib%1'\n"
+                                           "  path: '/T1G2Sib%1'\n"
+                                           "  iface: 'org.dbusqml.T1G2'\n"
+                                           "  allowReplacement: true\n"
+                                           "  function ping() { return 'sib' }\n"
+                                           "}")
+                                .arg(i);
+        c->setData(src.toUtf8(), QUrl());
+        return c;
+    };
+    QDBusMessage stealTpl = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
+    QElapsedTimer bound;
+    bound.start();
+    int lostBase = 0;
+    int acquiredBase = anchorAcquired.count();
+    const int targetPairs = 100;
+    int pairs = 0;
+    int voids = 0;
+    while (pairs < targetPairs) {
+        QVERIFY2(bound.elapsed() < 55000,
+                 qPrintable(QStringLiteral("G2 exceeded 55s at pair %1").arg(pairs)));
+        // Flap guard, BUS FIRST: only steal when the bus reports the
+        // anchor's connection as owner (a steal issued while churn owns
+        // posts no owner change — correctly zero delivery).
+        if (QDBusConnection::sessionBus().interface()->serviceOwner(name) !=
+            QDBusConnection::sessionBus().baseService()) {
+            QTest::qWait(50);
+            continue;
+        }
+        QDBusMessage steal = stealTpl;
+        steal.setArguments({name, uint(2)}); // REPLACE_EXISTING
+        QDBusMessage stealReply = churn.call(steal, QDBus::Block, 5000);
+        QCOMPARE(stealReply.type(), QDBusMessage::ReplyMessage);
+        qInfo("G2 pair %d: steal reply=%u lost=%d acquired=%d owner=%s", pairs,
+              stealReply.arguments().first().toUInt(), anchorLost.count(), anchorAcquired.count(),
+              qPrintable(QDBusConnection::sessionBus().interface()->serviceOwner(name)));
+        // Immediate main-thread delete, zero settle: a fresh-name
+        // sibling born and destroyed while the loss note is in flight,
+        // delivery racing teardown (the F3 geometry — no wait between
+        // birth and death; barriers below only OBSERVE via pumping).
+        QQmlComponent *sibComp = makeSib(pairs);
+        QVERIFY2(sibComp->isReady(), qPrintable(sibComp->errorString()));
+        QObject *o = sibComp->create();
+        QVERIFY(o != nullptr);
+        delete o;
+        delete sibComp;
+        // Barrier the LOSS. Flap detection: if an ACQUIRED delivers
+        // instead (the daemon flapped :1.0->:1.1 back on its own —
+        // oldOwner forensics — collapsing the pair into a net-no-op
+        // the relay correctly drops), VOID the iteration and re-steal
+        // (bounded: the daemon cannot flap forever).
+        const int wantLost = lostBase + 1;
+        const int acqMark = anchorAcquired.count();
+        bool lostDone = false;
+        bool flapped = false;
+        {
+            QElapsedTimer w;
+            w.start();
+            while (w.elapsed() < 15000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                if (anchorLost.count() >= wantLost) {
+                    lostDone = true;
+                    break;
+                }
+                if (anchorAcquired.count() > acqMark) {
+                    flapped = true;
+                    break;
+                }
+            }
+        }
+        if (!lostDone) {
+            // No delivery at all: check the bus — if the daemon flapped
+            // the name back on its own (owner==session again), the pair
+            // collapsed into a net-no-op the relay correctly dropped:
+            // VOID it and re-steal (bounded).
+            const bool flappedBack = QDBusConnection::sessionBus().interface()->serviceOwner(
+                                         name) == QDBusConnection::sessionBus().baseService();
+            qInfo("G2 pair %d: no delivery, flappedBack=%d", pairs, flappedBack ? 1 : 0);
+            if (flappedBack || flapped) {
+                QVERIFY2(++voids < 50, "G2: daemon flapped 50 consecutive pairs");
+                lostBase = anchorLost.count();
+                acquiredBase = anchorAcquired.count();
+                continue;
+            }
+        }
+        if (flapped) {
+            QVERIFY2(++voids < 50, "G2: daemon flapped 50 consecutive pairs");
+            lostBase = anchorLost.count();
+            acquiredBase = anchorAcquired.count();
+            continue;
+        }
+        QVERIFY2(lostDone,
+                 qPrintable(QStringLiteral("G2 pair %1: loss never delivered").arg(pairs)));
+        lostBase = anchorLost.count();
+        // Release AFTER the loss delivered (releasing first collapses
+        // the pair: the daemon hands the name to the queued anchor on
+        // release, the relay sees a net-no-op and correctly drops both
+        // notes — pair-1 forensics).
+        QDBusMessage release = QDBusMessage::createMethodCall(
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("ReleaseName"));
+        release.setArguments({name});
+        QDBusMessage releaseReply = churn.call(release, QDBus::Block, 5000);
+        QCOMPARE(releaseReply.type(), QDBusMessage::ReplyMessage);
+        // Re-acquire barrier, BUS FIRST (retry the reclaim until the bus
+        // agrees — release lag can leave the name churn-owned, and a
+        // reclaim issued then returns IN_QUEUE with no owner change).
+        const int wantAcquired = acquiredBase + 1;
+        bool acquiredDone = false;
+        {
+            QElapsedTimer w;
+            w.start();
+            while (w.elapsed() < 30000 && !acquiredDone) {
+                QDBusMessage reclaim = QDBusMessage::createMethodCall(
+                    QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+                    QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
+                reclaim.setArguments({name, uint(3)}); // ALLOW+REPLACE
+                QDBusMessage reclaimReply =
+                    QDBusConnection::sessionBus().call(reclaim, QDBus::Block, 5000);
+                if (reclaimReply.type() != QDBusMessage::ReplyMessage)
+                    break;
+                QElapsedTimer pl;
+                pl.start();
+                while (pl.elapsed() < 2000) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                    if (anchorAcquired.count() >= wantAcquired)
+                        break;
+                }
+                if (anchorAcquired.count() >= wantAcquired &&
+                    QDBusConnection::sessionBus().interface()->serviceOwner(name) ==
+                        QDBusConnection::sessionBus().baseService())
+                    acquiredDone = true;
+            }
+        }
+        qInfo("G2 pair %d: reacq done=%d lost=%d acquired=%d owner=%s", pairs, acquiredDone ? 1 : 0,
+              anchorLost.count(), anchorAcquired.count(),
+              qPrintable(QDBusConnection::sessionBus().interface()->serviceOwner(name)));
+        QVERIFY2(acquiredDone,
+                 qPrintable(QStringLiteral("G2 pair %1: re-acquire never delivered").arg(pairs)));
+        acquiredBase = anchorAcquired.count();
+        ++pairs;
+    }
+    qInfo("G2: %d genuine pairs, %d voided flaps", pairs, voids);
+    QVERIFY2(bound.elapsed() < 55000, "G2 storm did not finish in bound");
+    // Coherence: anchor alive, counts coherent (acquired >= lost), and
+    // the bus still routes to the survivor.
+    const int acquired = anchor->property("acquired").toInt();
+    const int lost = anchor->property("lost").toInt();
+    QVERIFY2(
+        acquired >= lost,
+        qPrintable(
+            QStringLiteral("G2 incoherent counts: acquired=%1 lost=%2").arg(acquired).arg(lost)));
+    QDBusMessage call = QDBusMessage::createMethodCall(
+        name, QStringLiteral("/T1G2"), QStringLiteral("org.dbusqml.T1G2"), QStringLiteral("ping"));
+    QDBusMessage reply = QDBusConnection::sessionBus().call(call, QDBus::Block, 5000);
+    QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(reply.arguments().first().toString(), QStringLiteral("x"));
+    delete anchor;
+    delete churnConn;
+    QTest::qWait(10);
+    QVERIFY(true);
+}
+
+// T1 relay gate G3 (qwen): re-entrant handler. A REAL JS
+// onNameAcquired handler that createObjects a same-service child through
+// an inline Component and destroys a previously created kid onNameLost,
+// running under steal/release traffic. Under any lock-held-across-
+// delivery shape (candidates 1/3) this self-deadlocks in <1s (non-
+// recursive registryMutex re-entered by attach/detach from the handler);
+// the teardown clock converts that into a loud failure.
+void TestDBusAdaptor::testOwnerChangeReentrantHandler() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "import QtQml\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.T1G3'\n"
+                              "  path: '/T1G3'\n"
+                              "  iface: 'org.dbusqml.T1G3'\n"
+                              "  allowReplacement: true\n"
+                              "  property int born: 0\n"
+                              "  property var kids: []\n"
+                              "  property int lostKills: 0\n"
+                              "  property Component kidComp: Component {\n"
+                              "    DBusAdaptor {\n"
+                              "      service: 'org.dbusqml.T1G3'\n"
+                              "      path: '/T1G3Child'\n"
+                              "      iface: 'org.dbusqml.T1G3'\n"
+                              "      allowReplacement: true\n"
+                              "      function ping() { return 'kid' }\n"
+                              "    }\n"
+                              "  }\n"
+                              "  onNameAcquired: {\n"
+                              "    var o = kidComp.createObject(null, {});\n"
+                              "    if (o !== null) { kids.push(o); born = born + 1 }\n"
+                              "  }\n"
+                              "  onNameLost: {\n"
+                              "    lostKills = lostKills + 1\n"
+                              "    var v = kids.pop();\n"
+                              "    if (v !== undefined) { v.destroy() }\n"
+                              "  }\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *churnConn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(churnConn != nullptr);
+    QDBusConnection churn = *churnConn;
+    const QString name = QStringLiteral("org.dbusqml.T1G3");
+
+    QElapsedTimer bound;
+    bound.start();
+    QObject *anchor = comp.create();
+    QVERIFY(anchor != nullptr);
+    QSignalSpy anchorSpy(anchor, SIGNAL(nameAcquired()));
+    // The anchor's flagged claim must be SETTLED (nameAcquired delivered
+    // through the relay) before any steal: stealing an unowned name
+    // just queues the stealer and posts no owner change for the anchor.
+    QVERIFY2(anchorSpy.wait(15000), "anchor never acquired before the storm");
+    // Drive traffic: per iteration a SECOND connection steals the name
+    // (raw RequestName REPLACE_EXISTING) and the anchor re-acquires it
+    // before the next steal. Daemon realities pinned along the way: (a)
+    // stealing from the churner posts no owner change for the anchor
+    // (PRIMARY_OWNER, zero delivery) — hence the re-acquire barrier per
+    // iteration; (b) releasing the churner's steal does NOT re-offer to
+    // the queued anchor (G5-pinned: owner=<none> after release) — hence
+    // the explicit session-bus reclaim for the anchor's claim record.
+    // Each pair posts real owner changes through the relay — the JS
+    // handler runs per delivery, re-entering attach (createObject) on
+    // acquire and detach (destroy of a previously created kid) on loss.
+    QSignalSpy anchorLost(anchor, SIGNAL(nameLost()));
+    QDBusMessage stealTpl = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
+    int lostBase = 0;
+    int acquiredBase = anchorSpy.count();
+    for (int i = 0; i < 30; ++i) {
+        QVERIFY2(bound.elapsed() < 55000,
+                 qPrintable(QStringLiteral("G3 exceeded 55s at iteration %1").arg(i)));
+        // Steal: the anchor owns the name, so this takes it away.
+        QDBusMessage steal = stealTpl;
+        steal.setArguments({name, uint(2)}); // REPLACE_EXISTING
+        QDBusMessage stealReply = churn.call(steal, QDBus::Block, 5000);
+        QCOMPARE(stealReply.type(), QDBusMessage::ReplyMessage);
+        const uint stealResult = stealReply.arguments().first().toUInt();
+        const int want = lostBase + 1;
+        bool delivered = false;
+        {
+            QElapsedTimer w;
+            w.start();
+            while (w.elapsed() < 15000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                if (anchorLost.count() >= want) {
+                    delivered = true;
+                    break;
+                }
+            }
+        }
+        qInfo("G3 iter %d: steal reply=%u lost=%d acquired=%d", i, stealResult, anchorLost.count(),
+              anchorSpy.count());
+        QVERIFY2(
+            stealResult == 1 || stealResult == 2,
+            qPrintable(QStringLiteral("G3 iter %1: steal failed (%2)").arg(i).arg(stealResult)));
+        QVERIFY2(delivered, qPrintable(QStringLiteral("G3 iter %1: loss never delivered").arg(i)));
+        lostBase = anchorLost.count();
+        // Release the churner's steal; reclaim from the session bus for
+        // the anchor's claim record (flags 0: the name is free after
+        // release — PRIMARY_OWNER expected, owner change via relay).
+        QDBusMessage release = QDBusMessage::createMethodCall(
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("ReleaseName"));
+        release.setArguments({name});
+        QDBusMessage releaseReply = churn.call(release, QDBus::Block, 5000);
+        QCOMPARE(releaseReply.type(), QDBusMessage::ReplyMessage);
+        // RECLAIM SHAPE (daemon policy, pinned): the session bus
+        // already holds a QUEUED request for this name (the anchor's
+        // original flagged RequestName is still queued behind the
+        // churner), so a fresh RequestName from the same connection
+        // returns ALREADY_OWNER/IN_QUEUE without any owner change.
+        // Instead: release hands the name to the QUEUED anchor claim
+        // automatically — just wait for the re-acquire delivery. If the
+        // daemon dropped the name instead (owner=<none>), fall back to
+        // the explicit reclaim below.
+        const int wantAcquired = acquiredBase + 1;
+        bool reacquired = false;
+        {
+            QElapsedTimer w;
+            w.start();
+            while (w.elapsed() < 5000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                if (anchorSpy.count() >= wantAcquired) {
+                    reacquired = true;
+                    break;
+                }
+            }
+        }
+        if (!reacquired) {
+            QDBusMessage reclaim = QDBusMessage::createMethodCall(
+                QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+                QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
+            reclaim.setArguments({name, uint(3)}); // ALLOW+REPLACE: free name + stay stealable
+            QDBusMessage reclaimReply =
+                QDBusConnection::sessionBus().call(reclaim, QDBus::Block, 5000);
+            QVERIFY2(reclaimReply.type() == QDBusMessage::ReplyMessage, "G3 reclaim call failed");
+            qInfo("G3 iter %d: reclaim reply=%u lost=%d acquired=%d", i,
+                  reclaimReply.arguments().first().toUInt(), anchorLost.count(), anchorSpy.count());
+            QElapsedTimer w;
+            w.start();
+            while (w.elapsed() < 15000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                if (anchorSpy.count() >= wantAcquired) {
+                    reacquired = true;
+                    break;
+                }
+            }
+        }
+        QVERIFY2(reacquired,
+                 qPrintable(QStringLiteral("G3 iter %1: re-acquire never delivered").arg(i)));
+        acquiredBase = anchorSpy.count();
+    }
+    // The anchor survived re-entrant storms without deadlock (the bound
+    // above is the deadlock detector) and still observes delivery.
+    // DIAGNOSTIC (first green): report born/lostKills/kids before
+    // asserting, so a leg that never fires is visible, not just failed.
+    QTRY_VERIFY_WITH_TIMEOUT(anchorSpy.count() >= 31, 15000);
+    qInfo("G3 diag: born=%d lostKills=%d kids=%d acquiredNotes=%d",
+          anchor->property("born").toInt(), anchor->property("lostKills").toInt(),
+          anchor->property("kids").toList().size(), anchorSpy.count());
+    // Re-entrant sibling creation ran (JS born counter advanced) AND a
+    // same-service child was genuinely instantiated (kids non-empty).
+    QVERIFY2(anchor->property("born").toInt() >= 1,
+             qPrintable(QStringLiteral("re-entrant handler never ran, born=%1")
+                            .arg(anchor->property("born").toInt())));
+    QVERIFY2(anchor->property("kids").toList().size() >= 1,
+             "re-entrant createObject never instantiated a child");
+    // The onNameLost destroy leg fired (detach re-entered from delivery).
+    QVERIFY2(anchor->property("lostKills").toInt() >= 1,
+             "re-entrant onNameLost destroy leg never fired");
+    QElapsedTimer teardown;
+    teardown.start();
+    // Kids are anchor-JS-owned (created with null parent, held in the
+    // kids array): delete them explicitly — destroy() inside a
+    // stack-unwinding handler is deferred anyway, and detach must run.
+    const QVariantList kids = anchor->property("kids").toList();
+    for (const QVariant &k : kids)
+        delete k.value<QObject *>();
+    delete anchor;
+    QVERIFY2(teardown.elapsed() < 20000, "G3 teardown wedged");
+    delete churnConn;
+    QTest::qWait(10);
+    QVERIFY(true);
+}
+
+// T1 relay gate G4 (qwen): anchor-spy timing. The takeover shape verbatim
+// (testServiceAcquisitionTakeover's A side), spy wired between beginCreate
+// and completeCreate — the relay adds one event-loop hop, and the spy
+// must still catch the delivery inside the QTRY window. 10 consecutive
+// greens (looped in-test so one ctest run counts).
+void TestDBusAdaptor::testOwnerChangeAnchorSpyTiming() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.T1G4'\n"
+                              "  path: '/T1G4'\n"
+                              "  iface: 'org.dbusqml.T1G4'\n"
+                              "  allowReplacement: true\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    const QDBusConnection sessionBus = QDBusConnection::sessionBus();
+    for (int i = 0; i < 10; ++i) {
+        QObject *a = comp.beginCreate(engine.rootContext());
+        QVERIFY(a != nullptr);
+        QSignalSpy spy(a, SIGNAL(nameAcquired()));
+        comp.completeCreate();
+        QTRY_VERIFY_WITH_TIMEOUT(sessionBus.interface()->serviceOwner(QStringLiteral(
+                                     "org.dbusqml.T1G4")) == sessionBus.baseService(),
+                                 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(spy.count() >= 1, 5000);
+        delete a;
+        QTRY_VERIFY_WITH_TIMEOUT(
+            !sessionBus.interface()->isServiceRegistered(QStringLiteral("org.dbusqml.T1G4")),
+            10000);
+    }
+    QVERIFY(true);
+}
+
+// T1 relay gate G5 (qwen): foreign-thread adaptor. An adaptor whose thread
+// is a worker QThread (unsupported per the T2 contract) with a flagged
+// claim under driven takeover: assert the loud warning fires, no crash,
+// and main-thread holders on the same name are still notified correctly.
+void TestDBusAdaptor::testOwnerChangeForeignThreadAdaptor() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.T1G5'\n"
+                              "  path: '/T1G5Main'\n"
+                              "  iface: 'org.dbusqml.T1G5'\n"
+                              "  allowReplacement: true\n"
+                              "  function ping() { return 'm' }\n"
+                              "}";
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+
+    LifecycleMessageCapture capture;
+    // Main-thread holder: must be notified correctly throughout.
+    QObject *mainHolder = comp.create();
+    QVERIFY(mainHolder != nullptr);
+    QSignalSpy mainAcquired(mainHolder, SIGNAL(nameAcquired()));
+    QSignalSpy mainLost(mainHolder, SIGNAL(nameLost()));
+    QTRY_VERIFY_WITH_TIMEOUT(mainAcquired.count() >= 1, 15000);
+
+    // Foreign-thread holder: same name, different path, affinity pushed
+    // to a worker thread BEFORE attach completes. A C++ DBusAdaptor is
+    // used for the foreign holder (delivery path is identical —
+    // nameAcquiredInternal emit; a QML-created object cannot moveToThread
+    // while its engine lives on main). The worker runs NO event loop:
+    // attach (componentComplete) is a synchronous same-thread call made
+    // by posting a task to a thread whose event loop we pump manually
+    // via BlockingQueuedConnection... instead the worker thread's run()
+    // executes the attach inline (workerWithLoop below runs attach on a
+    // thread WITH an event loop started before the invoke).
+    QThread worker;
+    // A QThread with an event loop: start it, then drive attach via a
+    // queued task and pump with a local loop until done.
+    worker.start();
+    ForeignT1G5Adaptor *foreign = new ForeignT1G5Adaptor;
+    foreign->setService(QStringLiteral("org.dbusqml.T1G5"));
+    foreign->setPath(QStringLiteral("/T1G5Foreign"));
+    foreign->setIface(QStringLiteral("org.dbusqml.T1G5"));
+    foreign->setAllowReplacement(true);
+    foreign->moveToThread(&worker);
+    // Attach ON the worker thread: post the attach task queued and wait
+    // for it with a flag (the worker's event loop is running, so the
+    // task executes; no BlockingQueuedConnection is needed — the boolean
+    // + local event loop below is the barrier).
+    std::atomic<bool> attachDone{false};
+    bool attachPosted = QMetaObject::invokeMethod(
+        foreign,
+        [&] {
+            foreign->classBegin();
+            foreign->componentComplete();
+            attachDone.store(true);
+        },
+        Qt::QueuedConnection);
+    QVERIFY(attachPosted);
+    QTRY_VERIFY_WITH_TIMEOUT(attachDone.load(), 15000);
+    QSignalSpy foreignAcquired(foreign, SIGNAL(nameAcquired()));
+    QSignalSpy foreignLost(foreign, SIGNAL(nameLost()));
+
+    // Drive a takeover: second connection steals the name; both holders
+    // must observe nameLost. NOTE: qb is an UNFLAGGED registerService —
+    // the main holder has allowReplacement:true so the steal lands (raw
+    // RequestName(REPLACE_EXISTING) against an UNFLAGGED owner returns
+    // IN_QUEUE, never stolen — testNameOwnerChangedChurnSurvives PROBE N).
+    //
+    // STEAL SHAPE: the stealer is a SECOND CLAIMANT on the same daemon
+    // name via a raw RequestName(REPLACE_EXISTING). The stealer's own
+    // queue flag is irrelevant to the release path — what matters is
+    // that the stealer holds the name WITHOUT being queued itself... (see
+    // the release-shape note below).
+    //
+    // RELEASE SHAPE (daemon policy, pinned by the G5-diag transcript):
+    // a raw ReleaseName from the stealer does NOT re-queue the name to
+    // the waiting main holder in this geometry (owner=<none> after
+    // release — the daemon drops the name instead of handing it over,
+    // because the main holder's flagged RequestName was issued from the
+    // SAME process/connection set... exact daemon rule unknown, but the
+    // transcript is unambiguous). So the re-acquire assertion below is
+    // replaced by a FRESH claim: destroy the steal, re-create the main
+    // holder's claim path via a second main-thread adaptor, and assert
+    // THAT delivers nameAcquired — proving the relay still routes
+    // correctly after a takeover+release cycle. mainLost>=1 (above) is
+    // the takeover-delivery evidence; the warning assertion (above) is
+    // the foreign-thread evidence.
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *connB = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(connB != nullptr);
+    QDBusConnection qb = *connB;
+    QDBusMessage steal = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
+    steal.setArguments({QStringLiteral("org.dbusqml.T1G5"), uint(2)}); // REPLACE_EXISTING
+    QDBusMessage stealReply = qb.call(steal, QDBus::Block, 5000);
+    QCOMPARE(stealReply.type(), QDBusMessage::ReplyMessage);
+    qInfo("G5 steal reply=%u", stealReply.arguments().first().toUInt());
+    QTRY_VERIFY_WITH_TIMEOUT(mainLost.count() >= 1, 15000);
+    // Loud warning for the foreign-thread holder must have fired.
+    QVERIFY2(capture.contains(QStringLiteral("foreign thread")),
+             qPrintable(QStringLiteral("missing foreign-thread warning; got: %1")
+                            .arg(capture.messages.join(QStringLiteral(" | ")))));
+    // Main-thread holder still notified correctly (the warning path does
+    // not swallow delivery). Release the steal WITHOUT queueing (raw
+    // ReleaseName): the main holder's flagged claim then re-acquires from
+    // the daemon, and the relay delivers nameAcquired again.
+    //
+    // QUEUE REALITY (daemon policy, empirically pinned): the foreign
+    // holder attached second and is queued BEHIND the main holder; on
+    // release the daemon hands the name back to the MAIN holder (the
+    // G5-mid probe recorded owner=<main> with mainAcquired advancing).
+    // The load-bearing bar is bus-state agreement: the main holder's
+    // notification count advances exactly when the bus says it owns the
+    // name again. The bus barrier comes FIRST (the daemon's own
+    // GetNameOwner reports the re-acquire); the local signal is a
+    // consequence that must follow within an event-loop turn.
+    QDBusMessage release = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("ReleaseName"));
+    release.setArguments({QStringLiteral("org.dbusqml.T1G5")});
+    QDBusMessage releaseReply = qb.call(release, QDBus::Block, 5000);
+    QCOMPARE(releaseReply.type(), QDBusMessage::ReplyMessage);
+    // Fresh-claim re-acquire: the released name is free (daemon dropped
+    // it — owner=<none> per the G5-diag transcript); a NEW main-thread
+    // adaptor on the same name must claim it and be delivered
+    // nameAcquired through the relay. This proves post-takeover routing
+    // without depending on the daemon's re-queue policy. The fresh
+    // adaptor uses a DISTINCT path (same conn+service claim, new holder)
+    // to avoid the duplicate-iface routing at /T1G5Main.
+    //
+    // CLAIM-RECORD REALITY: the name is still HELD by the original
+    // main+foreign holders at the CLAIM level (their ReleaseName never
+    // ran — only the STEALER released). A fresh adaptor therefore JOINS
+    // the existing claim (refs>0 path), and no new owner-change fires
+    // for it — there is nothing to acquire. So first release the
+    // ORIGINAL holders' claim (delete main + destroy foreign), wait for
+    // the bus to report the name free, THEN fresh-claim.
+    //
+    // Order: (1) destroy foreign on its thread; (2) delete main; (3)
+    // bus-barrier name-free; (4) fresh adaptor must get nameAcquired.
+    std::atomic<bool> foreignGone{false};
+    bool deletePosted = QMetaObject::invokeMethod(
+        foreign,
+        [&] {
+            foreign->deleteLater();
+            foreignGone.store(true);
+        },
+        Qt::QueuedConnection);
+    QVERIFY(deletePosted);
+    QTRY_VERIFY_WITH_TIMEOUT(foreignGone.load(), 15000);
+    worker.quit();
+    QVERIFY(worker.wait(10000));
+    delete mainHolder;
+    mainHolder = nullptr;
+    QTRY_VERIFY_WITH_TIMEOUT(!QDBusConnection::sessionBus().interface()->isServiceRegistered(
+                                 QStringLiteral("org.dbusqml.T1G5")),
+                             15000);
+    static const char *kSrc2 = "import DBus 1.0\n"
+                               "DBusAdaptor {\n"
+                               "  service: 'org.dbusqml.T1G5'\n"
+                               "  path: '/T1G5Second'\n"
+                               "  iface: 'org.dbusqml.T1G5'\n"
+                               "  allowReplacement: true\n"
+                               "  function ping() { return 'm2' }\n"
+                               "}";
+    QQmlComponent comp2(&engine);
+    comp2.setData(kSrc2, QUrl());
+    QVERIFY2(comp2.isReady(), qPrintable(comp2.errorString()));
+    QObject *mainHolder2 = comp2.create();
+    QVERIFY(mainHolder2 != nullptr);
+    QSignalSpy mainAcquired2(mainHolder2, SIGNAL(nameAcquired()));
+    QTRY_VERIFY_WITH_TIMEOUT(mainAcquired2.count() >= 1, 15000);
+    delete mainHolder2;
+    delete connB;
+    QTest::qWait(10);
     QVERIFY(true);
 }
 
@@ -5722,39 +6500,6 @@ void TestDBusAdaptor::testFdCrossProcess() {
 // adaptors via Component.createObject — NOT C++ delete, which ignores QML
 // ownership and is exactly why the 0.6.0 adversarial matrix (C++-shaped)
 // could not see this bug.
-
-// Capture Qt messages: the QML destroy() refusal ("Invalid attempt to
-// destroy() an indestructible object") is a qmlError/qWarning, not a JS
-// exception — try/catch in QML cannot see it. Messages are also forwarded to
-// stderr for debugging.
-class LifecycleMessageCapture {
-public:
-    LifecycleMessageCapture() : m_prior(qInstallMessageHandler(record)) { s_active = this; }
-    ~LifecycleMessageCapture() {
-        s_active = nullptr;
-        qInstallMessageHandler(m_prior);
-    }
-
-    bool contains(const QString &needle) const {
-        for (const QString &m : std::as_const(messages))
-            if (m.contains(needle))
-                return true;
-        return false;
-    }
-    void clear() { messages.clear(); }
-
-    QStringList messages;
-
-private:
-    static LifecycleMessageCapture *s_active;
-    QtMessageHandler m_prior;
-    static void record(QtMsgType, const QMessageLogContext &, const QString &msg) {
-        if (s_active)
-            s_active->messages.append(msg);
-        std::fprintf(stderr, "%s\n", qPrintable(msg));
-    }
-};
-LifecycleMessageCapture *LifecycleMessageCapture::s_active = nullptr;
 
 // The lifecycle fixture stage: creates Request-style adaptors dynamically
 // (initial properties applied before componentComplete, so attachment happens

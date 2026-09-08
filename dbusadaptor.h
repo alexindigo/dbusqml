@@ -127,6 +127,7 @@ Q_SIGNALS:
 private:
     friend class PropertiesChangedRelay;
     friend class DBusPathDispatcher;
+    friend class OwnerChangeRelay;
     // Service-name ownership notifications (invoked by the dispatcher's
     // owner-change watch).
     void nameAcquiredInternal();
