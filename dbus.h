@@ -129,6 +129,9 @@ Q_SIGNALS:
 
 private Q_SLOTS:
     void onPropertiesChanged(const QDBusMessage &msg);
+    // P5: the bus this proxy talks on died. Flip to Error, drop match
+    // subscriptions (dead on a dead bus), mark the service unavailable.
+    void onBusDisconnected();
 
 private:
     void fetchProperties();
@@ -157,9 +160,13 @@ private:
     // point in any order — componentComplete() backfills whatever the
     // engine's binding application order skipped.
     void ensureServiceWatcher();
+    // P5: session-bus disconnect watch for proxies on the default
+    // connection (no DBusConnection object to relay it). Idempotent.
+    void ensureSessionDisconnectWatch();
 
     bool m_watchServiceStatus = false;
     bool m_serviceAvailable = false;
+    bool m_sessionDisconnectWatched = false;
     bool m_propertiesEnabled = true;
     bool m_componentComplete = false;
     bool m_introspectQueued = false;

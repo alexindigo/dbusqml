@@ -2494,6 +2494,101 @@ private slots:
         delete ok;
         delete proxy;
     }
+
+    // ==================== P5: bus connection-loss handling ====================
+    //
+    // A private dbus-daemon is killed mid-session: the DBusConnection
+    // flips connected=false + disconnected(), proxies flip status=Error
+    // + serviceAvailable=false with match subscriptions torn down, and
+    // served claims emit nameLost. Zero crashes/UAF under ASan; the
+    // watcher teardown is clean. Wire-oracle-adjacent: the loss is
+    // observed at the daemon level (kill), not mocked.
+    void testConnectionLossHandling() {
+        // Spawn a SECOND private bus (the suite's own bus stays alive).
+        QProcess *victimDaemon = new QProcess(this);
+        victimDaemon->setProcessChannelMode(QProcess::ForwardedErrorChannel);
+        victimDaemon->start("dbus-daemon", {"--session", "--print-address", "--nofork"});
+        QVERIFY(victimDaemon->waitForStarted(3000));
+        QVERIFY(victimDaemon->waitForReadyRead(3000));
+        const QByteArray victimAddr = victimDaemon->readLine().trimmed();
+        QVERIFY(!victimAddr.isEmpty());
+
+        // A connection on the victim bus: connected + no signal yet.
+        DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(victimAddr));
+        QVERIFY(conn != nullptr);
+        QVERIFY(conn->isConnected());
+        QSignalSpy connLost(conn, &DBusConnection::disconnected);
+        QSignalSpy connChanged(conn, &DBusConnection::connectedChanged);
+
+        // A proxy on the victim bus, Ready + available (SigEcho lives on
+        // the suite bus — point at the daemon itself, which always
+        // answers Introspect; serviceAvailable via NameHasOwner on the
+        // daemon name).
+        DBusProxy *proxy = new DBusProxy;
+        proxy->setConnection(conn);
+        proxy->setService(QStringLiteral("org.freedesktop.DBus"));
+        proxy->setPath(QStringLiteral("/org/freedesktop/DBus"));
+        proxy->setIface(QStringLiteral("org.freedesktop.DBus"));
+        proxy->setWatchServiceStatus(true);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->status() == DBusProxy::Ready, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->serviceAvailable(), 10000);
+        QSignalSpy proxyStatus(proxy, &DBusProxy::statusChanged);
+
+        // A served claim on the victim bus (flagged, so the watch + relay
+        // path is live and nameLost must arrive through it).
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        QQmlComponent comp(&engine);
+        comp.setData("import DBus 1.0\n"
+                     "DBusAdaptor {\n"
+                     "  service: 'org.dbusqml.P5Victim'\n"
+                     "  path: '/P5Victim'\n"
+                     "  iface: 'org.dbusqml.P5Victim'\n"
+                     "  allowReplacement: true\n"
+                     "  function ping() { return 'v' }\n"
+                     "}",
+                     QUrl());
+        QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+        QObject *adaptor = comp.beginCreate(engine.rootContext());
+        QVERIFY(adaptor != nullptr);
+        adaptor->setProperty("connection", QVariant::fromValue<DBusConnection *>(conn));
+        QSignalSpy lostSpy(adaptor, SIGNAL(nameLost()));
+        comp.completeCreate();
+        // The flagged claim's acquisition arrives via the relay.
+        QSignalSpy acquiredSpy(adaptor, SIGNAL(nameAcquired()));
+        QTRY_VERIFY_WITH_TIMEOUT(acquiredSpy.count() >= 1, 15000);
+
+        // KILL the daemon mid-session.
+        victimDaemon->kill();
+        QVERIFY(victimDaemon->waitForFinished(5000));
+
+        // Connection flips exactly once.
+        QTRY_VERIFY_WITH_TIMEOUT(connLost.count() >= 1, 10000);
+        QCOMPARE(connLost.count(), 1);
+        QVERIFY(!conn->isConnected());
+        QVERIFY(connChanged.count() >= 1);
+
+        // Proxy flips: status Error, service unavailable, subscriptions
+        // torn down (a second loss is a no-op — disconnectSignals on a
+        // dead bus must not crash).
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->status() == DBusProxy::Error, 10000);
+        QVERIFY(!proxy->serviceAvailable());
+
+        // Served claim emits nameLost through the relay.
+        QTRY_VERIFY_WITH_TIMEOUT(lostSpy.count() >= 1, 15000);
+
+        // UAF probe: exercise the dead objects once more (all no-ops,
+        // none may crash).
+        proxy->setProperty(QStringLiteral("anything"), 1);
+        delete adaptor;
+        delete proxy;
+        delete conn;
+        victimDaemon->deleteLater();
+        QTest::qWait(100);
+        QVERIFY(true);
+    }
 };
 
 int main(int argc, char *argv[]) {

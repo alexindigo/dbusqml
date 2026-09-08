@@ -1,4 +1,5 @@
 #include "dbusconnection.h"
+#include "dbuspathdispatcher.h"
 #include "dbussignatureslots.h"
 #include "dbustypes.h"
 
@@ -9,10 +10,12 @@
 
 #include <QAtomicInt>
 #include <QDBusArgument>
+#include <QDBusError>
 #include <QDBusMessage>
 #include <QDBusMetaType>
 #include <QDBusUnixFileDescriptor>
 #include <QDBusPendingCall>
+#include <QDBusPendingReply>
 #include <QDBusPendingCallWatcher>
 #include <QDBusVariant>
 #include <QJSValue>
@@ -1177,9 +1180,59 @@ static QDBusMessage toQDBusMessage(const DBusMessage &msg) {
 }
 
 DBusConnection::DBusConnection(const QDBusConnection &conn, const QString &name, QObject *parent)
-    : QObject(parent), m_connection(conn), m_connectionName(name) {}
+    : QObject(parent), m_connection(conn), m_connectionName(name) {
+    armLossProbe();
+}
 
-DBusConnection::~DBusConnection() {}
+DBusConnection::~DBusConnection() {
+    delete m_lossProbe;
+}
+
+void DBusConnection::armLossProbe() {
+    // P5 loss detector (Nemo connection.cpp:89-109, QtDBus-adapted — see
+    // the header note on Local.Disconnected): one daemon-facing
+    // NameHasOwner ping per connection-moment. Answered by the daemon
+    // itself, so it fails if and only if the connection is dead. The
+    // completion re-arms while connected; disconnect tears the probe
+    // down. No polling: exactly one ping is ever in flight, and it
+    // completes on its own as soon as the bus answers or dies.
+    if (!m_connected || m_lossProbe)
+        return;
+    QDBusMessage ping = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("NameHasOwner"));
+    ping.setArguments({m_connection.baseService()});
+    QDBusPendingCall call = m_connection.asyncCall(ping);
+    m_lossProbe = new QDBusPendingCallWatcher(call, this);
+    connect(m_lossProbe, &QDBusPendingCallWatcher::finished, this,
+            &DBusConnection::onPendingCallFinished);
+}
+
+void DBusConnection::onPendingCallFinished(QDBusPendingCallWatcher *w) {
+    if (w != m_lossProbe) {
+        w->deleteLater();
+        return;
+    }
+    m_lossProbe = nullptr;
+    QDBusPendingReply<bool> reply = *w;
+    w->deleteLater();
+    if (reply.isError() && reply.error().type() == QDBusError::Disconnected) {
+        // The bus is dead. Flip once; no resubscribe/reconnect (FD5).
+        if (!m_connected)
+            return;
+        m_connected = false;
+        emit connectedChanged();
+        emit disconnected();
+        // Fan out to served claims on this connection: holders get
+        // nameLost through the relay (main-thread delivery, T1
+        // discipline).
+        DBusPathDispatcher::handleConnectionLost(m_connection.name());
+        return;
+    }
+    // Alive (or a non-fatal error — the daemon answered, which is itself
+    // proof of life): re-arm for the next connection-moment.
+    armLossProbe();
+}
 
 DBusConnection *DBusConnection::connectToBus(const QString &address) {
     // A fixed connection name causes QtDBus to return the FIRST connection

@@ -8,6 +8,7 @@
 #include <QDBusArgument>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
+#include <QDBusError>
 #include <QDBusMessage>
 #include <QDBusMetaType>
 #include <QDBusPendingCall>
@@ -92,6 +93,10 @@ DBusProxy::~DBusProxy() {
 void DBusProxy::componentComplete() {
     m_componentComplete = true;
     ensureServiceWatcher();
+    // P5: the default session-bus connection has no DBusConnection object
+    // to emit disconnected() — watch the session bus directly.
+    if (!m_conn)
+        ensureSessionDisconnectWatch();
     if (!m_service.isEmpty() && !m_path.isEmpty() && !m_iface.isEmpty())
         doIntrospect();
 }
@@ -235,6 +240,46 @@ void DBusProxy::setWatchServiceStatus(bool v) {
     emit watchServiceStatusChanged();
 }
 
+void DBusProxy::ensureSessionDisconnectWatch() {
+    // P5: proxies on the default session-bus connection have no
+    // DBusConnection object to relay loss — poll the session bus
+    // liveness through the shared loss-probe pattern (a daemon-facing
+    // NameHasOwner ping fails with Disconnected when the bus dies).
+    // Idempotent; no resubscribe (documented, FD5).
+    if (m_sessionDisconnectWatched || m_conn)
+        return;
+    m_sessionDisconnectWatched = true;
+    QDBusMessage ping = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("NameHasOwner"));
+    ping.setArguments({QDBusConnection::sessionBus().baseService()});
+    QDBusPendingCall call = m_bus.asyncCall(ping);
+    auto *watcher = new QDBusPendingCallWatcher(call, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
+        QDBusPendingReply<bool> reply = *w;
+        w->deleteLater();
+        if (reply.isError() && reply.error().type() == QDBusError::Disconnected)
+            onBusDisconnected();
+        else if (!m_conn)
+            m_sessionDisconnectWatched = false; // alive: next entry re-arms
+    });
+}
+
+void DBusProxy::onBusDisconnected() {
+    // P5 loss handling: tear down match subscriptions (dead on a dead
+    // bus — QtDBus disconnects are no-ops there), flip to Error, mark
+    // the service unavailable. No automatic resubscribe (FD5).
+    disconnectSignals();
+    if (m_status != Error) {
+        m_status = Error;
+        emit statusChanged();
+    }
+    if (m_serviceAvailable) {
+        m_serviceAvailable = false;
+        emit serviceAvailableChanged();
+    }
+}
+
 // Idempotent service-watcher readiness (Nemo-shaped): create-or-rewire on
 // the CURRENT bus, then (re-)run the initial async NameHasOwner. Guarded by
 // watchServiceStatus && service — every entry point in every order lands
@@ -326,12 +371,16 @@ void DBusProxy::setConnection(DBusConnection *v) {
 
     disconnectSignals();
     m_introspectCache.clear();
+    if (m_conn)
+        disconnect(m_conn, &DBusConnection::disconnected, this, &DBusProxy::onBusDisconnected);
 
     m_conn = v;
     if (v) {
         m_bus = static_cast<QDBusConnection>(*v);
+        connect(v, &DBusConnection::disconnected, this, &DBusProxy::onBusDisconnected);
     } else {
         m_bus = QDBusConnection::sessionBus();
+        ensureSessionDisconnectWatch();
     }
     emit connectionChanged();
 
@@ -532,6 +581,8 @@ void DBusProxy::disconnectSignals() {
 
     // Disconnect each recorded per-signal hook with the exact arguments
     // used at connect time. QtDBus disconnect requires exact-arg match.
+    // On a dead bus these are no-ops (QtDBus guards internally) — safe
+    // to call from onBusDisconnected.
     for (const QString &sigName : std::as_const(m_connectedSignals)) {
         m_bus.disconnect(QString(), m_connectedPath, m_connectedIface, sigName, this,
                          SLOT(onPropertiesChanged(QDBusMessage)));

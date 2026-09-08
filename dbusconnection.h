@@ -72,6 +72,14 @@ public:
 class DBusConnection : public QObject {
     Q_OBJECT
     Q_DISABLE_COPY_MOVE(DBusConnection)
+    // P5 (features train, Phase 3): connection-liveness surface. The
+    // detector is a failing-call observation (a daemon-facing
+    // NameHasOwner probe that surfaces QDBusError::Disconnected when
+    // the socket breaks) — QtDBus consumes Local.Disconnected
+    // internally and never delivers it to match rules, so the Nemo
+    // connection.cpp:89-109 subscription shape cannot work here (see
+    // onPendingCallFinished).
+    Q_PROPERTY(bool connected READ isConnected NOTIFY connectedChanged)
 
 public:
     explicit DBusConnection(const QDBusConnection &conn, const QString &name,
@@ -88,11 +96,45 @@ public:
     // nothing comes back (the OSD showText pattern).
     Q_INVOKABLE void send(const DBusMessage &message);
 
+    // P5: liveness of the underlying bus connection. False after the
+    // loss is observed (see onDisconnected); connections never
+    // reconnect (documented — Nemo's reconnect() deliberately NOT
+    // copied).
+    bool isConnected() const { return m_connected; }
+
     operator QDBusConnection() const { return m_connection; }
 
+Q_SIGNALS:
+    // P5: emitted once when the bus connection drops (the daemon died or
+    // the socket broke — observed via a failing call, NOT
+    // Local.Disconnected, which QtDBus consumes internally and never
+    // delivers to match rules). Proxies flip to Error +
+    // serviceAvailable=false; adaptor claims emit nameLost (see
+    // DBusPathDispatcher).
+    void disconnected();
+    void connectedChanged();
+
+private Q_SLOTS:
+    // P5 loss probe: any finished call carrying a Disconnected error
+    // observes connection death (QtDBus fails all pending calls with
+    // QDBusError::Disconnected when the socket breaks — the observable
+    // equivalent of Nemo's connection.cpp:89-109 Disconnected handler,
+    // which lives one layer down in libdbus where Qt already consumes
+    // it).
+    void onPendingCallFinished(QDBusPendingCallWatcher *w);
+
 private:
+    // Spies one call per connection-moment: the daemon-facing
+    // NameHasOwner ping doubles as the loss detector (it is answered by
+    // the daemon itself, so it fails if and only if the connection is
+    // dead). Re-armed after every completion while connected; torn down
+    // on disconnect (dead on a dead bus).
+    void armLossProbe();
+
     QDBusConnection m_connection;
     QString m_connectionName;
+    bool m_connected = true;
+    QDBusPendingCallWatcher *m_lossProbe = nullptr;
 };
 
 class SessionBusConnection : public DBusConnection {
