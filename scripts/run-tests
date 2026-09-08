@@ -5,8 +5,10 @@ BUILD_DIR="${1:-build-debug}"
 COVERAGE_DIR="coverage"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-LCOV_OPTS="--ignore-errors inconsistent,empty"
-REMOVE_OPTS="--ignore-errors unused,inconsistent,empty"
+# shellcheck disable=SC2054 # lcov wants comma-joined --ignore-errors values
+LCOV_OPTS=(--ignore-errors inconsistent,empty)
+# shellcheck disable=SC2054 # same
+REMOVE_OPTS=(--ignore-errors unused,inconsistent,empty)
 EXCLUDE_PATTERNS=('*_autogen*' '*/tests/*' '/usr/*')
 
 OVERALL_EXIT=0
@@ -20,17 +22,18 @@ run_pipeline() {
     echo ""
     echo "=== ${label} ==="
 
-    lcov --directory "${BUILD_DIR}" -z "${LCOV_OPTS}" >/dev/null 2>&1
+    lcov --directory "${BUILD_DIR}" -z "${LCOV_OPTS[@]}" >/dev/null 2>&1
 
     eval "${test_command}" || exit_code=$?
 
     if lcov --capture --directory "${BUILD_DIR}" \
-        -o "${COVERAGE_DIR}/${prefix}_raw.info" "${LCOV_OPTS}" >/dev/null 2>&1 &&
+        -o "${COVERAGE_DIR}/${prefix}_raw.info" "${LCOV_OPTS[@]}" >/dev/null 2>&1 &&
         [ -s "${COVERAGE_DIR}/${prefix}_raw.info" ]; then
+        # Best-effort (see below) — never fail the run on coverage tools.
         lcov --remove "${COVERAGE_DIR}/${prefix}_raw.info" "${EXCLUDE_PATTERNS[@]}" \
-            -o "${COVERAGE_DIR}/${prefix}_clean.info" "${REMOVE_OPTS}" >/dev/null 2>&1
+            -o "${COVERAGE_DIR}/${prefix}_clean.info" "${REMOVE_OPTS[@]}" >/dev/null 2>&1 || true
         genhtml "${COVERAGE_DIR}/${prefix}_clean.info" \
-            --output-directory "${COVERAGE_DIR}/html_${prefix}" >/dev/null 2>&1
+            --output-directory "${COVERAGE_DIR}/html_${prefix}" >/dev/null 2>&1 || true
         echo "  Coverage: ${COVERAGE_DIR}/html_${prefix}/index.html"
     else
         echo "  (no coverage data)"
@@ -57,24 +60,37 @@ run_pipeline \
     "(cd '${BUILD_DIR}' && ctest --output-on-failure -R test_dbus)"
 
 run_pipeline \
+    "Adaptor tests (incl. held-reply pins)" \
+    "adaptor" \
+    "(cd '${BUILD_DIR}' && ctest --output-on-failure -R test_adaptor)"
+
+run_pipeline \
+    "Introspection tests" \
+    "introspect" \
+    "(cd '${BUILD_DIR}' && ctest --output-on-failure -R test_introspect)"
+
+run_pipeline \
     "QML API tests" \
     "qml" \
     "QML_IMPORT_PATH='${BUILD_DIR}' '${SCRIPT_DIR}/run-qml-tests' '${BUILD_DIR}'"
 
 COMBINE_FILES=()
-for f in "${COVERAGE_DIR}"/cpp_clean.info "${COVERAGE_DIR}"/dbus_clean.info "${COVERAGE_DIR}"/qml_clean.info; do
+for f in "${COVERAGE_DIR}"/cpp_clean.info "${COVERAGE_DIR}"/dbus_clean.info "${COVERAGE_DIR}"/adaptor_clean.info "${COVERAGE_DIR}"/introspect_clean.info "${COVERAGE_DIR}"/qml_clean.info; do
     [ -f "$f" ] && COMBINE_FILES+=(-a "$f")
 done
 if [ ${#COMBINE_FILES[@]} -ge 2 ]; then
-    lcov "${COMBINE_FILES[@]}" -o "${COVERAGE_DIR}/combined.info" "${LCOV_OPTS}" >/dev/null 2>&1
+    # Coverage is best-effort (Debug builds carry no .gcda data) — never
+    # fail the run on a coverage-tool error (E0: genhtml used to abort
+    # the script under `set -e` with rc=1 despite all tests passing).
+    lcov "${COMBINE_FILES[@]}" -o "${COVERAGE_DIR}/combined.info" "${LCOV_OPTS[@]}" >/dev/null 2>&1 || true
     genhtml "${COVERAGE_DIR}/combined.info" \
-        --output-directory "${COVERAGE_DIR}/html_combined" >/dev/null 2>&1
+        --output-directory "${COVERAGE_DIR}/html_combined" >/dev/null 2>&1 || true
     echo ""
     echo "Combined coverage: ${COVERAGE_DIR}/html_combined/index.html"
 fi
 
 echo ""
-for f in "${COVERAGE_DIR}"/cpp_clean.info "${COVERAGE_DIR}"/dbus_clean.info "${COVERAGE_DIR}"/qml_clean.info; do
+for f in "${COVERAGE_DIR}"/cpp_clean.info "${COVERAGE_DIR}"/dbus_clean.info "${COVERAGE_DIR}"/adaptor_clean.info "${COVERAGE_DIR}"/introspect_clean.info "${COVERAGE_DIR}"/qml_clean.info; do
     [ -f "$f" ] && lcov --summary "$f" 2>&1 | grep -E "lines|functions" || true
 done
 
