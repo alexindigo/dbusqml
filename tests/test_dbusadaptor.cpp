@@ -389,6 +389,9 @@ private slots:
     void testHeldReplyTimeoutSettleCancels();
     void testHeldReplyTimeoutDisabledByDefault();
     void testHeldReplyTimeoutNoReplySilent();
+    // Phase 10 (deferred-deletion window): call served inside the
+    // window replies; path freed after destruction.
+    void testDeferredDeletionWindowServesThenFrees();
     void testVariantTypedPayloadStringArray();
     void testVariantTypedPayloadBytes();
     void testVariantTypedPayloadStructEquivalence();
@@ -7583,6 +7586,57 @@ void TestDBusAdaptor::testLifecycleLeakRegression() {
              "no destroy() refusals across the whole soak");
 
     delete stage;
+}
+
+// Phase 10 — deferred-deletion window: DOCUMENTED + PINNED as defined
+// behavior (not a defect). QML destroy() is deferred by design; an
+// adaptor serves until its destructor runs. The pin: destroy() the
+// adaptor, dispatch a call BEFORE the loop pumps the deferred delete
+// (inside the window → valid reply), pump to destruction, then assert
+// the path is freed.
+void TestDBusAdaptor::testDeferredDeletionWindowServesThenFrees() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent comp(&engine);
+    comp.setData("import DBus 1.0\n"
+                 "DBusAdaptor {\n"
+                 "  service: 'org.dbusqml.DeferWin'\n"
+                 "  path: '/DeferWin'\n"
+                 "  iface: 'org.dbusqml.DeferWin'\n"
+                 "  function ping() { return 'pong' }\n"
+                 "}",
+                 QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    QObject *adaptor = comp.create();
+    QVERIFY(adaptor != nullptr);
+    QTest::qWait(300);
+
+    // Request destruction (deferred — the destructor has NOT run yet).
+    adaptor->deleteLater();
+    // Inside the window: the adaptor still serves (valid reply).
+    // NOTE: loopback call — synchronous dispatch on the same connection
+    // is fine for a non-held reply (the loopback limitation only bars
+    // DELAYED replies, not immediate ones).
+    QDBusMessage inside = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.DeferWin"), QStringLiteral("/DeferWin"),
+        QStringLiteral("org.dbusqml.DeferWin"), QStringLiteral("Ping"));
+    QDBusMessage rInside = QDBusConnection::sessionBus().call(inside, QDBus::Block, 5000);
+    QCOMPARE(rInside.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(rInside.arguments().first().toString(), QStringLiteral("pong"));
+
+    // Pump to destruction, then the path is freed.
+    QPointer<QObject> guard(adaptor);
+    QTest::qWait(500);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QCoreApplication::processEvents();
+    QVERIFY2(guard.isNull(), "deferred delete must have run");
+    QDBusMessage after = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.DeferWin"), QStringLiteral("/DeferWin"),
+        QStringLiteral("org.dbusqml.DeferWin"), QStringLiteral("Ping"));
+    QDBusMessage rAfter = QDBusConnection::sessionBus().call(after, QDBus::Block, 5000);
+    QCOMPARE(rAfter.type(), QDBusMessage::ErrorMessage);
 }
 
 // ==================== Adversarial input matrix (0.6.0) ====================

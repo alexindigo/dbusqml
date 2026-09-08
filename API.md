@@ -612,6 +612,14 @@ Lifecycle semantics:
   is not supported; a second `unregister()` warns and does nothing. Use it
   when the bus path must go away now — e.g. a caller-side `Close` on a portal
   Request — without waiting for GC timing.
+- **Deferred-deletion window (defined behavior).** QML `destroy()` is
+  deferred by design: between the `destroy()` call and the destructor
+  running, the adaptor is still attached and still serves. A call arriving
+  inside that window gets a valid reply; the path is freed when the
+  destructor runs. This is consistent with the 0.8.0 lifecycle contract
+  (deletion lands after the current script block) and is PINNED by
+  `testDeferredDeletionWindowServesThenFrees` — not a defect, not a race
+  to fix.
 
 ---
 
