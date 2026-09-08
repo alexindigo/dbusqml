@@ -15,6 +15,8 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusReply>
 #include <QDBusVariant>
+#include <QCoreApplication>
+#include <QEventLoop>
 #include <QQmlEngine>
 #include <QRegularExpression>
 #include <QSet>
@@ -493,6 +495,19 @@ DBusPendingReply *DBusProxy::getProperty(const QString &name) {
     if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
         return nullptr;
 
+    // P9: duplicate in-flight Get coalesced (KDE dbusproperties.cpp:32
+    // guard semantics). The first caller owns the wire call; later
+    // callers attach waiters answered from the same reply. Keyed by the
+    // WIRE name (the map key the reply resolves under).
+    const QString wireName = m_qmlToDbusName.value(name, name);
+    auto pit = m_pendingGets.find(wireName);
+    if (pit != m_pendingGets.end()) {
+        auto *coalesced = new DBusPendingReply(this);
+        coalesced->setEngine(qmlEngine(this));
+        pit->waiters.append(coalesced);
+        return coalesced;
+    }
+
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Get");
     msg.setArguments({m_iface, name});
@@ -501,8 +516,40 @@ DBusPendingReply *DBusProxy::getProperty(const QString &name) {
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
     reply->setEngine(qmlEngine(this));
-    reply->setWatcher(watcher);
+    // NOTE: no setWatcher — the proxy's own finished lambda below drives
+    // BOTH the owner's caching (via completeFromReply) and the waiters'.
+    // setWatcher would ALSO cache via onFinished (SingleShot) — double
+    // completion is benign (completeFromReply early-outs when cached),
+    // but the extra connection is pointless; the single path keeps one
+    // completion site.
+    PendingGet pg;
+    pg.watcher = watcher;
+    pg.owner = reply;
+    m_pendingGets.insert(wireName, pg);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, wireName](QDBusPendingCallWatcher *w) {
+                QDBusMessage r = w->reply();
+                w->deleteLater();
+                finishPendingGet(wireName, r);
+            });
     return reply;
+}
+
+void DBusProxy::finishPendingGet(const QString &dbusName, const QDBusMessage &reply) {
+    // P9: answer the owner AND every coalesced waiter from the single
+    // wire reply (direct emit — see completeFromReply's delivery note),
+    // then drop the record.
+    auto it = m_pendingGets.find(dbusName);
+    if (it == m_pendingGets.end())
+        return;
+    PendingGet pg = std::move(it.value());
+    m_pendingGets.erase(it);
+    if (pg.owner)
+        pg.owner->completeFromReply(reply);
+    for (DBusPendingReply *w : pg.waiters) {
+        if (w)
+            w->completeFromReply(reply);
+    }
 }
 
 void DBusProxy::setProperty(const QString &name, const QVariant &value) {
@@ -524,6 +571,15 @@ void DBusProxy::setProperty(const QString &name, const QVariant &value) {
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
     msg.setArguments({m_iface, wireName, QVariant::fromValue(QDBusVariant(converted))});
+    // P9: the invokable write path shares the latest-wins queue with
+    // updateValue (one queue per wire name — both entry points collapse
+    // genuinely overlapping Sets).
+    auto sit = m_pendingSets.find(wireName);
+    if (sit != m_pendingSets.end()) {
+        sit->latestValue = converted;
+        sit->queued = true;
+        return;
+    }
     // P8: capture the prior QML-visible value; on error reply restore it
     // (KDE dbusproperties.cpp:154-158) + warn + propertyWriteFailed.
     // The optimistic value is NOT inserted here (unlike updateValue's
@@ -533,20 +589,31 @@ void DBusProxy::setProperty(const QString &name, const QVariant &value) {
     const QVariant prior = QQmlPropertyMap::value(name);
     QDBusPendingCall call = m_bus.asyncCall(msg, m_callTimeout);
     auto *watcher = new QDBusPendingCallWatcher(call, this);
+    // P9: the fresh wire call registers its pending-Set record (the
+    // latest-wins queue entry other overlapping writes collapse into).
+    PendingSet ps;
+    ps.watcher = watcher;
+    ps.latestValue = converted;
+    ps.qmlKey = name;
+    ps.prior = prior;
+    m_pendingSets.insert(wireName, ps);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
             [this, name, wireName, prior](QDBusPendingCallWatcher *w) {
-                QDBusPendingReply<> reply = *w;
+                QDBusMessage r = w->reply();
+                const bool failed = r.type() == QDBusMessage::ErrorMessage;
+                const QString errName = failed ? r.errorName() : QString();
+                const QString errMsg = failed ? r.errorMessage() : QString();
                 w->deleteLater();
-                if (reply.isError()) {
+                finishPendingSet(wireName, r);
+                if (failed) {
                     // Roll back the QML-visible value to the prior one.
                     if (prior.isValid())
                         insert(name, prior);
                     else
                         clear(name);
                     qWarning("dbusqml: Set of property %s failed (%s: %s) — value restored",
-                             qPrintable(wireName), qPrintable(reply.error().name()),
-                             qPrintable(reply.error().message()));
-                    emit propertyWriteFailed(name, reply.error().name(), reply.error().message());
+                             qPrintable(wireName), qPrintable(errName), qPrintable(errMsg));
+                    emit propertyWriteFailed(name, errName, errMsg);
                 }
             });
 }
@@ -592,6 +659,26 @@ QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
         return input;
     }
     const QString dbusName = m_qmlToDbusName.value(key, key);
+    // P9: Set dedupe = latest-wins queue. A Set already in flight keeps
+    // the wire; the newer value OVERWRITES the queued one and is sent
+    // when the in-flight Set completes (interleaved set/set converges
+    // to the last value, one extra wire call max per overlap).
+    //
+    // RE-ENTRANCY NOTE: the first Set's watcher completes on the bus
+    // (the loop must turn for delivery — callers pump between writes);
+    // a write arriving while NO record exists starts a fresh wire call.
+    // SYNCHRONOUS-WRITE NOTE: back-to-back setProperty calls with NO
+    // loop turn between them all complete synchronously at the daemon
+    // (each Set answers before the next is issued) — no record is ever
+    // alive at entry, so each takes the fresh-call path and the count
+    // is N. The dedupe ONLY collapses genuinely overlapping (in-flight)
+    // Sets; the test pumps between writes to create the overlap.
+    auto sit = m_pendingSets.find(dbusName);
+    if (sit != m_pendingSets.end()) {
+        sit->latestValue = converted;
+        sit->queued = true;
+        return input;
+    }
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
     msg.setArguments({m_iface, dbusName, QVariant::fromValue(QDBusVariant(converted))});
@@ -605,22 +692,85 @@ QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
     const QVariant prior = QQmlPropertyMap::value(key);
     QDBusPendingCall call = m_bus.asyncCall(msg, m_callTimeout);
     auto *watcher = new QDBusPendingCallWatcher(call, this);
+    PendingSet ps;
+    ps.watcher = watcher;
+    ps.latestValue = converted;
+    ps.qmlKey = key;
+    ps.prior = prior;
+    m_pendingSets.insert(dbusName, ps);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
             [this, key, dbusName, prior](QDBusPendingCallWatcher *w) {
-                QDBusPendingReply<> reply = *w;
+                QDBusMessage r = w->reply();
+                const QString errName =
+                    r.type() == QDBusMessage::ErrorMessage ? r.errorName() : QString();
+                const QString errMsg =
+                    r.type() == QDBusMessage::ErrorMessage ? r.errorMessage() : QString();
                 w->deleteLater();
-                if (reply.isError()) {
+                finishPendingSet(dbusName, r);
+                if (r.type() == QDBusMessage::ErrorMessage) {
                     if (prior.isValid())
                         insert(key, prior);
                     else
                         clear(key);
                     qWarning("dbusqml: Set of property %s failed (%s: %s) — value restored",
-                             qPrintable(dbusName), qPrintable(reply.error().name()),
-                             qPrintable(reply.error().message()));
-                    emit propertyWriteFailed(key, reply.error().name(), reply.error().message());
+                             qPrintable(dbusName), qPrintable(errName), qPrintable(errMsg));
+                    emit propertyWriteFailed(key, errName, errMsg);
                 }
             });
     return input;
+}
+
+void DBusProxy::finishPendingSet(const QString &dbusName, const QDBusMessage &reply) {
+    // P9: latest-wins drain. If a newer value queued while the Set was
+    // in flight, send it now (one chained call); otherwise drop the
+    // record. Errors on the chained call run the SAME P8 rollback +
+    // warn + propertyWriteFailed as the fresh-call paths (the chained
+    // watcher below carries the qmlKey/prior from the PendingSet).
+    Q_UNUSED(reply);
+    auto it = m_pendingSets.find(dbusName);
+    if (it == m_pendingSets.end())
+        return;
+    PendingSet ps = std::move(it.value());
+    m_pendingSets.erase(it);
+    if (!ps.queued)
+        return;
+    QDBusMessage msg =
+        QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
+    msg.setArguments({m_iface, dbusName, QVariant::fromValue(QDBusVariant(ps.latestValue))});
+    QDBusPendingCall call = m_bus.asyncCall(msg, m_callTimeout);
+    auto *watcher = new QDBusPendingCallWatcher(call, this);
+    PendingSet ps2;
+    ps2.watcher = watcher;
+    ps2.latestValue = ps.latestValue;
+    ps2.qmlKey = ps.qmlKey;
+    ps2.prior = ps.prior;
+    m_pendingSets.insert(dbusName, ps2);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, dbusName](QDBusPendingCallWatcher *w) {
+                QDBusMessage r = w->reply();
+                w->deleteLater();
+                if (r.type() == QDBusMessage::ErrorMessage) {
+                    // P8 on the chained call: restore + warn + signal.
+                    auto it2 = m_pendingSets.find(dbusName);
+                    QString qmlKey = dbusName;
+                    QVariant prior;
+                    if (it2 != m_pendingSets.end()) {
+                        qmlKey = it2.value().qmlKey;
+                        prior = it2.value().prior;
+                    }
+                    if (qmlKey.isEmpty())
+                        qmlKey = dbusName;
+                    if (prior.isValid())
+                        insert(qmlKey, prior);
+                    else
+                        clear(qmlKey);
+                    qWarning("dbusqml: Set of property %s failed (%s: %s) — value restored",
+                             qPrintable(dbusName), qPrintable(r.errorName()),
+                             qPrintable(r.errorMessage()));
+                    emit propertyWriteFailed(qmlKey, r.errorName(), r.errorMessage());
+                }
+                finishPendingSet(dbusName, r);
+            });
 }
 
 void DBusProxy::disconnectSignals() {

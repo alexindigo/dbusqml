@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QSignalSpy>
 #include <QTimer>
 #include <QThread>
@@ -13,9 +14,12 @@
 #include <unistd.h>
 #include <QDBusConnectionInterface>
 #include <QDBusMetaType>
+#include <QDBusVariant>
 #include <QDBusVirtualObject>
 #include <QRegularExpression>
 #include <iostream>
+#include <cstdio>
+#include <cstring>
 #include <thread>
 #include <atomic>
 #include <vector>
@@ -198,6 +202,38 @@ signals:
     void signalPong(const QString &data);
 };
 
+// QTest::ignoreMessage cannot observe the async rollback warn (it fires
+// on the watcher's finished delivery, outside the ignore window), so
+// the connection suite owns a small message capture like the adaptor
+// suite's LifecycleMessageCapture.
+class ConnMessageCapture {
+public:
+    ConnMessageCapture() : m_prior(qInstallMessageHandler(record)) { s_active = this; }
+    ~ConnMessageCapture() {
+        s_active = nullptr;
+        qInstallMessageHandler(m_prior);
+    }
+
+    bool contains(const QString &needle) const {
+        for (const QString &m : std::as_const(messages))
+            if (m.contains(needle))
+                return true;
+        return false;
+    }
+
+    QStringList messages;
+
+private:
+    static ConnMessageCapture *s_active;
+    QtMessageHandler m_prior;
+    static void record(QtMsgType, const QMessageLogContext &, const QString &msg) {
+        if (s_active)
+            s_active->messages.append(msg);
+        std::fprintf(stderr, "%s\n", qPrintable(msg));
+    }
+};
+ConnMessageCapture *ConnMessageCapture::s_active = nullptr;
+
 // Manual property server for the PropertiesChanged protocol tests (A2/A3/A16):
 // Introspect declares the properties; Get/GetAll/Set/Bump are fully manual so
 // the test can change the value WITHOUT any emission (the invalidation scenario).
@@ -220,13 +256,15 @@ public:
     }
 
     bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
-        if (msg.interface() == QLatin1String("org.dbusqml.PcServer") &&
-            msg.member() == QLatin1String("Bump")) {
+        // Legacy A2/A3 Bump shape (PcServer fixture): direct method call
+        // on the CURRENT s_iface.
+        if (msg.interface() == s_iface && msg.member() == QLatin1String("Bump")) {
             s_level = 999u;
             conn.send(msg.createReply());
             return true;
         }
-        if (msg.interface() != QLatin1String("org.freedesktop.DBus.Properties"))
+        if (msg.interface() != QLatin1String("org.freedesktop.DBus.Properties") &&
+            msg.interface() != s_iface)
             return false;
         if (msg.member() == QLatin1String("GetAll")) {
             QVariantMap props;
@@ -238,6 +276,9 @@ public:
         }
         if (msg.member() == QLatin1String("Get")) {
             const QString prop = msg.arguments().at(1).toString();
+            // P9: count ALL Gets (the coalescing proof is count==1 for N
+            // callers); only Level is answered.
+            ++s_getCount; // P9: per-handler wire-call counter
             if (prop == QLatin1String("Level")) {
                 conn.send(msg.createReply({QVariant::fromValue(QDBusVariant(QVariant(s_level)))}));
                 return true;
@@ -246,6 +287,28 @@ public:
         }
         if (msg.member() == QLatin1String("Set")) {
             s_lastSetProp = msg.arguments().at(1).toString();
+            // P9: record served Sets (count + last value) for the
+            // latest-wins convergence assertion. The value arrives as a
+            // QDBusVariant wrapping the scalar (QVariant(...) of it
+            // yields 0 — unwrap via .variant() first).
+            ++s_setCount;
+            QVariant rawArg = msg.arguments().at(2);
+            QVariant inner = rawArg.userType() == qMetaTypeId<QDBusVariant>()
+                                 ? rawArg.value<QDBusVariant>().variant()
+                                 : rawArg;
+            s_lastSetValue = inner.toUInt();
+            // V1 P9-chained test: value 0xDEAD is REFUSED with
+            // InvalidArgs (the failing-chained-Set geometry) — every
+            // other value is honored (read-back pins it).
+            if (s_lastSetProp == QLatin1String("Level") && s_lastSetValue == 0xDEADu) {
+                conn.send(
+                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                                         QStringLiteral("refused sentinel")));
+                return true;
+            }
+            // Honor the value on the served side (read-back pins it).
+            if (s_lastSetProp == QLatin1String("Level"))
+                s_level = s_lastSetValue;
             conn.send(msg.createReply());
             return true;
         }
@@ -257,8 +320,14 @@ public:
     static QString s_iface;
     static bool s_declarePayload;
     static bool s_servePayload;
+    static int s_getCount;      // P9: Get calls observed on the wire
+    static int s_setCount;      // P9: Set calls observed on the wire
+    static uint s_lastSetValue; // P9: last served Set value
 };
 uint PropertyServerObject::s_level = 7u;
+int PropertyServerObject::s_getCount = 0;
+int PropertyServerObject::s_setCount = 0;
+uint PropertyServerObject::s_lastSetValue = 0u;
 QString PropertyServerObject::s_lastSetProp;
 QString PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServer");
 bool PropertyServerObject::s_declarePayload = false;
@@ -2621,6 +2690,240 @@ private slots:
         delete writer;
         delete proxyObj;
         delete adaptor;
+    }
+
+    // ==================== P9: concurrent Get/Set dedupe ====================
+    //
+    // Pending-op maps keyed by property (KDE dbusproperties.cpp:32 guard
+    // semantics): duplicate in-flight Get coalesced (N rapid update() →
+    // one wire call — counted at the PropertyServerObject Set/Get
+    // handlers); Set dedupe = latest-wins queue (interleaved set/set
+    // converges to the last value). No new surface.
+    void testConcurrentGetCoalesced() {
+        // Served side: count Get calls on Level.
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.P9Get");
+        PropertyServerObject::s_level = 7u;
+        PropertyServerObject::s_getCount = 0;
+        auto *server = new PropertyServerObject();
+        QVERIFY(
+            QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/P9Get"), server));
+        QVERIFY(QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.P9Get")));
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.P9Get");
+
+        auto *proxy = new DBusProxy;
+        proxy->setService(QStringLiteral("org.dbusqml.P9Get"));
+        proxy->setPath(QStringLiteral("/P9Get"));
+        proxy->setIface(QStringLiteral("org.dbusqml.P9Get"));
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->status() == DBusProxy::Ready, 10000);
+        // Drain the Ready-path's own GetAll (fetchProperties) so the
+        // coalescing counter below observes ONLY the test's Gets.
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->property("level").toUInt() == 7u, 10000);
+
+        // N rapid getProperty calls while the first is in flight: the
+        // server must observe exactly ONE Get on the wire; every waiter
+        // still completes with the value. Wire names are PascalCase
+        // ("Level" — the QML-mapped "level" would address a name the
+        // server does not know and fail).
+        //
+        // CALLER-COUNT NOTE (Qt behavior, pinned): one QDBusConnection
+        // delivers exactly one in-flight async reply per event-loop
+        // turn to watchers created in a tight loop (probe-verified:
+        // 1/8 spies fire without pumping). processEvents between
+        // creations lets each reply dispatch — DESTROYING the
+        // coalescing window (each Get completes before the next is
+        // issued: 8 wire Gets). The coalescing window therefore needs
+        // all 8 Gets issued with NO loop turn between them: create all
+        // replies back-to-back, THEN drain with a pumping loop (the
+        // drain observes owner + waiters completing from the single
+        // wire reply).
+        PropertyServerObject::s_getCount = 0;
+        QList<DBusPendingReply *> replies;
+        QList<QSignalSpy *> spies;
+        for (int i = 0; i < 8; ++i) {
+            DBusPendingReply *r = proxy->getProperty(QStringLiteral("Level"));
+            replies.append(r);
+            spies.append(new QSignalSpy(r, &DBusPendingReply::finished));
+        }
+        {
+            QElapsedTimer drain;
+            drain.start();
+            int done = 0;
+            while (drain.elapsed() < 15000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+                done = 0;
+                for (QSignalSpy *s : spies)
+                    done += s->count();
+                if (done == 8)
+                    break;
+            }
+            QVERIFY2(done == 8, qPrintable(QStringLiteral("only %1/8 Gets finished, wire Gets=%2")
+                                               .arg(done)
+                                               .arg(PropertyServerObject::s_getCount)));
+        }
+        for (DBusPendingReply *r : replies) {
+            QVERIFY(!r->isError());
+            QCOMPARE(r->value().toUInt(), 7u);
+        }
+        // Wire-oracle-adjacent assertion: the per-handler counter is the
+        // serial-level proof of one wire call (Qt marshals both ways, so
+        // the count lives at the SERVED handler, not the caller).
+        QCOMPARE(PropertyServerObject::s_getCount, 1);
+        qDeleteAll(replies);
+        qDeleteAll(spies);
+        delete proxy;
+    }
+
+    void testInterleavedSetLatestWins() {
+        // Served side: count Sets, record the last value.
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.P9Set");
+        PropertyServerObject::s_level = 0u;
+        PropertyServerObject::s_setCount = 0;
+        PropertyServerObject::s_lastSetValue = 0u;
+        auto *server = new PropertyServerObject();
+        QVERIFY(
+            QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/P9Set"), server));
+        QVERIFY(QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.P9Set")));
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.P9Set");
+
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        QQmlComponent proxyComp(&engine);
+        proxyComp.setData("import DBus 1.0\n"
+                          "DBus {\n"
+                          "  service: 'org.dbusqml.P9Set'\n"
+                          "  path: '/P9Set'\n"
+                          "  iface: 'org.dbusqml.P9Set'\n"
+                          "}",
+                          QUrl());
+        QVERIFY2(proxyComp.isReady(), qPrintable(proxyComp.errorString()));
+        QObject *proxyObj = proxyComp.create();
+        QVERIFY(proxyObj != nullptr);
+        auto *proxy = qobject_cast<DBusProxy *>(proxyObj);
+        QVERIFY(proxy != nullptr);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->status() == DBusProxy::Ready, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->property("level").toUInt() == 0u, 10000);
+
+        // Interleaved set/set through the updateValue path: the QML
+        // writer calls the INVOKABLE setProperty (C++ QObject::setProperty
+        // on a QML-created element does NOT route into updateValue — it
+        // sets the QObject property directly, bypassing the map; the
+        // invokable goes through the latest-wins queue). Three rapid
+        // synchronous invokable writes with NO loop turn between them;
+        // the second and third land while the first Set is in flight and
+        // collapse into ONE chained call: the wire must converge to the
+        // LAST value with at most 2 wire Sets (first + one chained).
+        // CALLER-COUNT NOTE: no pumping between writes (pumping would
+        // complete each Set synchronously at the daemon and destroy the
+        // overlap window — probe-verified wire Sets=3 with pumping).
+        // Drain with a pumping loop (not a bare wait) so the chained
+        // latest-wins completion is observed.
+        //
+        // QML-ENGINE NOTE: proxyObj is a QML-created DBus element, so
+        // the invokable runs the real path (the P8 QML test proves the
+        // routing); a C++-created proxy would behave identically here
+        // since setProperty is the invokable in both cases.
+        PropertyServerObject::s_setCount = 0;
+        PropertyServerObject::s_lastSetValue = 0u;
+        QMetaObject::invokeMethod(proxyObj, "setProperty", Q_ARG(QString, QStringLiteral("level")),
+                                  Q_ARG(QVariant, 10));
+        QMetaObject::invokeMethod(proxyObj, "setProperty", Q_ARG(QString, QStringLiteral("level")),
+                                  Q_ARG(QVariant, 20));
+        QMetaObject::invokeMethod(proxyObj, "setProperty", Q_ARG(QString, QStringLiteral("level")),
+                                  Q_ARG(QVariant, 30));
+        {
+            QElapsedTimer drain;
+            drain.start();
+            while (drain.elapsed() < 15000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+                if (PropertyServerObject::s_lastSetValue == 30u)
+                    break;
+            }
+            QCOMPARE(PropertyServerObject::s_lastSetValue, 30u);
+        }
+        // Drain: the chained latest-wins Set completes asynchronously
+        // (pumped above — s_lastSetValue==30u already asserted).
+        QVERIFY2(PropertyServerObject::s_setCount <= 2,
+                 qPrintable(QStringLiteral("wire Sets=%1 last=%2")
+                                .arg(PropertyServerObject::s_setCount)
+                                .arg(PropertyServerObject::s_lastSetValue)));
+        QVERIFY(PropertyServerObject::s_setCount >= 1);
+        delete proxyObj;
+    }
+
+    void testChainedSetErrorRollsBack() {
+        // V1 (P9 gap fix, FD2(a)): the CHAINED latest-wins Set runs the
+        // P8 rollback+warn+signal on error. Geometry: two overlapping
+        // writes where the FIRST succeeds and the CHAINED second is
+        // refused (0xDEAD sentinel → InvalidArgs). The chained error
+        // must restore the map to the pre-write prior, warn, and emit
+        // propertyWriteFailed — exactly like the fresh-call paths.
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.P9Chain");
+        PropertyServerObject::s_level = 5u;
+        PropertyServerObject::s_setCount = 0;
+        PropertyServerObject::s_lastSetValue = 0u;
+        auto *server = new PropertyServerObject();
+        QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/P9Chain"),
+                                                                    server));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.P9Chain")));
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.P9Chain");
+
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        QQmlComponent proxyComp(&engine);
+        proxyComp.setData("import DBus 1.0\n"
+                          "DBus {\n"
+                          "  service: 'org.dbusqml.P9Chain'\n"
+                          "  path: '/P9Chain'\n"
+                          "  iface: 'org.dbusqml.P9Chain'\n"
+                          "}",
+                          QUrl());
+        QVERIFY2(proxyComp.isReady(), qPrintable(proxyComp.errorString()));
+        QObject *proxyObj = proxyComp.create();
+        QVERIFY(proxyObj != nullptr);
+        auto *proxy = qobject_cast<DBusProxy *>(proxyObj);
+        QVERIFY(proxy != nullptr);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->status() == DBusProxy::Ready, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->property("level").toUInt() == 5u, 10000);
+
+        // Overlap: issue the first write, then — with NO loop turn so
+        // the record is still in flight — the refused second. The first
+        // succeeds (prior=5 captured on ITS record); the chained second
+        // errors and must roll back to 5 + warn + signal.
+        ConnMessageCapture capture;
+        QSignalSpy failSpy(proxy, &DBusProxy::propertyWriteFailed);
+        PropertyServerObject::s_setCount = 0;
+        QMetaObject::invokeMethod(proxyObj, "setProperty", Q_ARG(QString, QStringLiteral("level")),
+                                  Q_ARG(QVariant, 10));
+        QMetaObject::invokeMethod(proxyObj, "setProperty", Q_ARG(QString, QStringLiteral("level")),
+                                  Q_ARG(QVariant, 0xDEADu));
+        {
+            QElapsedTimer drain;
+            drain.start();
+            while (drain.elapsed() < 15000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+                if (failSpy.count() >= 1)
+                    break;
+            }
+            QVERIFY2(failSpy.count() >= 1, "chained Set error never signalled rollback");
+        }
+        QCOMPARE(PropertyServerObject::s_setCount, 2);
+        // Rollback: the map holds the pre-write prior again...
+        QCOMPARE(proxy->property("level").toUInt(), 5u);
+        // ...the warn fired...
+        QVERIFY2(capture.contains(QStringLiteral("value restored")),
+                 qPrintable(QStringLiteral("missing rollback warn; got: %1")
+                                .arg(capture.messages.join(QStringLiteral(" | ")))));
+        // ...and the signal names the property + InvalidArgs.
+        QCOMPARE(failSpy.count(), 1);
+        QCOMPARE(failSpy.first().at(0).toString(), QStringLiteral("level"));
+        QVERIFY2(failSpy.first().at(1).toString().contains(QStringLiteral("InvalidArgs")),
+                 qPrintable(failSpy.first().at(1).toString()));
+        delete proxyObj;
     }
 
     // ==================== P5: bus connection-loss handling ====================

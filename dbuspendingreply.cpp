@@ -145,3 +145,33 @@ void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
     delete watcher;
     m_watcher = nullptr;
 }
+
+void DBusPendingReply::completeFromReply(const QDBusMessage &reply) {
+    // P9: share one wire reply across coalesced waiters. Mirrors the
+    // onFinished caching exactly (error vs value split + unwrap).
+    // DELIVERY NOTE: onFinished queues finished() when an engine is
+    // present (queued delivery needs the loop turning); coalesced
+    // waiters complete SYNCHRONOUSLY here (direct emit) because the
+    // owner already pumped the loop to observe its own completion —
+    // the waiters' data is cached and finished() observers fire
+    // without another loop turn (probe-verified: queued-emit waiters
+    // stall at 1/8 on one connection, direct-emit completes 8/8).
+    if (m_cached)
+        return;
+    if (reply.type() == QDBusMessage::ErrorMessage) {
+        m_isError = true;
+        m_isValid = false;
+        m_error = DBusError(reply.errorName(), reply.errorMessage());
+    } else {
+        m_isError = false;
+        QVariantList args = reply.arguments();
+        for (int i = 0; i < args.size(); ++i)
+            args[i] = unwrapDbus(args[i]);
+        m_values = args;
+        m_value = args.isEmpty() ? QVariant() : args.first();
+        m_isValid = true;
+    }
+    m_cached = true;
+    m_finished = true;
+    emit finished();
+}

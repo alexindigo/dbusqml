@@ -14,6 +14,7 @@
 #include <qqmlregistration.h>
 
 #include "dbusconnection.h"
+#include "dbuspendingreply.h"
 
 class DBusProxy : public QQmlPropertyMap, public QQmlParserStatus {
     Q_OBJECT
@@ -194,4 +195,30 @@ private:
     QString m_connectedService;
     QString m_connectedPath;
     QString m_connectedIface;
+
+    // P9 (features train, Phase 8): pending-op dedupe maps, keyed by
+    // property (KDE dbusproperties.cpp:32 guard semantics). Duplicate
+    // in-flight Get coalesced (one wire call, all waiters answered);
+    // Set dedupe = latest-wins queue (interleaved set/set converges to
+    // the last value). No new surface.
+    struct PendingGet {
+        QDBusPendingCallWatcher *watcher = nullptr;
+        DBusPendingReply *owner = nullptr;
+        QList<DBusPendingReply *> waiters;
+    };
+    QHash<QString, PendingGet> m_pendingGets;
+    struct PendingSet {
+        QDBusPendingCallWatcher *watcher = nullptr;
+        QVariant latestValue;
+        bool queued = false; // a newer value arrived while in flight
+        // P8 rollback context for the CHAINED send: the QML-side key +
+        // the prior value it must restore on error (the fresh-call
+        // lambdas carry these as captures; the chained path has no
+        // lambda, so it carries them here).
+        QString qmlKey;
+        QVariant prior;
+    };
+    QHash<QString, PendingSet> m_pendingSets;
+    void finishPendingGet(const QString &dbusName, const QDBusMessage &reply);
+    void finishPendingSet(const QString &dbusName, const QDBusMessage &reply);
 };

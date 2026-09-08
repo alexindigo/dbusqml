@@ -36,6 +36,11 @@ public:
     // marshalable") instead of sending garbage or aborting the caller.
     void completeLocalError(const QString &name, const QString &message);
 
+    // P9 (features train, Phase 8): complete from an already-received
+    // wire reply (coalesced-Get waiters share one reply). Same caching
+    // + delivery convention as onFinished.
+    void completeFromReply(const QDBusMessage &reply);
+
     bool isFinished() const { return m_finished; }
     bool isError() const;
     bool isValid() const;
