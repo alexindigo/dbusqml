@@ -1,6 +1,7 @@
 #include "dbusheldreply.h"
 
 #include "dbusadaptor.h"
+#include "dbusconnection.h" // CF-1: wireMarshalable — shared marshal-boundary guard
 
 #include <QQmlEngine>
 
@@ -34,21 +35,30 @@ void DBusHeldReply::sendError(const QString &name, const QString &message) {
         qWarning("dbusqml: DBusHeldReply already settled - ignoring sendError");
         return;
     }
-    // Single-string convenience: a name without a '.' is the message, using
-    // the generic failure error name.
-    QString errorName = name;
-    QString errorMessage = message;
-    if (!name.contains(QLatin1Char('.'))) {
-        errorName = QStringLiteral("org.freedesktop.DBus.Error.Failed");
-        errorMessage = name;
+    // CF-1: same B11 grammar validation + Failed fallback as the
+    // throw path (dbusadaptor.cpp normalizeErrorName) — an invalid
+    // dotted name used to produce zero replies for the serial. The
+    // send result is checked and loud (member named); settle is
+    // unconditional so exactly-one-reply holds either way.
+    const auto norm = DBusAdaptor::normalizeErrorName(name, message, false);
+    if (m_msg.isReplyRequired()) { // B4: NO_REPLY_EXPECTED — send nothing
+        if (!m_conn.send(m_msg.createErrorReply(norm.first, norm.second)))
+            qWarning("dbusqml: held error reply for %s failed to send: %s", qPrintable(m_member),
+                     qPrintable(m_conn.lastError().message()));
     }
-    if (m_msg.isReplyRequired()) // B4: NO_REPLY_EXPECTED — send nothing
-        m_conn.send(m_msg.createErrorReply(errorName, errorMessage));
     settle();
 }
 
 void DBusHeldReply::settle() {
     m_settled = true;
+    // CF-27: actually stop the TTL timer (the comment at the hold site
+    // promises settle cancels it). expire() early-outs regardless, so
+    // the reply count is unchanged — the timer just no longer outlives
+    // its purpose.
+    if (m_ttlTimer) {
+        m_ttlTimer->stop();
+        m_ttlTimer = nullptr;
+    }
     // Ownership audit (0.7.0): CppOwnership while pending → JavaScriptOwnership
     // after settle (0.5.0 design — intended). The adaptor keeps its own
     // ownership through dispatch (0.8.0 preservation) — no notification needed.

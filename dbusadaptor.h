@@ -139,6 +139,13 @@ public:
     void sendMethodReply(const QDBusConnection &conn, const QDBusMessage &msg,
                          const QString &member, const QVariant &retVal);
 
+    // CF-1: shared error-name normalization (B11 grammar + Failed
+    // fallback). Used by the throw path and DBusHeldReply::sendError so
+    // both get identical validation. Declared here (not file-static) so
+    // the held-reply TU can share it without duplication.
+    static QPair<QString, QString> normalizeErrorName(const QString &name, const QString &message,
+                                                      bool declaredShape);
+
 Q_SIGNALS:
     void serviceChanged();
     void pathChanged();

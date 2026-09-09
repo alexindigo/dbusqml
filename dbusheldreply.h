@@ -48,4 +48,9 @@ private:
     QString m_member;
     QString m_caller;
     bool m_settled = false;
+    // CF-27: the TTL single-shot, owned by the reply — settle() stops it
+    // so the timer does not outlive its purpose (expire() early-outs on
+    // m_settled either way, so this is hygiene + doc-truth, not a
+    // behavior change on the reply count).
+    QTimer *m_ttlTimer = nullptr;
 };

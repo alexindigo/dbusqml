@@ -626,6 +626,54 @@ QString DBusAdaptor::introspect(const QString &) const {
 // survive QJSValue conversion intact; a flattened-gadget shape is a real
 // dict. Explicit typing is `new DBusQML.variant(x)` / `struct_` — the
 // documented contract since 0.3.x/0.4.0.
+// CF-1: the shared error-name validator (extracted from the throw path
+// below, B11). A D-Bus error name must be dot-separated identifiers, each
+// starting with a letter or underscore; anything else fails at reply
+// marshal and the caller just times out. Invalid names fall back to
+// Failed — loudly when the caller supplied a dotted (intended-as-error)
+// name or a declared error shape, silently for a plain JS Error.
+static bool validErrorName(const QString &n) {
+    const QStringList parts = n.split(QLatin1Char('.'));
+    if (parts.size() < 2)
+        return false;
+    for (const QString &p : parts) {
+        if (p.isEmpty() || !p.at(0).isLetter())
+            return false;
+        for (const QChar &c : p) {
+            if (!(c.isLetterOrNumber() || c == QLatin1Char('_')))
+                return false;
+        }
+    }
+    return true;
+}
+
+// CF-1: normalize (name, message) through the same grammar +
+// Failed-fallback the throw path uses, so direct sendError(name) calls
+// get identical validation. Returns the effective {errorName,
+// errorMessage}; warns on fallback for dotted/shape-declared names.
+QPair<QString, QString> DBusAdaptor::normalizeErrorName(const QString &name, const QString &message,
+                                                        bool declaredShape) {
+    QString errorName = QStringLiteral("org.freedesktop.DBus.Error.Failed");
+    QString errorMessage = message;
+    // Single-string convenience: a name without a '.' is the message,
+    // using the generic failure error name.
+    if (!name.contains(QLatin1Char('.'))) {
+        errorName = QStringLiteral("org.freedesktop.DBus.Error.Failed");
+        errorMessage = name;
+        return {errorName, errorMessage};
+    }
+    if (validErrorName(name)) {
+        errorName = name;
+        return {errorName, errorMessage};
+    }
+    if (declaredShape || name.contains(QLatin1Char('.'))) {
+        qWarning("dbusqml: invalid error name '%s' — falling back to "
+                 "org.freedesktop.DBus.Error.Failed",
+                 qPrintable(name));
+    }
+    return {errorName, errorMessage};
+}
+
 QVariant qjsValueToVariant(const QJSValue &jsval) {
     return jsval.toVariant();
 }
@@ -1451,26 +1499,10 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                         const QJSValue msgVal = result.property(QStringLiteral("message"));
                         if (nameVal.isString()) {
                             const QString n = nameVal.toString();
-                            // B11: the name must satisfy the D-Bus error-name
-                            // grammar (dot-separated identifiers, each starting
-                            // with a letter or underscore). An invalid name would
-                            // fail at reply marshal — the caller would just time
-                            // out. Fall back to Failed with a warning.
-                            const bool validName = [n]() {
-                                const QStringList parts = n.split(QLatin1Char('.'));
-                                if (parts.size() < 2)
-                                    return false;
-                                for (const QString &p : parts) {
-                                    if (p.isEmpty() || !p.at(0).isLetter())
-                                        return false;
-                                    for (const QChar &c : p) {
-                                        if (!(c.isLetterOrNumber() || c == QLatin1Char('_')))
-                                            return false;
-                                    }
-                                }
-                                return true;
-                            }();
-                            if (validName) {
+                            // B11/CF-1: shared grammar validation — an invalid
+                            // name would fail at reply marshal (caller times
+                            // out). Fall back to Failed with a warning.
+                            if (validErrorName(n)) {
                                 errorName = n;
                                 if (msgVal.isString())
                                     errorMessage = msgVal.toString();
@@ -1663,6 +1695,17 @@ DBusHeldReply *DBusAdaptor::holdReply() {
         qWarning("dbusqml: holdReply() called outside method dispatch - ignored");
         return nullptr;
     }
+    // CF-2 (FD1, pre-authorized): idempotent hold — a second holdReply()
+    // in one dispatch returns the SAME handle instead of minting a second
+    // DBusHeldReply with its own m_settled and its own TTL timer (two
+    // settlement authorities = double-reply surface; the teardown loop
+    // would error the orphan).
+    if (m_currentCall.held && !m_currentCall.reply.isNull()) {
+        qWarning("dbusqml: holdReply() called twice in one dispatch of %s — returning the same "
+                 "handle",
+                 qPrintable(m_currentCall.member));
+        return m_currentCall.reply;
+    }
     auto *reply = new DBusHeldReply(this);
     reply->setContext(this, m_currentCall.msg, m_currentCall.conn, m_currentCall.member);
     // Ownership audit (0.7.0): CppOwnership while pending — the held reply is
@@ -1673,13 +1716,17 @@ DBusHeldReply *DBusAdaptor::holdReply() {
     QQmlEngine::setObjectOwnership(reply, QQmlEngine::CppOwnership);
     m_currentCall.held = true;
     m_currentCall.reply = reply;
-    // Phase 9: TTL opt-in — arm the expiry timer (single-shot). Settle
-    // (send/sendError/expire/destructor-tail) cancels it; expiry settles
-    // with Failed. The timer is parented to the REPLY (dies with it);
-    // the timeout value is read at hold time (changing the property
-    // mid-hold does not re-arm — documented).
+    // Phase 9: TTL opt-in — arm the expiry timer (single-shot, stored on
+    // the reply so settle() stops it — CF-27). Expiry settles with
+    // Failed. The timer is parented to the REPLY (dies with it); the
+    // timeout value is read at hold time (changing the property mid-hold
+    // does not re-arm — documented).
     if (m_heldReplyTimeout > 0) {
-        QTimer::singleShot(m_heldReplyTimeout, reply, [reply] { reply->expire(); });
+        auto *timer = new QTimer(reply);
+        timer->setSingleShot(true);
+        timer->callOnTimeout(reply, [reply] { reply->expire(); });
+        reply->m_ttlTimer = timer;
+        timer->start(m_heldReplyTimeout);
     }
     return reply;
 }

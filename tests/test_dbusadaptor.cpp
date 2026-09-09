@@ -365,6 +365,10 @@ private slots:
     // Oracle self-test: a deliberately double-sending service MUST be
     // flagged ReceivedCount == 2 (proves the ==1 pins are not vacuous).
     void testOracleSensitivityDoubleReply();
+    // CF-1: invalid dotted error name falls back to Failed (one reply);
+    // CF-2: double holdReply() returns the same handle (one reply).
+    void testHeldReplyInvalidErrorNameFallsBack();
+    void testHoldReplyIdempotentSameHandle();
     void testHoldThrowErrorSettlesHeld();
     void testHoldThrowPrimitiveSettlesHeld();
     void testHoldThrowDeclaredShapeError();
@@ -2056,6 +2060,143 @@ void TestDBusAdaptor::testHoldReplyOutsideDispatch() {
     QVERIFY(adaptor != nullptr);
     QCOMPARE(adaptor->property("grabbedNull").toBool(), true);
     delete adaptor;
+}
+
+// CF-1 pin: sendError() with an invalid dotted error name
+// (org.example.Bad-Name — '-' is not grammar) must fall back to Failed
+// with exactly one reply — never zero replies for the serial. The call is
+// ALSO driven through the wire oracle (no-arg `boom` on the same adaptor)
+// and the gate is the oracle's received-direction reply count (== 1), not
+// the QtDBus spy alone.
+void TestDBusAdaptor::testHeldReplyInvalidErrorNameFallsBack() {
+    QObject *adaptor = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.CF1T'\n"
+        "  path: '/CF1T'\n"
+        "  iface: 'org.freedesktop.impl.portal.FileChooser'\n"
+        "  property var held: null\n"
+        "  function openFile(handle, appId, parentWindow, title, options) {\n"
+        "    held = holdReply()\n"
+        "    var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: 300; running: true; "
+        "repeat: false }', this)\n"
+        "    t.triggered.connect(function() { held.sendError('org.example.Bad-Name', 'x') })\n"
+        "  }\n"
+        "  function boom() {\n"
+        "    var h = holdReply()\n"
+        "    var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: 300; running: true; "
+        "repeat: false }', this)\n"
+        "    t.triggered.connect(function() { h.sendError('org.example.Bad-Name', 'x') })\n"
+        "  }\n"
+        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("invalid error name")));
+
+    // Oracle-driven gate FIRST (council CF-7): the same settle through the
+    // oracle's CallAdaptor; the wire reply count for that serial must be
+    // exactly 1 (pre-fix: zero — the invalid name never reached the wire).
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+    const quint32 serial = oracleCallAdaptor(
+        QStringLiteral("org.dbusqml.CF1T"), QStringLiteral("/CF1T"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("Boom"));
+    QVERIFY(serial != 0);
+    QTest::qWait(500); // settle + quiet window
+    QCOMPARE(oracleReceivedCount(serial), 1u);
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.CF1T"), QStringLiteral("/CF1T"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QCOMPARE(spy.count(), 1);
+    QDBusMessage reply = watcher->reply();
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+
+    // Exactly one reply: no second delivery arrives late.
+    QTest::qWait(500);
+    QCOMPARE(spy.count(), 1);
+
+    delete watcher;
+    delete adaptor;
+}
+
+// CF-2 pin: a second holdReply() in one dispatch returns the SAME handle
+// (idempotent hold) — one settlement authority, one TTL timer, one reply.
+// Oracle gate: ReceivedCount stays 1 across the settle AND the teardown.
+void TestDBusAdaptor::testHoldReplyIdempotentSameHandle() {
+    QObject *adaptor = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.CF2T'\n"
+        "  path: '/CF2T'\n"
+        "  iface: 'org.freedesktop.impl.portal.FileChooser'\n"
+        "  property var held: null\n"
+        "  property bool sameHandle: false\n"
+        "  function openFile(handle, appId, parentWindow, title, options) {\n"
+        "    var a = holdReply()\n"
+        "    var b = holdReply()\n"
+        "    sameHandle = (a === b)\n"
+        "    held = a\n"
+        "    var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: 300; running: true; "
+        "repeat: false }', this)\n"
+        "    t.triggered.connect(function() { held.send([0, {}]) })\n"
+        "  }\n"
+        "  function boom() {\n"
+        "    var a = holdReply()\n"
+        "    var b = holdReply()\n"
+        "    sameHandle = (a === b)\n"
+        "    held = a\n"
+        "    var t = Qt.createQmlObject('import QtQml 2.15; Timer { interval: 300; running: true; "
+        "repeat: false }', this)\n"
+        "    t.triggered.connect(function() { held.send([0, {}]) })\n"
+        "  }\n"
+        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("holdReply.*twice.*same")));
+
+    // Oracle-driven gate FIRST (council CF-7): wire-level ReceivedCount == 1
+    // after the settle AND after adaptor teardown (pre-fix: the orphaned
+    // second held reply is errored by the destructor — the count moves to
+    // 2, the double-reply surface the fix removes). Ordered first because a
+    // failing QCOMPARE later in the pin returns early (parent-tree runs
+    // must still reach the wire-level evidence).
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+    const quint32 serial = oracleCallAdaptor(
+        QStringLiteral("org.dbusqml.CF2T"), QStringLiteral("/CF2T"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("Boom"));
+    QVERIFY(serial != 0);
+    QTest::qWait(500); // settle + quiet window
+    QCOMPARE(oracleReceivedCount(serial), 1u);
+
+    QDBusPendingCallWatcher *watcher = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.CF2T"), QStringLiteral("/CF2T"),
+        QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"),
+        {QDBusObjectPath(QStringLiteral("/req/1")), QStringLiteral("app"), QStringLiteral(""),
+         QStringLiteral("title"), QVariantMap{}});
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QCOMPARE(spy.count(), 1);
+    QVERIFY(!watcher->isError());
+
+    // Capture the handle-identity evidence BEFORE teardown (QCOMPARE
+    // returns on failure — the teardown evidence must not be gated on it).
+    const bool sameHandle = adaptor->property("sameHandle").toBool();
+
+    delete watcher;
+    delete adaptor;
+    QTest::qWait(500); // teardown window — no teardown-error reply may land
+    QCOMPARE(oracleReceivedCount(serial), 1u);
+    QCOMPARE(sameHandle, true);
 }
 
 // ==================== Phase 4: caller identification ====================
