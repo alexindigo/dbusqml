@@ -153,7 +153,13 @@ A flake that recurs is a defect with luck — root-cause it (the takeover
 flake was a real deadlock, accepted twice). Timing-sensitive tests use
 sync barriers on bus STATE, never fixed sleeps; stress shapes with
 wall-clock bounds convert hangs into loud failures. TSan in CI catches
-the thread class nobody had listed.
+the thread class nobody had listed. TSan gate = targeted T1 selection
+(per-test processes with tests/tsan-suppressions.txt): full-suite ctest
+wedges TSan's thread registry under churn geometries (L3 wedge triage —
+thread-count effect, not a program race; all per-test processes green
+with zero novel frames). ASan gate = full ctest with
+tests/lsan-suppressions.txt (Qt-internal exit-time noise only; zero ODR
+— test binaries link libdbusqml.so exactly once).
 
 ## Threading contract (attach/detach)
 

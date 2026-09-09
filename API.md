@@ -516,6 +516,12 @@ Caveats:
   warns and does nothing.
 - If the adaptor is destroyed while a reply is still held, the caller gets an
   `org.freedesktop.DBus.Error.Failed` error reply instead of hanging.
+  The same tail runs when the adaptor's `QQmlEngine` is destroyed first
+  (shell live-reload: engine teardown orphans declarative adaptors
+  without running their destructors — the adaptor hooks the engine's
+  `destroyed()` signal at attach and errors pending held replies +
+  detaches, so a reload with a portal dialog open never hangs the
+  caller; pinned by `testEngineTeardownErrorsHeldCaller`).
 - There is no server-side timeout **by default** — the caller owns timeouts. (For
   xdg-desktop-portal backends that means honoring the frontend's
   `G_MAXINT`-timeout contract: the backend may hold indefinitely. The
