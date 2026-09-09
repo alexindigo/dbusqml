@@ -247,7 +247,11 @@ void DBusProxy::ensureSessionDisconnectWatch() {
     // DBusConnection object to relay loss — poll the session bus
     // liveness through the shared loss-probe pattern (a daemon-facing
     // NameHasOwner ping fails with Disconnected when the bus dies).
-    // Idempotent; no resubscribe (documented, FD5).
+    // Idempotent; no resubscribe (documented, FD5). CF-5: the alive
+    // completion re-arms through the same single-shot gate as the
+    // connection twin (3000 ms constant) — the old flag-reset re-armed
+    // on next entry only (loss after the startup window undetected),
+    // while a synchronous re-arm here would storm like the twin did.
     if (m_sessionDisconnectWatched || m_conn)
         return;
     m_sessionDisconnectWatched = true;
@@ -260,10 +264,23 @@ void DBusProxy::ensureSessionDisconnectWatch() {
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
         QDBusPendingReply<bool> reply = *w;
         w->deleteLater();
-        if (reply.isError() && reply.error().type() == QDBusError::Disconnected)
+        if (reply.isError() && reply.error().type() == QDBusError::Disconnected) {
             onBusDisconnected();
-        else if (!m_conn)
-            m_sessionDisconnectWatched = false; // alive: next entry re-arms
+            return;
+        }
+        // Alive: release the watch so a LATER entry re-arms (loss after
+        // the startup window is detected), then gate the re-arm on a
+        // single-shot — CF-5, same 3000 ms constant as the twin.
+        if (m_conn)
+            return;
+        m_sessionDisconnectWatched = false;
+        auto *gate = new QTimer(this);
+        gate->setSingleShot(true);
+        gate->callOnTimeout(this, [this, gate] {
+            gate->deleteLater();
+            ensureSessionDisconnectWatch();
+        });
+        gate->start(3000);
     });
 }
 

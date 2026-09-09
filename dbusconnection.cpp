@@ -25,6 +25,7 @@
 #include <QMutex>
 #include <QPointer>
 #include <QQmlEngine>
+#include <QTimer>
 
 bool wireMarshalable(const QVariant &v) {
     if (!v.isValid())
@@ -1500,10 +1501,12 @@ void DBusConnection::armLossProbe() {
     // the header note on Local.Disconnected): one daemon-facing
     // NameHasOwner ping per connection-moment. Answered by the daemon
     // itself, so it fails if and only if the connection is dead. The
-    // completion re-arms while connected; disconnect tears the probe
-    // down. No polling: exactly one ping is ever in flight, and it
+    // completion re-arms through a single-shot gate (CF-5): the old code
+    // re-armed synchronously inside its own completion, and a µs-fast
+    // daemon answer turned one ping into a perpetual idle ping storm per
+    // instance. No polling: at most one ping is ever in flight, and it
     // completes on its own as soon as the bus answers or dies.
-    if (!m_connected || m_lossProbe)
+    if (!m_connected || m_lossProbe || m_lossRearm)
         return;
     QDBusMessage ping = QDBusMessage::createMethodCall(
         QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
@@ -1537,8 +1540,13 @@ void DBusConnection::onPendingCallFinished(QDBusPendingCallWatcher *w) {
         return;
     }
     // Alive (or a non-fatal error — the daemon answered, which is itself
-    // proof of life): re-arm for the next connection-moment.
-    armLossProbe();
+    // proof of life): re-arm for the next connection-moment through the
+    // single-shot gate — never synchronously (CF-5 ping storm).
+    m_lossRearm = true;
+    QTimer::singleShot(kLossProbeRearmMs, this, [this] {
+        m_lossRearm = false;
+        armLossProbe();
+    });
 }
 
 DBusConnection *DBusConnection::connectToBus(const QString &address) {

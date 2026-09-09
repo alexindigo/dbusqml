@@ -654,6 +654,29 @@ private slots:
         QCOMPARE(map.value(QStringLiteral("k")).toString(), QStringLiteral("/x"));
     }
 
+    // CF-5 pin: one SessionBus instance idles 1s with at most 2
+    // NameHasOwner pings on the monitor (pre-fix: perpetual ping storm
+    // from synchronous re-arm in the probe's own completion).
+    void testLossProbeIdleTraffic() {
+        QProcess monitor;
+        monitor.setProcessChannelMode(QProcess::ForwardedErrorChannel);
+        monitor.start("dbus-monitor",
+                      {QStringLiteral("--session"),
+                       QStringLiteral("interface='org.freedesktop.DBus',member='NameHasOwner'")});
+        QVERIFY(monitor.waitForStarted(3000));
+        QTest::qWait(300); // let the monitor attach before the instance exists
+        {
+            SessionBusConnection bus;
+            QVERIFY(bus.isConnected());
+            QTest::qWait(1000); // idle a full re-arm window + margin
+        }
+        monitor.terminate();
+        QVERIFY(monitor.waitForFinished(3000));
+        const QByteArray out = monitor.readAllStandardOutput() + monitor.readAllStandardError();
+        const int pings = out.count("member=NameHasOwner");
+        QVERIFY2(pings <= 2, qPrintable(QStringLiteral("idle NameHasOwner storm: %1").arg(pings)));
+    }
+
     void testBusTypeEnum() {
         QCOMPARE(static_cast<int>(busType::Session), 0);
         QCOMPARE(static_cast<int>(busType::System), 1);

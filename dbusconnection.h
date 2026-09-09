@@ -132,14 +132,23 @@ private:
     // Spies one call per connection-moment: the daemon-facing
     // NameHasOwner ping doubles as the loss detector (it is answered by
     // the daemon itself, so it fails if and only if the connection is
-    // dead). Re-armed after every completion while connected; torn down
-    // on disconnect (dead on a dead bus).
+    // dead). Re-armed after every completion while connected (through a
+    // single-shot gate — CF-5, never synchronously); torn down on
+    // disconnect (dead on a dead bus).
     void armLossProbe();
+
+    // CF-5: minimum spacing between loss-probe pings. A constant, not
+    // user-facing — it bounds idle bus traffic, not a UX timeout.
+    static constexpr int kLossProbeRearmMs = 3000;
 
     QDBusConnection m_connection;
     QString m_connectionName;
     bool m_connected = true;
     QDBusPendingCallWatcher *m_lossProbe = nullptr;
+    // CF-5: re-arm gate — true between an alive completion and the
+    // single-shot firing. Stops a µs-fast daemon answer from turning one
+    // ping into a synchronous re-arm loop (idle ping storm).
+    bool m_lossRearm = false;
 };
 
 class SessionBusConnection : public DBusConnection {
