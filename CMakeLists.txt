@@ -154,6 +154,13 @@ install(FILES
 # ==================== TESTS ====================
 option(BUILD_TEST_MODE "Build the C++ test executables" ON)
 
+# L2 (ledger-zero): test-link hygiene. Test binaries must reference each
+# library symbol exactly once — compiling library .cpps into the test
+# target while ALSO linking libdbusqml.so produces duplicate
+# staticMetaObject definitions (ASan ODR-violation, previously masked
+# with detect_odr_violation=0). Tests therefore link the library and
+# include only headers; the single exception is test_types, which
+# exercises header-adjacent marshal helpers without the QML module.
 if(BUILD_TEST_MODE)
     find_package(Qt6 6.8 REQUIRED COMPONENTS Test)
 
@@ -169,10 +176,6 @@ if(BUILD_TEST_MODE)
 
     add_executable(test_dbus
         tests/test_dbusconnection.cpp
-        dbusmessage.cpp
-        dbusconnection.cpp
-        dbuspendingreply.cpp
-        dbustypes.cpp
     )
     target_include_directories(test_dbus PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_dbus PRIVATE Qt6::Core Qt6::Qml Qt6::Test Qt6::DBus dbusqml)
@@ -186,35 +189,17 @@ if(BUILD_TEST_MODE)
 
     add_executable(test_adaptor
         tests/test_dbusadaptor.cpp
-        dbusadaptor.cpp
-        dbusheldreply.cpp
-        dbusmessage.cpp
-        dbusconnection.cpp
-        dbuspathdispatcher.cpp
-        dbuspendingreply.cpp
-        dbustypes.cpp
-        dbusintrospection.cpp
     )
     target_include_directories(test_adaptor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_adaptor PRIVATE Qt6::Core Qt6::Qml Qt6::Test Qt6::DBus dbusqml)
 
     enable_testing()
     add_executable(fd_helper_service tests/fd_helper_service.cpp
-        dbusadaptor.cpp
-        dbusheldreply.cpp
-        dbusmessage.cpp
-        dbusconnection.cpp
-        dbuspathdispatcher.cpp
-        dbuspendingreply.cpp
-        dbustypes.cpp
-        dbusintrospection.cpp
     )
     target_include_directories(fd_helper_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(fd_helper_service PRIVATE Qt6::Core Qt6::Qml Qt6::DBus dbusqml)
 
     add_executable(payload_echo_service tests/payload_echo_service.cpp
-        dbusconnection.cpp
-        dbustypes.cpp
     )
     target_include_directories(payload_echo_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(payload_echo_service PRIVATE Qt6::Core Qt6::Qml Qt6::DBus dbusqml)

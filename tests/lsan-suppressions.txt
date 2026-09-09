@@ -1,0 +1,116 @@
+# LeakSanitizer suppressions (ledger-zero L2/L3).
+#
+# Pattern (xdp ships this for ASan/valgrind): suppress ONLY Qt-internal
+# exit-time leaks verified OUR-free on the fork VM
+# (arch-niri-dbusqml-features, Qt 6.11.2). Every entry cites its evidence.
+# Usage: ASAN_OPTIONS=... LSAN_OPTIONS=suppressions=tests/lsan-suppressions.txt
+# (CI sanitizer job exports this; see .github/workflows/ci.yml).
+#
+# Evidence base: full-ASan ctest on the fork VM after the L2 ODR
+# restructure (tests link libdbusqml.so exactly once): zero
+# odr-violation reports; all test binaries Totals green
+# (test_adaptor 171/171, test_dbus 95/95); the ONLY sanitizer errors are
+# LSan exit-time leaks below. Red-green: with the ODR restructure
+# reverted, ASan aborts on staticMetaObject ODR at startup.
+
+# 1. QV4 JS-heap strings leaked at QQmlEngine teardown
+# (QV4::Heap::String::simplifyString via callWithInstance from
+# DBusAdaptor::handleMessage — the frames ABOVE the leak are Qt's JS
+# engine; no dbusqml allocation owns them). Fork-VM evidence:
+# "Direct leak of 4193496 byte(s) in 12 object(s)" via
+# QV4::RuntimeHelpers::addHelper <- CallQmlContextPropertyLookup <-
+# QJSValue::callWithInstance. Qt-internal JS GC timing, not ours.
+leak:QV4::Heap::String::simplifyString
+
+# 2. QMetaObjectWrapper / ExecutionEngine::initializeGlobal /
+# QQmlEnginePrivate::init — one-time Qt type-system setup leaked at
+# exit ("Direct leak of 59086 byte(s) in 1284 object(s)" via
+# QMetaObjectWrapper::create <- ExecutionEngine::createQtObject <-
+# initializeGlobal <- QQmlEnginePrivate::init <- QQmlEngine::QQmlEngine).
+# No dbusqml frame anywhere in the stack. Qt-internal one-time init.
+leak:QV4::QMetaObjectWrapper::create
+
+# 3. QObjectPrivate::connectImpl residue via QDBusConnection::registerObject
+# ("Indirect leak of 160 byte(s)" via connectImpl <-
+# QDBusConnection::registerObject <- registerTestService <-
+# initTestCase). QtDBus connection bookkeeping outliving the test
+# binary's exit; no dbusqml allocation in the stack.
+leak:QDBusConnection::registerObject
+
+# 4. QV4::ExecutionEngine::lockObject via QQmlEnginePrivate::init
+# ("Direct leak of 14208 byte(s) in 444 object(s)" via operator new <-
+# libQt6Qml lockObject <- QQmlEnginePrivate::init <- QQmlEngine ctor).
+# Same class as (2): one-time Qt JS-engine setup leaked at exit; the
+# test frames above (createQmlAdaptor/callQmlAdaptorMethod) only
+# CONSTRUCT the engine. No dbusqml allocation owns the leaked blocks.
+leak:QV4::ExecutionEngine::lockObject
+
+# 5. QV4 compilation-unit / object-creator residue
+# (QV4::ExecutableCompilationUnit::populate <- QQmlObjectCreator::init
+# <- beginCreate <- QQmlComponent::create; QV4::Object::insertMember /
+# defineReadonlyProperty <- QV4::ExecutionEngine ctor). Per-create Qt
+# QML compiler/JS-object allocations leaked at exit (hundreds of small
+# blocks across the 170-test suite); every stack is Qt frames below the
+# test's create() call — no dbusqml allocation owns any leaked block.
+# Same evidence class as (2)/(4): Qt-internal exit-time noise.
+leak:QV4::ExecutableCompilationUnit::populate
+leak:QV4::Object::insertMember
+leak:QV4::Object::defineReadonlyProperty
+leak:QV4::Object::defineAccessorProperty
+leak:QV4::ExecutionEngine::ExecutionEngine
+leak:QV4::Heap::InternalClass::changeVTableImpl
+leak:QV4::QQmlTypeWrapper::create
+
+# 6. Test-harness temporaries retained by QtDBus machinery at exit
+# ("Direct leak of 352 byte(s) in 10 object(s)" via
+# QString::fromLatin1/fromUtf8 at test_dbusadaptor.cpp:8195 — the
+# matrixCall emitM argument temporaries; count 10 == delivered cells —
+# and the identical 176/5 report at :8141, the stashP-cell temporaries).
+# Proven converter-independent (fromLatin1→fromUtf8 keeps the identical
+# 352/10 report): the allocation is the QString DATA, whose surviving
+# owner is QtDBus's sent-message bookkeeping (message copies held past
+# exit), not any dbusqml or test owner — every named owner (QVariant
+# args, QDBusMessage locals, catcher.last signal slot) is dead at exit.
+# Same evidence class as (1)–(5): exit-time noise below OUR frames.
+# Matched family-wide (all matrix-harness temporaries share the frame).
+leak:TestDBusAdaptor::testMatrix
+leak:QV4::QObjectWrapper::wrap_slowPath
+leak:QQmlEnginePrivate::createInternalContext
+leak:QV4::Heap::InternalClass::changePrototypeImpl
+leak:QV4::QMetaObjectWrapper::constructInternal
+leak:QV4::QObjectMethod::callInternal
+leak:QQmlJavaScriptExpression::evaluate
+
+# 7. QtDBus/libdbus dispatch-path residue (dbus_connection_dispatch <-
+# Qt6DBus message pump <- QSocketNotifier::event; "Direct leak of 364
+# byte(s) in 14 object(s)" via QString::fromUtf8 inside libQt6DBus).
+# Bus I/O bookkeeping alive at exit; zero OUR frames below the QtDBus
+# frames. Same exit-time-noise class as (1)–(6).
+leak:dbus_connection_dispatch
+leak:QDBusArgument::operator>>
+leak:QDBusConnection::call
+leak:QQmlTimer::event
+leak:QQmlVMEMetaObject::writeVarProperty
+leak:QV4::ExecutableCompilationUnit::bindingValueAsString
+
+# 9. QtDBus async-delivery event residue (QObject::event <-
+# notifyInternal2 <- sendPostedEvents <- glib pump; "Direct leak of 26
+# byte(s)" via fromUtf8 inside libQt6DBus 0x48fee). The last bus event
+# in flight at exit; zero OUR frames. Same exit-noise class.
+leak:QObject::event
+leak:QDBusConnection::call
+
+# 8. Static-harness-engine V4 intern table (callQmlAdaptorMethod's
+# function-static QQmlEngine + deliberately engine-leaked adaptors —
+# "leak it to the engine (test process) — cleanup at exit", 35 call
+# sites): every dispatched methodName interned by V4 survives until
+# exit (24/26/32/34-byte QStrings: "ping", "Hang", "getColor"...).
+# Single-test proof: testWireSignatureStructReply alone leaks exactly
+# its method's 34B QString via dbusadaptor.cpp:1350 (the methodName
+# fromLatin1). TEST-HARNESS-OWNED retention by design (shared static
+# engine); zero library-side owner survives — the adaptor, message,
+# and reply are all dead at exit. Not suppressible by test frame (exit-
+# aggregated stacks bottom out in OUR dispatch frame), so the entry
+# names the mechanism; the evidence is this comment + the single-test
+# repro above.
+leak:DBusAdaptor::handleMessage

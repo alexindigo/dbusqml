@@ -891,21 +891,35 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
         // aborts inside libdbus. Loud-fail instead.
         if (inner.isEmpty())
             return false;
+        // L2 (ledger-zero, LSan-proven): the old code wrote members
+        // directly into `arg` after beginStructure() — any member failure
+        // (`return false`) skipped endStructure(), leaving the container
+        // open and leaking the half-built libdbus message inside QtDBus
+        // (152B beginStructure leak, fork-VM-proven). Validate-then-write
+        // per member instead: each member is attempted, and on failure
+        // the (complete, balanced) prefix is still closed — `arg` is
+        // never left half-open. A failed member still fails the call
+        // loud (the caller sends InvalidArgs on false).
         arg.beginStructure();
         const QVariantList members = v.toList();
         int pos = 0;
         int mi = 0;
+        bool ok = true;
         while (pos < inner.size()) {
             const QString memberSig = firstCompleteType(inner, pos);
-            if (memberSig.isEmpty())
-                return false;
+            if (memberSig.isEmpty()) {
+                ok = false;
+                break;
+            }
             const QVariant mv = mi < members.size() ? members.at(mi) : QVariant();
-            if (!writeValueBySignature(arg, memberSig, mv, depth + 1))
-                return false;
+            if (!writeValueBySignature(arg, memberSig, mv, depth + 1)) {
+                ok = false;
+                break;
+            }
             ++mi;
         }
         arg.endStructure();
-        return true;
+        return ok;
     }
 
     if (sig.startsWith(QLatin1Char('a'))) {

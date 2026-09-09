@@ -509,8 +509,9 @@ private slots:
     void testWalkerNestedVariantArray() {
         // B2: nested av — (sav) and a{sav} positions read the array, not
         // drop it (pre-fix: fall-through warning, element dropped).
-        QVariant replyArg = echoPayload(
-            QStringLiteral("(sav)"), QVariantList{QVariant("s"), QVariant(QVariantList{1, 2, 3})});
+        QVariant replyArg =
+            echoPayload(QStringLiteral("(sav)"), QVariantList{QVariant(QStringLiteral("s")),
+                                                              QVariant(QVariantList{1, 2, 3})});
         QVERIFY(replyArg.isValid());
         QVariantList members = unwrapDbus(replyArg).toList();
         QCOMPARE(members.size(), 2);

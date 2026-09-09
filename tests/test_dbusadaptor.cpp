@@ -5199,8 +5199,9 @@ void TestDBusAdaptor::testDeclaredOutArgsAndVoid() {
     QDBusMessage m = QDBusMessage::createMethodCall(
         QStringLiteral("org.dbusqml.OutArgs"), QStringLiteral("/OutArgs"),
         QStringLiteral("org.dbusqml.OutArgs"), QStringLiteral("CreateMonitor"));
-    m.setArguments({QVariant::fromValue(QDBusObjectPath(QStringLiteral("/o"))), QVariant("a"),
-                    QVariant("b"), QVariant("c")});
+    m.setArguments({QVariant::fromValue(QDBusObjectPath(QStringLiteral("/o"))),
+                    QVariant(QStringLiteral("a")), QVariant(QStringLiteral("b")),
+                    QVariant(QStringLiteral("c"))});
     QDBusMessage reply = bus.call(m, QDBus::Block, 3000);
     QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(reply.signature(), QByteArrayLiteral("u"));
@@ -5212,7 +5213,7 @@ void TestDBusAdaptor::testDeclaredOutArgsAndVoid() {
     QDBusMessage mi = QDBusMessage::createMethodCall(
         QStringLiteral("org.dbusqml.OutArgs"), QStringLiteral("/OutArgs"),
         QStringLiteral("org.dbusqml.OutArgs"), QStringLiteral("Inhibit"));
-    mi.setArguments({QVariant("screensaver")});
+    mi.setArguments({QVariant(QStringLiteral("screensaver"))});
     QDBusMessage ri = bus.call(mi, QDBus::Block, 3000);
     QCOMPARE(ri.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(ri.arguments().size(), 0);
@@ -5316,7 +5317,7 @@ void TestDBusAdaptor::testLibraryMechanismSkips() {
     QDBusMessage m = QDBusMessage::createMethodCall(
         QStringLiteral("org.dbusqml.MechSkip"), QStringLiteral("/MechSkip"),
         QStringLiteral("org.dbusqml.MechSkip"), QStringLiteral("EmitSignal"));
-    m.setArguments({QVariant("x"), QVariant(QStringList{})});
+    m.setArguments({QVariant(QStringLiteral("x")), QVariant(QStringList{})});
     QDBusMessage reply = bus.call(m, QDBus::Block, 3000);
     QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
 }
