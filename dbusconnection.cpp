@@ -1245,7 +1245,19 @@ static QVariant marshalContainerBySignature(const QString &sig, const QVariant &
 // to the wire format matching `sig`. Falls back to toDbusVariant for
 // inference when the signature is empty, "v", or unrecognized.
 QVariant marshalBySignature(const QString &sig, const QVariant &value) {
-    if (sig.isEmpty() || sig == QLatin1String("v"))
+    // CF-4: a declared top-level `v` wraps the inferred value in a real
+    // QDBusVariant (unless it already is one) — the XML advertises `v`
+    // while a bare toDbusVariant return would marshal as the value's own
+    // type. The old early-return (`sig=="v"` → toDbusVariant) made the
+    // correct wrap below unreachable. Nested-`v` behavior (writer
+    // :859-865) is unchanged.
+    if (sig == QLatin1String("v")) {
+        const QVariant inferred = toDbusVariant(value);
+        if (inferred.userType() == qMetaTypeId<QDBusVariant>())
+            return inferred;
+        return QVariant::fromValue(QDBusVariant(inferred));
+    }
+    if (sig.isEmpty())
         return toDbusVariant(value);
 
     // Explicit DBus.* wrapper types always win — the caller chose the type.
@@ -1330,7 +1342,8 @@ QVariant marshalBySignature(const QString &sig, const QVariant &value) {
         return QVariant::fromValue(arr);
     }
 
-    // Variant — wrap in QDBusVariant after unwrapping any DBus.* types.
+    // Variant — nested positions wrap after unwrapping any DBus.* types.
+    // (Top-level `v` is handled at the function head — CF-4.)
     if (sig == QLatin1String("v"))
         return QVariant::fromValue(QDBusVariant(toDbusVariant(value)));
 

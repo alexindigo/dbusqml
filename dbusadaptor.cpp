@@ -303,20 +303,25 @@ void DBusAdaptor::validateOptionSpecs() {
     for (auto it = m_options.begin(); it != m_options.end();) {
         const QString key = it.key();
         const QStringList candidates = candidateQmlNames(key);
-        const QMetaMethod *found = nullptr;
+        // CF-6: copy by value — the old `found = &m` escaped the
+        // loop-local QMetaMethod and dereferenced it after scope end
+        // (UB; found->parameterCount() at the old :319).
+        QMetaMethod found;
+        bool haveMethod = false;
         for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
             QMetaMethod m = meta->method(i);
             if (m.methodType() != QMetaMethod::Method && m.methodType() != QMetaMethod::Slot)
                 continue;
             if (candidates.contains(QString::fromLatin1(m.name()))) {
-                found = &m;
+                found = m;
+                haveMethod = true;
                 break;
             }
         }
         // Copy the arity out (found points at a loop-local copy).
         int arity = -1;
-        if (found)
-            arity = found->parameterCount();
+        if (haveMethod)
+            arity = found.parameterCount();
         if (arity <= 0) {
             qWarning("dbusqml: _options entry for %s names a method without in-args — ignored",
                      qPrintable(key));
