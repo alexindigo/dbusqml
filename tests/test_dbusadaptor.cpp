@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QProcess>
+#include <QFile>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QRegularExpression>
@@ -361,6 +362,9 @@ private slots:
     void testDeferredInterleaving();
     void testDeferredTeardown();
     void testDeferredOnceOnly();
+    // Oracle self-test: a deliberately double-sending service MUST be
+    // flagged ReceivedCount == 2 (proves the ==1 pins are not vacuous).
+    void testOracleSensitivityDoubleReply();
     void testHoldThrowErrorSettlesHeld();
     void testHoldThrowPrimitiveSettlesHeld();
     void testHoldThrowDeclaredShapeError();
@@ -1727,6 +1731,83 @@ static QDBusPendingCallWatcher *asyncCallDeferred(const QString &service, const 
     QDBusPendingCall pending = deferredCaller().asyncCall(msg);
     return new QDBusPendingCallWatcher(pending);
 }
+
+// ==================== Wire-oracle client (council CF-7 → in-suite) ====================
+//
+// The pins below drive the call THROUGH the raw-libdbus oracle process and
+// assert the reply count in the RECEIVED direction (ReceivedCount keyed by
+// reply_serial) — the wire-level exactly-one-reply evidence, not a QtDBus
+// spy count. The oracle binary is built alongside the test binaries when
+// libdbus-1 headers are present; pins QSKIP when it is absent.
+
+static QProcess *startOracle() {
+    static QProcess *proc = nullptr;
+    if (proc && proc->state() == QProcess::Running)
+        return proc;
+    const QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/oracle");
+    if (!QFile::exists(path))
+        return nullptr;
+    proc = new QProcess();
+    proc->setProgram(path);
+    proc->start();
+    if (!proc->waitForStarted(3000)) {
+        delete proc;
+        proc = nullptr;
+        return nullptr;
+    }
+    QByteArray banner;
+    for (int i = 0; i < 40 && !banner.contains("ORACLE-READY"); ++i) {
+        if (proc->waitForReadyRead(250))
+            banner += proc->readAll();
+    }
+    if (!banner.contains("ORACLE-READY")) {
+        delete proc;
+        proc = nullptr;
+        return nullptr;
+    }
+    return proc;
+}
+
+// Oracle CallAdaptor(service, path, iface, member) -> (outgoing serial,
+// replies-so-far). The oracle invokes the no-arg method synchronously and
+// reports the call serial; ReceivedCount(serial) is the live tally.
+static quint32 oracleCallAdaptor(const QString &service, const QString &path, const QString &iface,
+                                 const QString &member) {
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("/Oracle"),
+        QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("CallAdaptor"));
+    m.setArguments({service, path, iface, member});
+    const QDBusMessage r = QDBusConnection::sessionBus().call(m, QDBus::Block, 10000);
+    if (r.type() != QDBusMessage::ReplyMessage || r.arguments().size() < 2)
+        return 0;
+    return r.arguments().at(0).toUInt();
+}
+
+static quint32 oracleReceivedCount(quint32 serial) {
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("/Oracle"),
+        QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("ReceivedCount"));
+    m.setArguments({serial});
+    const QDBusMessage r = QDBusConnection::sessionBus().call(m, QDBus::Block, 5000);
+    if (r.type() != QDBusMessage::ReplyMessage || r.arguments().isEmpty())
+        return 0;
+    return r.arguments().at(0).toUInt();
+}
+
+// Sensitivity control: a service that deliberately sends TWO replies per
+// call serial. The oracle MUST report ReceivedCount == 2 for it — otherwise
+// the ==1 evidence in the pins above would be vacuous (a broken counter
+// cannot fail).
+class DoubleSendService : public QDBusVirtualObject {
+    Q_OBJECT
+public:
+    QString introspect(const QString &) const override { return {}; }
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        conn.send(msg.createReply(QStringLiteral("one")));
+        conn.send(msg.createReply(QStringLiteral("two")));
+        return true;
+    }
+};
 
 static QObject *createQmlAdaptor(const QByteArray &qmlSrc) {
     static QQmlEngine *engine = nullptr;
@@ -8237,4 +8318,28 @@ int main(int argc, char *argv[]) {
     }
     return rc;
 }
+// Council CF-7 self-test: a deliberately double-sending service MUST be
+// flagged ReceivedCount == 2. If the oracle cannot see a double-send, the
+// ==1 evidence in the CF-1/CF-2 pins proves nothing.
+void TestDBusAdaptor::testOracleSensitivityDoubleReply() {
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+
+    DoubleSendService dbl;
+    QVERIFY(
+        QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/DoubleSend"), &dbl));
+    QVERIFY(
+        QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.DoubleSend")));
+
+    const quint32 serial =
+        oracleCallAdaptor(QStringLiteral("org.dbusqml.DoubleSend"), QStringLiteral("/DoubleSend"),
+                          QStringLiteral("org.dbusqml.DoubleSend"), QStringLiteral("Ping"));
+    QVERIFY(serial != 0);
+    QTest::qWait(500); // both replies flushed
+    QCOMPARE(oracleReceivedCount(serial), 2u);
+
+    QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.DoubleSend"));
+    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/DoubleSend"));
+}
+
 #include "test_dbusadaptor.moc"

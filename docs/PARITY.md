@@ -90,8 +90,18 @@ wall-clock luck:
 Every dispatch path (sync return, throw-after-hold, held settle,
 teardown/unregister erroring) emits EXACTLY ONE reply per incoming
 message serial — asserted at the wire through the raw-libdbus oracle
-(`tests/wire-oracle/`: per-serial reply counter; not Qt marshalling
-both ways, so vacuous passes die structurally):
+(`tests/wire-oracle/`). The oracle counts BOTH directions, keyed by the
+spec's serial correlation: `ReplyCount` tallies replies the oracle
+itself emits (its own service handlers); `ReceivedCount` tallies
+replies the oracle receives as a caller (keyed by `reply_serial`) —
+the direction that actually observes an adaptor under test, via
+`CallAdaptor`. The held-reply pins in `test_dbusadaptor.cpp` drive their
+calls THROUGH the oracle process and assert `ReceivedCount == 1` after
+the settle + quiet window (and across teardown for the idempotent-hold
+pin); the oracle is not Qt marshalling both ways, so vacuous passes die
+structurally, and `testOracleSensitivityDoubleReply` (a deliberately
+double-sending in-suite service MUST read back 2) proves the `== 1`
+evidence is live:
 
 - `holdReply()` registers the held object in the dispatch context; the
   error branch settles THAT object via `sendError`, never direct-replies

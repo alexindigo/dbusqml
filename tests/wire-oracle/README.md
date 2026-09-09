@@ -2,14 +2,27 @@
 
 A Qt-free D-Bus peer (libdbus C API only): exposes `Echo` (returns its
 string arg), `Repr` (returns the call's signature string), `Ping`
-(returns "pong"), and — the point — a **per-serial reply counter**:
-every reply the oracle emits is tallied by the incoming message serial,
-queryable via `ReplyCount(serial)`.
+(returns "pong"), and — the point — two per-serial reply counters:
 
-The exactly-one-reply-per-serial invariant (§6.3, PARITY.md axiom) is
-asserted THROUGH this oracle: it is not Qt marshalling both ways, so it
-kills vacuous-pass classes structurally (a double-reply or a swallow
-shows up as count != 1 for that serial).
+- `ReplyCount(serial)` — replies EMITTED by this oracle for an incoming
+  call serial (the oracle's own service-handler direction; tallied in
+  the Echo/Repr/Ping handlers). The pre-CF-7 contract, unchanged.
+- `ReceivedCount(serial)` — replies RECEIVED by this oracle for one of
+  its own outgoing call serials (the caller direction; tallied by the
+  filter on every arriving METHOD_RETURN/METHOD_ERROR, keyed by the
+  spec's `reply_serial` correlation header). This is the direction that
+  observes an adaptor under test.
+
+Caller mode: `CallAdaptor(service, path, iface, member) -> (serial,
+got)` invokes the named (no-arg) adaptor method synchronously and
+reports the outgoing serial; the harness then polls
+`ReceivedCount(serial)` — 1 = exactly-one-reply, 0 = swallow, 2 =
+double-reply. `DoubleSend(service, path, iface, member) -> (a, b)`
+makes two sequential calls for control legs. Sensitivity self-test: run
+`CallAdaptor` against a deliberately double-replying service (two
+METHOD_RETURNs for one serial) and assert `ReceivedCount == 2` — if the
+oracle cannot see a deliberate double-send, its `== 1` evidence is
+vacuous. Verified 2026-09-09: double-sender → 2, well-behaved Ping → 1.
 
 Build: `cmake -S tests/wire-oracle -B build-oracle` (needs libdbus-1
 dev headers; NOT part of the default build — the main suite must stay

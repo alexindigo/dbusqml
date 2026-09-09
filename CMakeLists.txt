@@ -204,6 +204,26 @@ if(BUILD_TEST_MODE)
     target_include_directories(payload_echo_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(payload_echo_service PRIVATE Qt6::Core Qt6::Qml Qt6::DBus dbusqml)
 
+    # Wire oracle (council CF-7): the raw-libdbus peer the exactly-one-reply
+    # pins assert through. Built only when libdbus-1 headers are present;
+    # the pins QSKIP when the binary is absent (CI images carry
+    # libdbus-1-dev — tests/wire-oracle/README.md).
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(DBUS1 QUIET dbus-1)
+        if(DBUS1_FOUND)
+            enable_language(C)
+            add_executable(oracle tests/wire-oracle/oracle.c)
+            set_target_properties(oracle PROPERTIES AUTOMOC OFF)
+            # The oracle is the measurement peer, not the code under test:
+            # never sanitizer-instrument it, even inside sanitizer builds.
+            target_compile_options(oracle PRIVATE -fno-sanitize=all)
+            target_link_options(oracle PRIVATE -fno-sanitize=all)
+            target_include_directories(oracle PRIVATE ${DBUS1_INCLUDE_DIRS})
+            target_link_libraries(oracle PRIVATE ${DBUS1_LIBRARIES})
+        endif()
+    endif()
+
     add_test(NAME test_types COMMAND test_types)
     add_test(NAME test_introspect COMMAND test_introspect)
     add_test(NAME test_adaptor COMMAND dbus-run-session -- $<TARGET_FILE:test_adaptor>)
