@@ -764,7 +764,7 @@ QMetaType signatureSlotForSignature(const QString &sig) {
 // after registerCustomType), so container shapes are mapped explicitly — and
 // anything left over mints a signature-slot pool assignment (F1/B9), so every
 // well-formed element signature is producible.
-static QMetaType metaTypeForSignature(const QString &sig) {
+QMetaType metaTypeForSignature(const QString &sig) {
     QMetaType mt = QDBusMetaType::signatureToMetaType(sig.toUtf8().constData());
     if (mt.isValid())
         return mt;
@@ -777,6 +777,238 @@ static QMetaType metaTypeForSignature(const QString &sig) {
     if (sig == QLatin1String("h"))
         return QMetaType::fromType<QDBusUnixFileDescriptor>();
     return signatureSlotForSignature(sig);
+}
+
+// Forward declaration — mutual recursion between writeProbe/appendStaged
+// and metaTypeForSignature (CF-9 staging helpers below).
+QMetaType metaTypeForSignature(const QString &sig);
+
+// CF-9: close-on-fail staging helpers. A bare `return false` between
+// beginMap/beginArray and endMap/endArray leaves the QDBusArgument
+// half-open (the L2 leak class LSan proved for structs). Container
+// branches therefore PROBE first — writeProbe is pure (never touches
+// `arg`) and returns the elements in final streaming form, or an
+// invalid QVariant when unproducible — and only begin the container
+// when every element probed valid. appendStaged then streams
+// pre-validated input and cannot fail. Basic-type probes mirror the
+// streaming expressions in writeValueBySignature exactly.
+static QVariant writeProbe(const QString &sig, const QVariant &value, int depth) {
+    if (depth > 32)
+        return {};
+    const QVariant v = toDbusVariant(value);
+    if (sig == QLatin1String("y"))
+        return QVariant::fromValue(static_cast<uchar>(v.toUInt()));
+    if (sig == QLatin1String("b"))
+        return QVariant::fromValue(v.toBool());
+    if (sig == QLatin1String("n"))
+        return QVariant::fromValue(static_cast<short>(v.toInt()));
+    if (sig == QLatin1String("q"))
+        return QVariant::fromValue(static_cast<ushort>(v.toUInt()));
+    if (sig == QLatin1String("i"))
+        return QVariant::fromValue(v.toInt());
+    if (sig == QLatin1String("u"))
+        return QVariant::fromValue(v.toUInt());
+    if (sig == QLatin1String("x"))
+        return QVariant::fromValue(static_cast<qint64>(v.toLongLong()));
+    if (sig == QLatin1String("t"))
+        return QVariant::fromValue(static_cast<quint64>(v.toULongLong()));
+    if (sig == QLatin1String("d"))
+        return QVariant::fromValue(v.toDouble());
+    if (sig == QLatin1String("s"))
+        return QVariant::fromValue(v.toString());
+    if (sig == QLatin1String("o"))
+        return QVariant::fromValue(QDBusObjectPath(v.toString()));
+    if (sig == QLatin1String("g"))
+        return QVariant::fromValue(QDBusSignature(v.toString()));
+    if (sig == QLatin1String("h")) {
+        if (!v.canConvert<int>())
+            return {};
+        QDBusUnixFileDescriptor fd(v.toInt());
+        if (!fd.isValid())
+            return {};
+        return QVariant::fromValue(v.toInt());
+    }
+    if (sig == QLatin1String("v")) {
+        if (v.userType() == qMetaTypeId<QDBusVariant>())
+            return v;
+        return QVariant::fromValue(QDBusVariant(v));
+    }
+    if (sig == QLatin1String("ay")) {
+        if (v.userType() == QMetaType::QString)
+            return QVariant::fromValue(v.toString().toUtf8());
+        if (v.userType() == qMetaTypeId<QVariantList>()) {
+            QByteArray bytes;
+            const QVariantList list = v.toList();
+            bytes.reserve(list.size());
+            for (const QVariant &b : list)
+                bytes.append(static_cast<char>(b.toInt()));
+            return QVariant::fromValue(bytes);
+        }
+        return QVariant::fromValue(v.toByteArray());
+    }
+    if (sig == QLatin1String("as"))
+        return QVariant::fromValue(v.toStringList());
+    if (sig.startsWith(QLatin1Char('('))) {
+        const QString inner = sig.mid(1, sig.size() - 2);
+        if (inner.isEmpty())
+            return {};
+        const QVariantList members = v.toList();
+        QVariantList staged;
+        int pos = 0;
+        int mi = 0;
+        while (pos < inner.size()) {
+            const QString memberSig = firstCompleteType(inner, pos);
+            if (memberSig.isEmpty())
+                return {};
+            const QVariant mv = mi < members.size() ? members.at(mi) : QVariant();
+            const QVariant p = writeProbe(memberSig, mv, depth + 1);
+            if (!p.isValid())
+                return {};
+            staged << p;
+            ++mi;
+        }
+        return QVariant::fromValue(staged);
+    }
+    if (sig.startsWith(QLatin1Char('a'))) {
+        const QString elemSig = sig.mid(1);
+        if (elemSig.startsWith(QLatin1Char('{'))) {
+            int pos = 1;
+            const QString keySig = firstCompleteType(elemSig, pos);
+            const QString valSig = firstCompleteType(elemSig, pos);
+            if (keySig.isEmpty() || valSig.isEmpty())
+                return {};
+            if (!metaTypeForSignature(keySig).isValid() || !metaTypeForSignature(valSig).isValid())
+                return {};
+            const QVariantMap map = v.toMap();
+            QVariantList staged;
+            for (auto it = map.begin(); it != map.end(); ++it) {
+                const QVariant kp = writeProbe(keySig, QVariant(it.key()), depth + 1);
+                const QVariant vp = writeProbe(valSig, it.value(), depth + 1);
+                if (!kp.isValid() || !vp.isValid())
+                    return {};
+                staged << QVariant::fromValue(QVariantList{kp, vp});
+            }
+            return QVariant::fromValue(staged);
+        }
+        if (!metaTypeForSignature(elemSig).isValid())
+            return {};
+        const QVariantList list = v.toList();
+        QVariantList staged;
+        for (const QVariant &e : list) {
+            const QVariant p = writeProbe(elemSig, e, depth + 1);
+            if (!p.isValid())
+                return {};
+            staged << p;
+        }
+        return QVariant::fromValue(staged);
+    }
+    return {};
+}
+
+static void appendStaged(QDBusArgument &arg, const QString &sig, const QVariant &staged) {
+    if (sig == QLatin1String("y")) {
+        arg << static_cast<uchar>(staged.toUInt());
+        return;
+    }
+    if (sig == QLatin1String("b")) {
+        arg << staged.toBool();
+        return;
+    }
+    if (sig == QLatin1String("n")) {
+        arg << static_cast<short>(staged.toInt());
+        return;
+    }
+    if (sig == QLatin1String("q")) {
+        arg << static_cast<ushort>(staged.toUInt());
+        return;
+    }
+    if (sig == QLatin1String("i")) {
+        arg << staged.toInt();
+        return;
+    }
+    if (sig == QLatin1String("u")) {
+        arg << staged.toUInt();
+        return;
+    }
+    if (sig == QLatin1String("x")) {
+        arg << static_cast<qint64>(staged.toLongLong());
+        return;
+    }
+    if (sig == QLatin1String("t")) {
+        arg << static_cast<quint64>(staged.toULongLong());
+        return;
+    }
+    if (sig == QLatin1String("d")) {
+        arg << staged.toDouble();
+        return;
+    }
+    if (sig == QLatin1String("s")) {
+        arg << staged.toString();
+        return;
+    }
+    if (sig == QLatin1String("o")) {
+        arg << QDBusObjectPath(staged.toString());
+        return;
+    }
+    if (sig == QLatin1String("g")) {
+        arg << QDBusSignature(staged.toString());
+        return;
+    }
+    if (sig == QLatin1String("h")) {
+        arg << QDBusUnixFileDescriptor(staged.toInt());
+        return;
+    }
+    if (sig == QLatin1String("v")) {
+        arg << staged.value<QDBusVariant>();
+        return;
+    }
+    if (sig == QLatin1String("ay")) {
+        arg << staged.toByteArray();
+        return;
+    }
+    if (sig == QLatin1String("as")) {
+        arg << staged.toStringList();
+        return;
+    }
+    if (sig.startsWith(QLatin1Char('('))) {
+        const QString inner = sig.mid(1, sig.size() - 2);
+        const QVariantList members = staged.toList();
+        int pos = 0;
+        int mi = 0;
+        arg.beginStructure();
+        while (pos < inner.size()) {
+            const QString memberSig = firstCompleteType(inner, pos);
+            appendStaged(arg, memberSig, members.at(mi));
+            ++mi;
+        }
+        arg.endStructure();
+        return;
+    }
+    if (sig.startsWith(QLatin1Char('a'))) {
+        const QString elemSig = sig.mid(1);
+        if (elemSig.startsWith(QLatin1Char('{'))) {
+            int pos = 1;
+            const QString keySig = firstCompleteType(elemSig, pos);
+            const QString valSig = firstCompleteType(elemSig, pos);
+            arg.beginMap(metaTypeForSignature(keySig), metaTypeForSignature(valSig));
+            const QVariantList staged_entries = staged.toList();
+            for (const QVariant &e : staged_entries) {
+                const QVariantList kv = e.toList();
+                arg.beginMapEntry();
+                appendStaged(arg, keySig, kv.at(0));
+                appendStaged(arg, valSig, kv.at(1));
+                arg.endMapEntry();
+            }
+            arg.endMap();
+            return;
+        }
+        arg.beginArray(metaTypeForSignature(elemSig));
+        const QVariantList staged_elems = staged.toList();
+        for (const QVariant &e : staged_elems)
+            appendStaged(arg, elemSig, e);
+        arg.endArray();
+        return;
+    }
 }
 
 // Recursive signature walker: append `value` marshaled as `sig` into a
@@ -934,14 +1166,32 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
             const QMetaType vMt = metaTypeForSignature(valSig);
             if (!kMt.isValid() || !vMt.isValid())
                 return false;
-            arg.beginMap(kMt, vMt);
+            // CF-9: close-on-fail like the struct branch above — a bare
+            // `return false` between beginMap and endMap leaves the
+            // QDBusArgument half-open (same L2 leak class LSan proved for
+            // structs). Validate-then-commit per entry instead: element
+            // failures accumulate into `ok` and the complete entries are
+            // still closed — `arg` is never left half-open.
             const QVariantMap map = v.toMap();
+            QVector<QPair<QVariant, QVariant>> staged;
+            staged.reserve(map.size());
+            bool ok = true;
             for (auto it = map.begin(); it != map.end(); ++it) {
+                const QVariant kv = writeProbe(keySig, QVariant(it.key()), depth + 1);
+                const QVariant vv = writeProbe(valSig, it.value(), depth + 1);
+                if (!kv.isValid() || !vv.isValid()) {
+                    ok = false;
+                    break;
+                }
+                staged.append({kv, vv});
+            }
+            if (!ok)
+                return false;
+            arg.beginMap(kMt, vMt);
+            for (const auto &e : staged) {
                 arg.beginMapEntry();
-                if (!writeValueBySignature(arg, keySig, QVariant(it.key()), depth + 1))
-                    return false;
-                if (!writeValueBySignature(arg, valSig, it.value(), depth + 1))
-                    return false;
+                appendStaged(arg, keySig, e.first);
+                appendStaged(arg, valSig, e.second);
                 arg.endMapEntry();
             }
             arg.endMap();
@@ -950,12 +1200,22 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
         const QMetaType eMt = metaTypeForSignature(elemSig);
         if (!eMt.isValid())
             return false;
-        arg.beginArray(eMt);
-        const QVariantList list = v.toList();
-        for (const QVariant &e : list) {
-            if (!writeValueBySignature(arg, elemSig, e, depth + 1))
-                return false;
+        // CF-9: same close-on-fail discipline for arrays — stage every
+        // element first; only beginArray when all are producible.
+        QVector<QVariant> staged;
+        {
+            const QVariantList list = v.toList();
+            staged.reserve(list.size());
+            for (const QVariant &e : list) {
+                const QVariant se = writeProbe(elemSig, e, depth + 1);
+                if (!se.isValid())
+                    return false;
+                staged.append(se);
+            }
         }
+        arg.beginArray(eMt);
+        for (const QVariant &se : staged)
+            appendStaged(arg, elemSig, se);
         arg.endArray();
         return true;
     }
