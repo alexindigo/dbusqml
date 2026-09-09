@@ -605,10 +605,20 @@ QVariant toDbusVariantNested(const QVariant &v) {
 
 // Parse one complete D-Bus type from `sig` starting at `pos`.
 // Returns the type's signature substring and advances pos past it.
-// Returns empty on parse failure.
-QString firstCompleteType(const QString &sig, int &pos) {
+// Returns empty on parse failure. CF-3: the 'a' branch recursed
+// uncapped — peer introspection XML flows verbatim into this walker,
+// so a 200k-deep "a…a" crashed the process (SIGSEGV, fork-VM-proven).
+// Depth-capped at 32 like every other walker (loud-fail, same message
+// shape); isStrictSignature (cap 64→32 per CF-18) is the second gate
+// at slot-mint time, and writeBySignature re-checks strictness per
+// the PARITY §2 plan note.
+QString firstCompleteType(const QString &sig, int &pos, int depth) {
     if (pos >= sig.size())
         return {};
+    if (depth > 32) {
+        qWarning("dbusqml: firstCompleteType: recursion depth cap (32) exceeded — failing loud");
+        return {};
+    }
     int start = pos;
     QChar c = sig.at(pos);
 
@@ -621,7 +631,7 @@ QString firstCompleteType(const QString &sig, int &pos) {
     if (c == QLatin1Char('a')) {
         // Array — 'a' followed by one complete type
         ++pos;
-        QString elem = firstCompleteType(sig, pos);
+        QString elem = firstCompleteType(sig, pos, depth + 1);
         if (elem.isEmpty())
             return {};
         // Dict entry shorthand: a{KV} — the {KV} is one element type
@@ -683,12 +693,17 @@ const std::array<QMetaType, SignatureSlotPoolSize + 1> &signatureSlotTypes() {
         makeSignatureSlotTypes(std::make_integer_sequence<int, SignatureSlotPoolSize + 1>());
     return types;
 }
+} // namespace
 
 // Strict single-type validation: recursive descent over every char (basic
-// type codes only, containers balanced and non-empty). Depth-capped —
-// signatures can arrive from peer introspection XML.
-bool isStrictSignature(const QString &sig, int &pos, int depth = 0) {
-    if (depth > 64 || pos >= sig.size())
+// type codes only, containers balanced and non-empty). Depth-capped at 32
+// (CF-18: was 64 while the walkers cap at 32 — shapes at depth 33..64
+// passed validation but could never marshal, burning process-global
+// signature slots; CF-3: this is the second gate on the walker path).
+// Signatures can arrive from peer introspection XML. Exported via
+// dbusconnection.h for the fuzzer (CF-24).
+bool isStrictSignature(const QString &sig, int &pos, int depth) {
+    if (depth > 32 || pos >= sig.size())
         return false;
     const QChar c = sig.at(pos++);
     if (QStringLiteral("ybnqiuxtdhsogv").contains(c))
@@ -724,7 +739,6 @@ bool isStrictSignature(const QString &sig, int &pos, int depth = 0) {
     }
     return false;
 }
-} // namespace
 
 QMetaType signatureSlotForSignature(const QString &sig) {
     // Strict validation BEFORE touching Qt's registry: firstCompleteType is
@@ -1403,7 +1417,13 @@ QVariant writeBySignature(const QString &sig, const QVariant &value) {
     // signature libdbus rejects with an assertion abort (remotely triggerable
     // via variant(x, sig) — the 0.5.2-era crash class on the reply path).
     // Loud-fail to the caller instead, which falls back to inference.
+    // CF-3/CF-18: strictness is the depth gate — isStrictSignature caps
+    // nesting at 32 (walkers can never marshal deeper), so unmarshalable
+    // shapes die here before reaching the slot pool or the walker.
     if (sig.isEmpty())
+        return QVariant();
+    int spos = 0;
+    if (!isStrictSignature(sig, spos) || spos != sig.size())
         return QVariant();
     int pos = 0;
     if (firstCompleteType(sig, pos) != sig || pos != sig.size())

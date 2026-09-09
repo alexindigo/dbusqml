@@ -3,70 +3,36 @@
 // + the recursive walkers — pathological nesting must fail loud (depth
 // cap), never exhaust the stack.
 //
-// NOTE: this is a TU-local copy of firstCompleteType (dbusconnection.cpp)
-// — the real TU drags moc/pending-reply/catalog link deps. The copy is
-// verified identical by construction (same algorithm, pure string walk);
-// any divergence fails the seed-corpus run, not silently.
+// CF-24: this TU links the REAL firstCompleteType from dbusconnection.cpp
+// (declared in dbusconnection.h) — the old TU-local copy ("identical by
+// construction") could drift from the crashing function without any test
+// noticing. The only TU-local logic left is the libFuzzer entry shim.
 #include <QByteArray>
 #include <QString>
 
-static QString fuzzFirstCompleteType(const QString &sig, int &pos) {
-    if (pos >= sig.size())
-        return {};
-    int start = pos;
-    QChar c = sig.at(pos);
-    if (QStringLiteral("ybnqiuxtdhsogv").contains(c)) {
-        ++pos;
-        return sig.mid(start, 1);
-    }
-    if (c == QLatin1Char('a')) {
-        ++pos;
-        QString elem = fuzzFirstCompleteType(sig, pos);
-        if (elem.isEmpty())
-            return {};
-        return sig.mid(start, pos - start);
-    }
-    if (c == QLatin1Char('(')) {
-        int depth = 1;
-        ++pos;
-        while (pos < sig.size() && depth > 0) {
-            if (sig.at(pos) == QLatin1Char('('))
-                ++depth;
-            else if (sig.at(pos) == QLatin1Char(')'))
-                --depth;
-            ++pos;
-        }
-        if (depth != 0)
-            return {};
-        return sig.mid(start, pos - start);
-    }
-    if (c == QLatin1Char('{')) {
-        int depth = 1;
-        ++pos;
-        while (pos < sig.size() && depth > 0) {
-            if (sig.at(pos) == QLatin1Char('{'))
-                ++depth;
-            else if (sig.at(pos) == QLatin1Char('}'))
-                --depth;
-            ++pos;
-        }
-        if (depth != 0)
-            return {};
-        return sig.mid(start, pos - start);
-    }
-    return {};
-}
+#include "dbusconnection.h"
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 static int runOne(const uint8_t *data, size_t size) {
-    if (size == 0 || size > 1024)
+    // CF-24: 1 MB ceiling — the CF-3 crash needs ~200k of 'a's; the old
+    // 1024-byte cap could never reach it.
+    if (size == 0 || size > 1048576)
         return 0;
     const QString sig =
         QString::fromUtf8(QByteArray::fromRawData(reinterpret_cast<const char *>(data), int(size)));
+    // The REAL walker (linked from dbusconnection.cpp) — a depth-cap
+    // breach must return empty, never crash. Follow with the strict gate
+    // and the full writeBySignature marshal, mirroring the production
+    // introspection→marshal chain (parse→marshal trust crossing).
     int pos = 0;
-    const QString t = fuzzFirstCompleteType(sig, pos);
+    const QString t = firstCompleteType(sig, pos);
     (void)t.size();
     (void)pos;
+    int spos = 0;
+    if (isStrictSignature(sig, spos) && spos == sig.size()) {
+        const QVariant m = writeBySignature(sig, QVariant());
+        (void)m.isValid();
+    }
     return 0;
 }
 

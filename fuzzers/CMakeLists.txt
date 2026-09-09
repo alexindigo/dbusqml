@@ -23,15 +23,41 @@ endif()
 # it. The demarshal path sits behind libdbus validation (all seats);
 # catalog XML is local trust (malformed-input qtests only).
 #
-# firstCompleteType lives in dbusconnection.cpp, which drags the whole
-# connection TU (moc, pending-reply, catalog...). Instead of linking the
-# TU, the signature fuzzer compiles a TU-local copy (see below) — the
-# function is 60 lines of pure string walking with no dependencies.
+# CF-24: the signature fuzzer links the REAL dbusconnection.cpp TU
+# (firstCompleteType/isStrictSignature/writeBySignature) instead of a
+# TU-local copy — the old "identical by construction" copy could drift
+# from the crashing function without any test noticing. The TU drags
+# the adaptor/catalog/dispatcher link deps; that is the price of
+# fuzzing the real symbol.
 
 add_executable(fuzz_introspection_xml fuzz_introspection_xml.cpp
-               ../dbusintrospection.cpp)
+               ../dbusintrospection.cpp
+               ../dbusconnection.cpp
+               ../dbusmessage.cpp
+               ../dbuspendingreply.cpp
+               ../dbuscatalog.cpp
+               ../dbuspathdispatcher.cpp
+               ../dbustypes.cpp
+               ../dbusadaptor.cpp
+               ../dbusutils.cpp
+               ../dbusheldreply.cpp
+               ../dbuserror.h
+               ../dbusmessage.h)
 target_include_directories(fuzz_introspection_xml PRIVATE ..)
 target_link_libraries(fuzz_introspection_xml PRIVATE Qt6::Core Qt6::DBus Qt6::Qml)
 
-add_executable(fuzz_signature fuzz_signature.cpp)
-target_link_libraries(fuzz_signature PRIVATE Qt6::Core)
+add_executable(fuzz_signature fuzz_signature.cpp
+               ../dbusconnection.cpp
+               ../dbusmessage.cpp
+               ../dbuspendingreply.cpp
+               ../dbuscatalog.cpp
+               ../dbuspathdispatcher.cpp
+               ../dbustypes.cpp
+               ../dbusadaptor.cpp
+               ../dbusutils.cpp
+               ../dbusheldreply.cpp
+               ../dbusintrospection.cpp
+               ../dbuserror.h
+               ../dbusmessage.h)
+target_include_directories(fuzz_signature PRIVATE ..)
+target_link_libraries(fuzz_signature PRIVATE Qt6::Core Qt6::DBus Qt6::Qml)

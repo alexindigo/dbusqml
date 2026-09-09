@@ -21,8 +21,14 @@ QVariant toDbusVariantNested(const QVariant &v);
 // Parse one complete D-Bus type from `sig` starting at `pos`. Returns the
 // type's signature substring and advances pos past it. Returns empty on parse
 // failure. Used to split concatenated signatures (override strings, catalog
-// out-arg lists) into per-argument signatures.
-QString firstCompleteType(const QString &sig, int &pos);
+// out-arg lists) into per-argument signatures. CF-3: depth-capped at 32
+// (peer XML flows verbatim into this walker).
+QString firstCompleteType(const QString &sig, int &pos, int depth = 0);
+
+// Strict single-type validation: recursive descent, depth-capped at 32
+// (CF-18). Exported for the signature fuzzer (CF-24) and the
+// writeBySignature depth gate (CF-3).
+bool isStrictSignature(const QString &sig, int &pos, int depth = 0);
 
 // Marshal a JS-supplied QVariant against a known D-Bus signature.
 // Produces a QVariant with the correct C++ type for QtDBus to marshal
@@ -30,7 +36,6 @@ QString firstCompleteType(const QString &sig, int &pos);
 // over the signature. Falls back to toDbusVariant when sig is empty or
 // unrecognized.
 QVariant marshalBySignature(const QString &sig, const QVariant &value);
-
 // Generic signature-walking marshaller. Builds a writable QDBusArgument for
 // any producible D-Bus signature via public QtDBus primitives and returns it
 // wrapped in a QVariant (cross-marshaled by QtDBus as a request or reply
