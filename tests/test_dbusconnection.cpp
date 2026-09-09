@@ -729,6 +729,31 @@ private slots:
         bus->asyncCall(msg, QJSValue(), QJSValue());
     }
 
+    // CF-11 pin: N looped promise-style calls leave zero DBusPendingReply
+    // children on the immortal connection (pre-fix: unbounded growth —
+    // every call leaked one parented reply).
+    void testAsyncCallPromiseNoLeak() {
+        auto *bus = new SessionBusConnection(this);
+        const int before = bus->findChildren<DBusPendingReply *>().size();
+
+        DBusMessage msg;
+        msg.setService("org.freedesktop.DBus");
+        msg.setPath("/org/freedesktop/DBus");
+        msg.setIface("org.freedesktop.DBus");
+        msg.setMember("NameHasOwner");
+        msg.setArguments({QVariant(QStringLiteral("org.freedesktop.DBus"))});
+
+        QQmlEngine engine;
+        for (int i = 0; i < 10; ++i) {
+            QJSValue done = engine.evaluate(QStringLiteral("(function(v){})"));
+            bus->asyncCall(msg, done, QJSValue());
+        }
+        // All ten settle (daemon answers NameHasOwner in ms) and are
+        // deleteLater'd — pump the loop, then the count is back at baseline.
+        QTRY_COMPARE_WITH_TIMEOUT(bus->findChildren<DBusPendingReply *>().size(), 0, 5000);
+        delete bus;
+    }
+
     void testDBusPendingReplyNoWatcher() {
         auto *reply = new DBusPendingReply(this);
         QCOMPARE(reply->isError(), true);

@@ -1620,6 +1620,11 @@ void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resol
     QPointer<QQmlEngine> engine = qmlEngine(this);
     connect(reply, &DBusPendingReply::finished, this,
             [reply, resolve = QJSValue(resolve), reject = QJSValue(reject), engine]() mutable {
+                // CF-11: the promise settled — the reply's job is done.
+                // deleteLater (not delete: we are inside its signal).
+                // The returned-pointer overload below keeps
+                // caller-managed ownership (D1, owner-vetoable at V1).
+                reply->deleteLater();
                 // P6: user callbacks run in the JS world — a thrown
                 // exception from one is a QJSValue result, not a crash, but
                 // dropping it silently violates the loud contract.

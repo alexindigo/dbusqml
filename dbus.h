@@ -158,7 +158,10 @@ private:
     int m_callTimeout = -1;
     // A3/D3: re-Get invalidated property names after a PropertiesChanged
     // carrying invalidated_properties (stale kept + one warning on error).
+    // CF-10: each in-flight re-fetch carries a generation epoch — a stale
+    // reply arriving after a repoint or a newer value is dropped.
     void refetchInvalidated(const QStringList &names);
+    quint64 m_refetchEpoch = 0;
 
     // Idempotent service-watcher readiness: create-or-rewire on the CURRENT
     // bus and (re-)run the initial NameHasOwner check. Safe from any entry
@@ -215,8 +218,13 @@ private:
         // the prior value it must restore on error (the fresh-call
         // lambdas carry these as captures; the chained path has no
         // lambda, so it carries them here).
+        // CF-15: destination identity snapshot — a repoint mid-queue
+        // must not fire the queued write at the NEW service.
         QString qmlKey;
         QVariant prior;
+        QString service;
+        QString path;
+        QString iface;
     };
     QHash<QString, PendingSet> m_pendingSets;
     void finishPendingGet(const QString &dbusName, const QDBusMessage &reply);

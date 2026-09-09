@@ -527,7 +527,10 @@ DBusPendingReply *DBusProxy::getProperty(const QString &name) {
 
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Get");
-    msg.setArguments({m_iface, name});
+    // CF-17: send the WIRE name (not the QML name) — with an
+    // introspected Version/version split the QML name fails where the
+    // wire name succeeds. Coalescing above already keys on wireName.
+    msg.setArguments({m_iface, wireName});
 
     auto pending = m_bus.asyncCall(msg, m_callTimeout);
     auto watcher = new QDBusPendingCallWatcher(pending, this);
@@ -608,11 +611,16 @@ void DBusProxy::setProperty(const QString &name, const QVariant &value) {
     auto *watcher = new QDBusPendingCallWatcher(call, this);
     // P9: the fresh wire call registers its pending-Set record (the
     // latest-wins queue entry other overlapping writes collapse into).
+    // CF-15: snapshot the destination — the drain below sends to THESE,
+    // never to the live (possibly repointed) members.
     PendingSet ps;
     ps.watcher = watcher;
     ps.latestValue = converted;
     ps.qmlKey = name;
     ps.prior = prior;
+    ps.service = m_service;
+    ps.path = m_path;
+    ps.iface = m_iface;
     m_pendingSets.insert(wireName, ps);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
             [this, name, wireName, prior](QDBusPendingCallWatcher *w) {
@@ -714,6 +722,9 @@ QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
     ps.latestValue = converted;
     ps.qmlKey = key;
     ps.prior = prior;
+    ps.service = m_service;
+    ps.path = m_path;
+    ps.iface = m_iface;
     m_pendingSets.insert(dbusName, ps);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
             [this, key, dbusName, prior](QDBusPendingCallWatcher *w) {
@@ -751,9 +762,12 @@ void DBusProxy::finishPendingSet(const QString &dbusName, const QDBusMessage &re
     m_pendingSets.erase(it);
     if (!ps.queued)
         return;
-    QDBusMessage msg =
-        QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
-    msg.setArguments({m_iface, dbusName, QVariant::fromValue(QDBusVariant(ps.latestValue))});
+    // CF-15: drain to the SNAPSHOT destination, not the live members — a
+    // repoint between queue and drain must not cross-fire the queued
+    // value at the new service.
+    QDBusMessage msg = QDBusMessage::createMethodCall(ps.service, ps.path,
+                                                      "org.freedesktop.DBus.Properties", "Set");
+    msg.setArguments({ps.iface, dbusName, QVariant::fromValue(QDBusVariant(ps.latestValue))});
     QDBusPendingCall call = m_bus.asyncCall(msg, m_callTimeout);
     auto *watcher = new QDBusPendingCallWatcher(call, this);
     PendingSet ps2;
@@ -761,6 +775,9 @@ void DBusProxy::finishPendingSet(const QString &dbusName, const QDBusMessage &re
     ps2.latestValue = ps.latestValue;
     ps2.qmlKey = ps.qmlKey;
     ps2.prior = ps.prior;
+    ps2.service = ps.service;
+    ps2.path = ps.path;
+    ps2.iface = ps.iface;
     m_pendingSets.insert(dbusName, ps2);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
             [this, dbusName](QDBusPendingCallWatcher *w) {
@@ -1027,24 +1044,35 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
 
 // A3/D3: re-Get invalidated property names. Success → the fresh value is
 // inserted; error → the stale value is kept and one warning is emitted.
+// CF-10: the in-flight call snapshots destination identity (service, path,
+// iface) plus a generation epoch — a stale reply that arrives after a
+// repoint or a newer PropertiesChanged value is dropped instead of
+// overwriting the new context (cross-iface contamination, lost flips).
 void DBusProxy::refetchInvalidated(const QStringList &names) {
     for (const QString &wireName : names) {
         const QString service = m_service;
+        const QString path = m_path;
+        const QString iface = m_iface;
+        const quint64 epoch = ++m_refetchEpoch;
         QDBusMessage msg = QDBusMessage::createMethodCall(m_service, m_path,
                                                           "org.freedesktop.DBus.Properties", "Get");
         msg.setArguments({m_iface, wireName});
         auto pending = m_bus.asyncCall(msg, m_callTimeout);
         auto *watcher = new QDBusPendingCallWatcher(pending, this);
         connect(watcher, &QDBusPendingCallWatcher::finished, this,
-                [this, wireName, service](QDBusPendingCallWatcher *w) {
+                [this, wireName, service, path, iface, epoch](QDBusPendingCallWatcher *w) {
                     QDBusPendingReply<QVariant> reply = *w;
                     if (reply.isError()) {
                         qWarning("dbusqml: re-fetch of %s after invalidation failed: %s",
                                  qPrintable(wireName), qPrintable(reply.error().message()));
-                    } else if (service == m_service) {
+                    } else if (epoch == m_refetchEpoch && service == m_service && path == m_path &&
+                               iface == m_iface) {
                         const QString qmlName = dbusPropToQml(wireName);
                         m_qmlToDbusName.insert(qmlName, wireName);
                         insert(qmlName, unwrapDbus(reply.value()));
+                    } else {
+                        qWarning("dbusqml: dropping stale re-fetch of %s (destination changed)",
+                                 qPrintable(wireName));
                     }
                     w->deleteLater();
                 });

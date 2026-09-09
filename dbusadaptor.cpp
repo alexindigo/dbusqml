@@ -1814,17 +1814,46 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
             return;
         }
         if (outTypes.size() == 1) {
-            checkedSend(msg.createReply({marshalBySignature(outTypes.first(), value)}),
-                        "method reply");
+            // CF-8: guard the value that is ACTUALLY sent, not just the
+            // pre-marshal one. Declared h/o/g coercion happens inside
+            // marshalBySignature AFTER the guard above — an invalid fd
+            // (-1) or a malformed object path / signature would otherwise
+            // hit libdbus unguarded (the B4 comment at the h-branch claims
+            // the boundary rejects it, but the boundary already ran).
+            QVariant coerced = marshalBySignature(outTypes.first(), value);
+            if (!wireMarshalable(coerced)) {
+                qWarning("dbusqml: reply for %s cannot produce declared type '%s' — sending error "
+                         "reply",
+                         qPrintable(member), qPrintable(outTypes.first()));
+                checkedSend(
+                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                                         QStringLiteral("Reply value is not marshalable")),
+                    "error reply");
+                return;
+            }
+            checkedSend(msg.createReply({coerced}), "method reply");
             return;
         }
         if (outTypes.size() > 1) {
             // Multi-out: the method returned a list of out values.
+            // CF-8: same post-coercion guard per element.
             const QVariantList values = value.toList();
             QVariantList reply;
-            for (int i = 0; i < outTypes.size(); ++i)
-                reply << marshalBySignature(outTypes.at(i),
-                                            i < values.size() ? values.at(i) : QVariant());
+            for (int i = 0; i < outTypes.size(); ++i) {
+                QVariant coerced = marshalBySignature(
+                    outTypes.at(i), i < values.size() ? values.at(i) : QVariant());
+                if (!wireMarshalable(coerced)) {
+                    qWarning("dbusqml: reply for %s cannot produce declared type '%s' (arg %d) — "
+                             "sending error reply",
+                             qPrintable(member), qPrintable(outTypes.at(i)), i);
+                    checkedSend(
+                        msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                                             QStringLiteral("Reply value is not marshalable")),
+                        "error reply");
+                    return;
+                }
+                reply << coerced;
+            }
             checkedSend(msg.createReply(reply), "multi-out reply");
             return;
         }
