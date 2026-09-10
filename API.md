@@ -532,6 +532,13 @@ Caveats:
   Opt in per-adaptor with `heldReplyTimeout` (ms, `0` = disabled): on expiry
   the held reply settles with `Failed` ("reply timed out") + warn; settle
   cancels the timer.
+- A thrown `undefined` after `holdReply()` is **undetectable** (sole
+  exception — see Known issues): `callWithInstance` reports a thrown
+  `undefined` identically to a returned `undefined` (the normal void
+  return of a handler that only called `holdReply()`), so it completes
+  silently with no reply — the caller times out. Throw a named error or
+  a primitive instead; the TTL fence (`heldReplyTimeout`) bounds the
+  wait when the shape cannot be controlled.
 - A caller on the **same `QDBusConnection`** as the adaptor cannot receive a
   deferred reply — QtDBus dispatches local-loop calls synchronously
   (`sendWithReplyLocal`) and reports `local-loop message cannot have delayed

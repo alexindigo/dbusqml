@@ -3,8 +3,30 @@
 Upstream Qt bugs that affect dbusqml usage patterns, discovered while
 building test coverage. The library floor is Qt 6.8: entries for older
 Qt are pruned (floor-pruning policy — history lives in git, not here).
-Neither entry below is caused by dbusqml, and both are fixed in current
-Qt; they are recorded so users on the floor know what to avoid.
+Most entries below are fixed in current Qt; one is a permanent Qt-layer
+limitation (thrown-`undefined` undetectability — affects all Qt versions,
+worked around, never fixable at this layer).
+
+---
+
+## Thrown-`undefined` after `holdReply()` is undetectable (permanent Qt-layer limitation)
+
+**Affects:** all Qt versions (not version-gated — the indistinguishability
+is in `QJSEngine::callWithInstance` reporting, not a versioned bug).
+
+A handler that calls `holdReply()` and then **throws `undefined`**
+produces no reply — the caller times out. `callWithInstance` reports a
+thrown `undefined` identically to a returned `undefined`, and a returned
+`undefined` is the normal void return of a handler that only called
+`holdReply()` (proof pointer: `dbusadaptor.cpp` dispatch, thrown-vs-
+returned discrimination comment — thrown primitives/arrays/objects and
+the error shape are classified; bare `undefined` cannot be, covered by
+the for-all-times P0 matrix).
+
+Workarounds: throw a named error (`DBusQML.DBusUtils.error(name, msg)`)
+or a primitive instead of bare `undefined`; fence with
+`heldReplyTimeout` (TTL expiry settles with `Failed`) when the throw
+shape cannot be controlled.
 
 ---
 

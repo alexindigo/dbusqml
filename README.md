@@ -52,8 +52,9 @@ Button {
 - **Deferred replies** — `holdReply()` defers the reply; the returned
   `DBusHeldReply` settles later with `send(value)` / `sendError(name, msg)`.
   A throw after `holdReply()` settles the held reply with the error (never
-  silent, never a double reply). Per-call `Request` adaptors + `unregister()`
-  cover the portal cancel lifecycle.
+  silent, never a double reply — sole exception: thrown `undefined`, see
+  Known issues). Per-call `Request` adaptors + `unregister()` cover the
+  portal cancel lifecycle.
 - **Co-location** — multiple adaptors share one path/service; `_signals`
   declares signal arg types, `_members` aliases wire↔QML names, catalog XML
   fills in services with poor introspection (both scan paths: bundled +
@@ -146,6 +147,14 @@ scripts/run-examples MprisPlayer   # or a category: `advanced`
 - [`docs/PARITY.md`](docs/PARITY.md) — design-time checklists for every future mechanism
 - [`RELEASING.md`](RELEASING.md) — release gates and ceremony
 - [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) — upstream Qt bugs and workarounds
+
+## Known issues
+
+Thrown `undefined` after `holdReply()` is undetectable (a thrown
+`undefined` is identical to the normal void return at the dispatch
+layer), so it completes silently with no reply — the caller times out.
+Fence with `heldReplyTimeout`, throw a named error or a primitive
+instead. Full entry in [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
 
 ## License
 

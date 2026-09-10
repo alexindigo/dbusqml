@@ -30,6 +30,65 @@
 - **Deferred-deletion window documented as defined behavior** (was:
   tracked ambiguity): adaptor serves until its destructor runs (pin
   test); API.md lifecycle note.
+- **Invalid-fd sentinel unified on `-1`** (was: single `h` → JS
+  `undefined`, `ah` element → `-1`): one consumer check covers both
+  (D4, owner-vetoable at V1).
+- **`holdReply()`/`callerService()` documented JS-handler-only** (D2):
+  the C++ `Q_INVOKABLE` fallback runs after the dispatch scope closes.
+- **Introspection stays public under `allowedSender`** (xdp posture,
+  D3): the dispatcher answers Introspectable before the adaptor gate;
+  a well-known `allowedSender` value now warns at attach (never matches
+  a unique name).
+- **Adaptor identity is attach-time-only**: post-attach
+  service/path/iface/connection mutation warns + ignored (was: silent
+  wire-identity split + registry leak).
+- **Declared top-level `v` wraps in `QDBusVariant`** (was: plain returns
+  marshaled as their own type while XML advertises `v`).
+- **`getProperty` sends the wire name** (was: QML name — split
+  `Version`/`version` failed where Set succeeded).
+- **Strict signature gate at depth 32** (was: 64 while walkers cap at
+  32 — unmarshalable shapes burned process-global slots).
+
+### Fixed
+
+- **Held-reply error-name validation shared** (CF-1): `sendError` runs
+  the B11 grammar + Failed fallback (was: invalid dotted name = zero
+  replies); send results checked loud; `send`/`expire` audited.
+- **Idempotent `holdReply()`** (CF-2): second hold in one dispatch
+  returns the same handle (was: second authority + TTL timer,
+  double-reply surface).
+- **Uncapped `firstCompleteType` `a`-recursion** (CF-3, remote crash):
+  depth-32 cap + strict re-check in `writeBySignature` (was: 200k `a`
+  prefix = SIGSEGV).
+- **Map/array container close-on-fail** (CF-9): probe-then-commit
+  staging (was: `return false` mid-`begin*`, half-open `QDBusArgument`).
+- **Loss-probe ping storm** (CF-5): 3000 ms single-shot re-arm gate on
+  both twins (was: 98 idle pings/s; proxy twin never re-armed).
+- **Promise-`asyncCall` reply leak** (CF-11): `deleteLater()` after
+  settle (was: unbounded growth on the immortal connection).
+- **Stale re-fetch overwrite** (CF-10): epoch + destination snapshot
+  (was: same-service repoint contaminated across iface/path).
+- **Queued-Set cross-fire** (CF-15): drain sends to the snapshot
+  destination (was: live members, new service got the old value).
+- **Declared `h`/`o`/`g` post-coercion guard** (CF-8): the marshaled
+  value is re-guarded before send (was: guard ran pre-marshal only).
+- **Second same-name holder `nameAcquired`** (CF-19): late joiner on an
+  owned claim notified directly (was: silent — no watch transition).
+- **Nested int64 precision** (CF-20): recursive converter (was:
+  nested > 2^53 rounded through double).
+- **Raw-dict PropertiesChanged** (CF-21): unwrap before cast (was:
+  `QDBusArgument`-shaped dict → empty map, stale UI).
+- **`emitSignal` claim per emission** (CF-26): once per service value
+  (was: blocking round-trip per signal).
+- **SignalRelay lifetime discipline** (CF-28): `QPointer` + checks
+  (was: raw pointer, unchecked).
+- **Teardown on the attach connection** (CF-29): captured by value
+  (was: re-resolved — session-bus fallback leaked the claim).
+- **Dangling-pointer deref in option validation** (CF-6): copy by value
+  (was: `&loop-local` dereferenced after scope end).
+- **Dead `advertisedName` ternary** (CF-30): removed.
+- **Settle stops the TTL timer** (CF-27): stored on the reply (was:
+  comment promised, timer outlived its purpose).
 
 ### Quality
 
