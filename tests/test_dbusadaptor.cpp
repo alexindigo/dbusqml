@@ -4976,7 +4976,9 @@ void TestDBusAdaptor::testWalkerDepthCap() {
     for (int i = 0; i < over; ++i)
         overSig += QStringLiteral(")");
 
-    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*recursion depth.*")));
+    // The 40-deep shape dies in the SILENT strict gate (isStrictSignature
+    // cap 32 — CF-18, no warning by design: unmarshalable shapes never reach
+    // the walkers). The walker depth warnings below are the loud path.
     QVariant overPayload = writeBySignature(overSig, QVariant(5));
     QVERIFY2(!overPayload.isValid(), qPrintable(overSig));
 
@@ -4988,6 +4990,16 @@ void TestDBusAdaptor::testWalkerDepthCap() {
         okSig += QStringLiteral(")");
     QVariant okPayload = writeBySignature(okSig, QVariant(5));
     QVERIFY(okPayload.isValid());
+
+    // Loud path: firstCompleteType at depth 33+ warns (same message shape
+    // as the other walkers) and returns empty — CF-3, direct unit probe.
+    QString deepA;
+    for (int i = 0; i < 40; ++i)
+        deepA += QStringLiteral("a");
+    deepA += QStringLiteral("s");
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*recursion depth.*")));
+    int pos = 0;
+    QVERIFY(firstCompleteType(deepA, pos).isEmpty());
 }
 
 // B7 — a failed QMetaMethod::invoke is a LOUD Failed error reply, never a

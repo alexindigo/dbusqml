@@ -645,7 +645,9 @@ QString firstCompleteType(const QString &sig, int &pos, int depth) {
     if (pos >= sig.size())
         return {};
     if (depth > 32) {
-        qWarning("dbusqml: firstCompleteType: recursion depth cap (32) exceeded — failing loud");
+        // Same message shape as the other walkers (B1/readBySignature,
+        // writeValueBySignature) so one ignoreMessage pattern covers all.
+        qWarning("dbusqml: recursion depth cap (32) exceeded — failing loud");
         return {};
     }
     int start = pos;
@@ -1063,8 +1065,8 @@ static void appendStaged(QDBusArgument &arg, const QString &sig, const QVariant 
 static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const QVariant &value,
                                   int depth = 0) {
     if (depth > 32) {
-        qWarning("dbusqml: writeValueBySignature: recursion depth cap (32) exceeded — failing "
-                 "loud");
+        // Same message shape as the other walkers (B1 plan note).
+        qWarning("dbusqml: recursion depth cap (32) exceeded — failing loud");
         return false;
     }
     // Unwrap DBus.* gadgets nested in the value before walking. toDbusVariant

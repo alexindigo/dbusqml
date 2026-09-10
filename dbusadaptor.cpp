@@ -306,9 +306,15 @@ void DBusAdaptor::setOptionSpecs(const QVariantMap &v) {
 }
 
 void DBusAdaptor::setAllowedSender(const QString &v) {
-    // P10b: sender authorization (empty = open).
+    // P10b: sender authorization (empty = open). CF-13: the gate compares
+    // against the caller's UNIQUE name — a well-known value can never
+    // match, so warn at attach (and here) instead of silently denying all.
     if (m_allowedSender == v)
         return;
+    if (!v.isEmpty() && !v.startsWith(QLatin1Char(':')))
+        qWarning("dbusqml: allowedSender '%s' is not a unique bus name — no caller will match "
+                 "(path %s)",
+                 qPrintable(v), qPrintable(m_path));
     m_allowedSender = v;
     emit allowedSenderChanged();
 }

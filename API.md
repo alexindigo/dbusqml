@@ -442,7 +442,7 @@ DBusAdaptor {
 | `connection` | `DBusConnection` | The bus to register on (default session bus). |
 | `_signatures` | `var` (object) | Explicit reply signatures, keyed by D-Bus member name (see Shape Selection). |
 | `_options` | `var` (object) | Per-method served option whitelist `{ Method: { key: sig } }` applied to the method's last `a{sv}` in-arg (P10a: unknown keys dropped, mistyped keys → `InvalidArgs`). |
-| `allowedSender` | `string` | Unique bus name allowed to call this adaptor (empty = open); mismatch → `AccessDenied` before any handler runs (P10b). |
+| `allowedSender` | `string` | Unique bus name allowed to call this adaptor (empty = open); mismatch → `AccessDenied` before any handler runs (P10b). The value is compared against the caller's UNIQUE name (`msg.service()`): a well-known name never matches, so setting one denies everyone — attach-time warning. Introspection (`org.freedesktop.DBus.Introspectable`) is answered by the dispatcher before the adaptor gate runs, so it stays public metadata (xdp posture) regardless of `allowedSender`. |
 | `heldReplyTimeout` | `int` | Max held-reply lifetime in ms (`0` = disabled default); expiry settles with `Failed` ("reply timed out"). |
 
 **Private properties:** any adaptor property whose name starts with `_` is
@@ -536,6 +536,11 @@ Caveats:
   deferred reply — QtDBus dispatches local-loop calls synchronously
   (`sendWithReplyLocal`) and reports `local-loop message cannot have delayed
   replies`. Use a separate connection when a process calls its own adaptor.
+- `holdReply()`/`callerService()` are **JS-handler-only**: the C++
+  `Q_INVOKABLE` fallback runs after the dispatch scope closes, so a
+  C++-subclass handler calling either gets the outside-dispatch warning
+  path (null/empty) — document, don't extend (D2). JS handlers are the
+  served surface; C++ handlers use synchronous returns.
 
 #### Multiple interfaces on one path
 
