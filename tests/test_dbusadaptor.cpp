@@ -1,3 +1,4 @@
+#include <QDBusArgument>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
@@ -535,6 +536,8 @@ private slots:
     // 0.9.0 lossless 64-bit delivery (C2).
     void testInt64StringRoundTrip();
     void testInt64SmallValueStaysNumber();
+    // CF-20 pin: nested int64 > 2^53 inside a struct/map arrives exact.
+    void testInt64NestedPrecision();
 
     // 0.9.0 fix cycle: cross-process fd transfer.
     void testFdCrossProcess();
@@ -6986,6 +6989,27 @@ void TestDBusAdaptor::testInt64SmallValueStaysNumber() {
 
     delete reply;
     delete conn;
+}
+
+// CF-20 pin: recursive precisionSafeToScriptValue delivers a nested
+// int64 > 2^53 exact (decimal string form, same as the top-level C2
+// contract). Pre-fix the converter was top-level-only: the nested value
+// went through the default double path and rounded.
+void TestDBusAdaptor::testInt64NestedPrecision() {
+    QQmlEngine engine;
+    QVariant inner = QVariant::fromValue(static_cast<qint64>(9223372036854775807LL));
+    QVariantMap map{{QStringLiteral("big"), inner}};
+    QVariantList wrapped{map};
+    QJSValue js = precisionSafeToScriptValue(&engine, wrapped);
+    QVERIFY(js.isArray());
+    QJSValue elt = js.property(0);
+    QVERIFY(elt.isObject());
+    QJSValue big = elt.property(QStringLiteral("big"));
+    QCOMPARE(big.toString(), QStringLiteral("9223372036854775807"));
+    // Top-level still exact (C2 unchanged).
+    QJSValue top = precisionSafeToScriptValue(
+        &engine, QVariant::fromValue(static_cast<qint64>(9223372036854775807LL)));
+    QCOMPARE(top.toString(), QStringLiteral("9223372036854775807"));
 }
 
 // ==================== 0.9.0 unix fd passing (h; B1/S3) =====================

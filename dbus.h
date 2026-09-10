@@ -175,6 +175,11 @@ private:
     bool m_watchServiceStatus = false;
     bool m_serviceAvailable = false;
     bool m_sessionDisconnectWatched = false;
+    // CF-26: per-service claim cache for emitSignal — the blocking
+    // registerService round-trip runs once per service value, not once
+    // per emission. Reset implicitly: a new service value != cached one
+    // re-arms the single attempt.
+    QString m_claimAttemptedService;
     bool m_propertiesEnabled = true;
     bool m_componentComplete = false;
     bool m_introspectQueued = false;

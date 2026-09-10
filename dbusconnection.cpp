@@ -101,7 +101,12 @@ bool wireMarshalable(const QVariant &v) {
 // Precision-safe QVariant → QJSValue: 64-bit ints that don't round-trip
 // through a double (|v| above 2^53) are delivered as full-precision decimal
 // strings — the C2 contract (QML's JS engine has no BigInt). variantToJs is
-// the reply path; this variant is used for dispatch args.
+// the reply path; this variant is used for dispatch args. CF-20: recursive
+// — the old top-level-only form lost precision on nested int64 > 2^53
+// (a nested x/t inside a{sv}/av/struct went through the default double
+// path). Containers recurse through variantToJs (which applies the scalar
+// guard at its leaves); QDBusArgument/QDBusVariant unwrap first so nested
+// payloads are visible.
 QJSValue precisionSafeToScriptValue(QQmlEngine *engine, const QVariant &v) {
     if (v.userType() == QMetaType::LongLong) {
         const qint64 value = v.toLongLong();
@@ -113,6 +118,25 @@ QJSValue precisionSafeToScriptValue(QQmlEngine *engine, const QVariant &v) {
         if (static_cast<quint64>(static_cast<double>(value)) != value)
             return engine->toScriptValue(QVariant(QString::number(value)));
     }
+    if (v.userType() == qMetaTypeId<QVariantList>() || v.userType() == qMetaTypeId<QStringList>()) {
+        const QVariantList list = v.toList();
+        QJSValue arr = engine->newArray(static_cast<quint32>(list.size()));
+        for (int i = 0; i < list.size(); ++i)
+            arr.setProperty(static_cast<quint32>(i),
+                            precisionSafeToScriptValue(engine, list.at(i)));
+        return arr;
+    }
+    if (v.userType() == qMetaTypeId<QVariantMap>()) {
+        const QVariantMap map = v.toMap();
+        QJSValue obj = engine->newObject();
+        for (auto it = map.begin(); it != map.end(); ++it)
+            obj.setProperty(it.key(), precisionSafeToScriptValue(engine, it.value()));
+        return obj;
+    }
+    if (v.userType() == qMetaTypeId<QDBusArgument>())
+        return precisionSafeToScriptValue(engine, unwrapDbus(v));
+    if (v.userType() == qMetaTypeId<QDBusVariant>())
+        return precisionSafeToScriptValue(engine, v.value<QDBusVariant>().variant());
     return engine->toScriptValue(v);
 }
 
@@ -398,11 +422,14 @@ static QVariant readBySignature(const QDBusArgument &arg, int depth = 0) {
 
     if (sig == QLatin1String("h")) {
         // Unix fd — delivered as a plain int (dbus-next + Nemo double
-        // precedent). The RECEIVER closes the fd.
+        // precedent). The RECEIVER closes the fd. CF-25: invalid fds are
+        // -1 here AND in the ah-array path (was: invalid QVariant / JS
+        // undefined here) — one sentinel, branch-testable in JS either
+        // way (D4, owner-vetoable at V1).
         QDBusUnixFileDescriptor fd;
         arg >> fd;
         if (!fd.isValid())
-            return {};
+            return QVariant::fromValue(-1);
         return QVariant::fromValue(fd.takeFileDescriptor());
     }
 
@@ -421,9 +448,10 @@ QVariant unwrapDbus(const QVariant &v) {
     if (v.userType() == qMetaTypeId<QDBusUnixFileDescriptor>()) {
         // Unix fd delivered as a plain int (dbus-next + Nemo shape). The
         // RECEIVER closes the fd — takeFileDescriptor() transfers ownership.
+        // CF-25: -1 on invalid, same as the read path (one sentinel).
         QDBusUnixFileDescriptor fd = v.value<QDBusUnixFileDescriptor>();
         if (!fd.isValid())
-            return {};
+            return QVariant::fromValue(-1);
         return QVariant::fromValue(fd.takeFileDescriptor());
     }
 

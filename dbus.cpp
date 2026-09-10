@@ -429,8 +429,12 @@ void DBusProxy::emitSignal(const QString &name, const QVariantList &args) {
     // Try to claim the service name so the signal appears to come from the
     // expected service (e.g. org.freedesktop.portal.Desktop).
     // If the name is already owned (by the real portal), this silently fails.
-    if (!m_service.startsWith(':'))
+    // CF-26: attempt the claim once per service value and cache the outcome
+    // — the old code ran a blocking daemon round-trip on EVERY emission.
+    if (!m_service.startsWith(':') && m_claimAttemptedService != m_service) {
+        m_claimAttemptedService = m_service;
         m_bus.registerService(m_service);
+    }
 
     QDBusMessage msg = QDBusMessage::createSignal(m_path, m_iface, name);
     if (!args.isEmpty()) {
@@ -875,7 +879,10 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
             if (msg.arguments().isEmpty() || msg.arguments().first().toString() != m_iface)
                 return;
             if (msg.arguments().size() >= 2) {
-                QVariantMap changed = qdbus_cast<QVariantMap>(msg.arguments()[1]);
+                // CF-21: unwrap FIRST (adaptor dispatch does the same) — a
+                // QDBusArgument-shaped a{sv} fails qdbus_cast to an empty
+                // map silently, leaving the UI stale with zero diagnostics.
+                QVariantMap changed = qdbus_cast<QVariantMap>(unwrapDbus(msg.arguments()[1]));
                 for (auto it = changed.begin(); it != changed.end(); ++it) {
                     QString qmlName = dbusPropToQml(it.key());
                     m_qmlToDbusName.insert(qmlName, it.key());

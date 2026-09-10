@@ -48,16 +48,30 @@ public:
         : QObject(parent), m_adaptor(adaptor), m_name(signalName) {}
 
 public slots:
-    void forward() { sendArgs({}); }
-    void forward(QVariant a0) { sendArgs({std::move(a0)}); }
+    void forward() {
+        if (!m_adaptor)
+            return;
+        sendArgs({});
+    }
+    void forward(QVariant a0) {
+        if (!m_adaptor)
+            return;
+        sendArgs({std::move(a0)});
+    }
     void forward(QVariant a0, QVariant a1) { sendArgs({std::move(a0), std::move(a1)}); }
     void forward(QVariant a0, QVariant a1, QVariant a2) {
+        if (!m_adaptor)
+            return;
         sendArgs({std::move(a0), std::move(a1), std::move(a2)});
     }
     void forward(QVariant a0, QVariant a1, QVariant a2, QVariant a3) {
+        if (!m_adaptor)
+            return;
         sendArgs({std::move(a0), std::move(a1), std::move(a2), std::move(a3)});
     }
     void forward(QVariant a0, QVariant a1, QVariant a2, QVariant a3, QVariant a4) {
+        if (!m_adaptor)
+            return;
         sendArgs({std::move(a0), std::move(a1), std::move(a2), std::move(a3), std::move(a4)});
     }
 
@@ -78,8 +92,12 @@ private:
         // A6: when the signal's arg types are declared (_signals / catalog),
         // marshal through them so the wire shape equals the advertised one;
         // a value that cannot produce the declared type warns + skips (a
-        // signal has no error-reply channel).
-        const QStringList declared = m_adaptor->declaredSignalTypes(m_name);
+        // signal has no error-reply channel). CF-28: the adaptor is held
+        // by QPointer — guard once, use the guarded handle throughout.
+        QPointer<DBusAdaptor> guard = m_adaptor;
+        if (!guard)
+            return;
+        const QStringList declared = guard->declaredSignalTypes(m_name);
         if (!declared.isEmpty()) {
             if (declared.size() != args.size()) {
                 qWarning("dbusqml: signal %s carries %d args but %d declared — skipping send",
@@ -107,8 +125,7 @@ private:
                 return;
             }
         }
-        QDBusMessage msg =
-            QDBusMessage::createSignal(m_adaptor->path(), m_adaptor->iface(), m_name);
+        QDBusMessage msg = QDBusMessage::createSignal(guard->path(), guard->iface(), m_name);
         if (!args.isEmpty())
             msg.setArguments(args);
         QDBusConnection conn = busConn();
@@ -118,10 +135,20 @@ private:
     }
 
     QDBusConnection busConn() const {
-        return m_adaptor->connection() ? static_cast<QDBusConnection>(*m_adaptor->connection())
-                                       : QDBusConnection::sessionBus();
+        // CF-28: QPointer + null discipline like PropertiesChangedRelay —
+        // the relay is parented to the adaptor (co-destroyed normally),
+        // but a uniform checked deref beats two lifetime disciplines.
+        QPointer<DBusAdaptor> guard = m_adaptor;
+        if (!guard)
+            return QDBusConnection::sessionBus();
+        return guard->connection() ? static_cast<QDBusConnection>(*guard->connection())
+                                   : QDBusConnection::sessionBus();
     }
-    DBusAdaptor *m_adaptor;
+
+private:
+    // CF-28: QPointer + null check, uniform with PropertiesChangedRelay
+    // below (was: raw pointer with unchecked derefs).
+    QPointer<DBusAdaptor> m_adaptor;
     QString m_name;
 };
 
@@ -190,13 +217,25 @@ DBusAdaptor::~DBusAdaptor() {
         }
     }
 
+    // CF-29: detach on the ATTACH-time connection (by value), never
+    // re-resolved through the null-able m_conn — the connection QML
+    // sibling may have died first.
     if (m_attached)
-        DBusPathDispatcher::detach(bus(), m_path, m_service, this);
+        DBusPathDispatcher::detach(m_teardownConn, m_path, m_service, this);
 }
 
 void DBusAdaptor::setService(const QString &v) {
     if (m_service == v)
         return;
+    // CF-22: identity is attach-time-only (consumed once in
+    // componentComplete). A post-attach mutation would split wire
+    // identity (signals on the new path, calls at the old) and leak the
+    // registry entry at teardown — refuse loudly, ignore.
+    if (m_attached) {
+        qWarning("dbusqml: service is attach-time only — post-attach change ignored (path %s)",
+                 qPrintable(m_path));
+        return;
+    }
     m_service = v;
     emit serviceChanged();
 }
@@ -204,6 +243,11 @@ void DBusAdaptor::setService(const QString &v) {
 void DBusAdaptor::setPath(const QString &v) {
     if (m_path == v)
         return;
+    if (m_attached) {
+        qWarning("dbusqml: path is attach-time only — post-attach change ignored (path %s)",
+                 qPrintable(m_path));
+        return;
+    }
     m_path = v;
     emit pathChanged();
 }
@@ -211,6 +255,11 @@ void DBusAdaptor::setPath(const QString &v) {
 void DBusAdaptor::setIface(const QString &v) {
     if (m_iface == v)
         return;
+    if (m_attached) {
+        qWarning("dbusqml: iface is attach-time only — post-attach change ignored (path %s)",
+                 qPrintable(m_path));
+        return;
+    }
     m_iface = v;
     emit ifaceChanged();
 }
@@ -218,6 +267,11 @@ void DBusAdaptor::setIface(const QString &v) {
 void DBusAdaptor::setConnection(DBusConnection *v) {
     if (m_conn == v)
         return;
+    if (m_attached) {
+        qWarning("dbusqml: connection is attach-time only — post-attach change ignored (path %s)",
+                 qPrintable(m_path));
+        return;
+    }
     m_conn = v;
     emit connectionChanged();
 }
@@ -454,6 +508,12 @@ void DBusAdaptor::componentComplete() {
             << "DBusAdaptor: iface is empty — introspection XML will have an empty interface name";
 
     QDBusConnection conn = bus();
+    // CF-29: capture the attach-time connection BY VALUE for the teardown
+    // tails below — re-resolving through the null-able m_conn QPointer at
+    // teardown falls back to the SESSION bus when the connection QML
+    // sibling died first, leaking the registry entry + claim on the
+    // attach connection.
+    m_teardownConn = conn;
     m_attached = DBusPathDispatcher::attach(conn, m_path, m_service, this, m_allowReplacement,
                                             m_replaceExisting, m_queueOnBusy);
     if (!m_attached)
@@ -482,7 +542,9 @@ void DBusAdaptor::componentComplete() {
                     }
                 }
                 if (m_attached) {
-                    DBusPathDispatcher::detach(bus(), m_path, m_service, this);
+                    // CF-29: same attach-time connection discipline as the
+                    // destructor tail below.
+                    DBusPathDispatcher::detach(m_teardownConn, m_path, m_service, this);
                     m_attached = false;
                 }
             },
@@ -698,9 +760,9 @@ void DBusAdaptor::emitSignal(const QString &name, const QJSValue &arguments) {
         }
         // A6: declared signal types at emission (the emitSignal path — the
         // exact inverse of the out-args rule): the wire shape must equal the
-        // advertised one when the types are declared.
-        const QStringList declared =
-            declaredSignalTypes(advertisedName(name).isEmpty() ? name : advertisedName(name));
+        // advertised one when the types are declared. CF-30: advertisedName
+        // never returns empty for non-empty input — no dead ternary.
+        const QStringList declared = declaredSignalTypes(advertisedName(name));
         if (!declared.isEmpty()) {
             if (declared.size() != args.size()) {
                 qWarning("dbusqml: signal %s carries %d args but %d declared — skipping send",
@@ -1012,6 +1074,8 @@ QString DBusAdaptor::advertisedName(const QString &qmlName) const {
         }
     }
     // 3. Stable inference: the deterministic first-char-uppercase fold.
+    // CF-30: advertisedName never returns empty for non-empty input, so
+    // callers use it directly (no isEmpty-ternary — the old dead branch).
     if (!qmlName.isEmpty())
         return qmlName.at(0).toUpper() + qmlName.mid(1);
     return qmlName;
@@ -1766,8 +1830,9 @@ void DBusAdaptor::unregister() {
 
     // Detach the path + service reference via the dispatcher registry
     // (idempotent tail). One-way: re-registration is not supported. The
-    // QObject stays alive for QML to drop whenever.
-    DBusPathDispatcher::detach(bus(), m_path, m_service, this);
+    // QObject stays alive for QML to drop whenever. CF-29: attach-time
+    // connection, never re-resolved.
+    DBusPathDispatcher::detach(m_teardownConn, m_path, m_service, this);
     m_attached = false;
 }
 

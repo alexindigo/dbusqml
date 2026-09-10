@@ -375,6 +375,7 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
         // same-name attach skips its own registration instead of losing the
         // name; ownership is resolved after the bus call returns.
         bool doRegister = false;
+        bool joinerNeedsAcquired = false;
         {
             RegistryMutexGuard locker(registryMutex());
             ServiceClaim &claim = serviceClaims()[svcKey];
@@ -399,9 +400,13 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
                 // Registration already in flight or owned — join as a
                 // holder; ownership notification arrives via the watch (or
                 // is already recorded) exactly as for any co-located
-                // second adaptor.
+                // second adaptor. CF-19: when the claim is ALREADY owned,
+                // no watch transition will ever fire for the joiner — so
+                // deliver the current state directly (outside the lock).
                 claim.refs++;
                 claim.holders.append(adaptor);
+                if (claim.owned)
+                    joinerNeedsAcquired = true;
             } else {
                 claim.refs = 1;
                 claim.holders.append(adaptor);
@@ -459,6 +464,11 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
                 qmlInfo(adaptor) << "Failed to register service" << service;
             }
         }
+        // CF-19: late joiner on an already-owned claim — deliver the
+        // current state directly (outside the lock, like the registrant
+        // path above). A pending claim still resolves through the watch.
+        if (joinerNeedsAcquired)
+            adaptor->nameAcquiredInternal();
     }
 
     return true;
