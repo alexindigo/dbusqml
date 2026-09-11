@@ -552,11 +552,13 @@ Caveats:
   deferred reply — QtDBus dispatches local-loop calls synchronously
   (`sendWithReplyLocal`) and reports `local-loop message cannot have delayed
   replies`. Use a separate connection when a process calls its own adaptor.
-- `holdReply()`/`callerService()` are **JS-handler-only**: the C++
-  `Q_INVOKABLE` fallback runs after the dispatch scope closes, so a
-  C++-subclass handler calling either gets the outside-dispatch warning
-  path (null/empty) — document, don't extend (D2). JS handlers are the
-  served surface; C++ handlers use synchronous returns.
+- `holdReply()`/`callerService()` are **QML-handler facilities**. C++
+  services should register with `QDBusConnection::registerObject` and
+  inherit `QDBusContext` (`setDelayedReply`) — the native mechanism for
+  Qt-dispatched objects (`QDBusContext` only populates under Qt's own
+  dispatcher). Subclassing this adaptor puts handlers under the QML
+  dispatch model — a C++-subclass handler calling either gets the
+  outside-dispatch warning path (null/empty).
 
 #### Multiple interfaces on one path
 
@@ -887,7 +889,9 @@ lossless end-to-end.
 fds pass in both directions as plain integers with a declared `h`
 signature (or an `ah` array). The **receiver** closes the fd; the sender
 keeps ownership of its own end. Works over session/system/custom buses on
-unix sockets (the ScreenCast/Camera `OpenPipeWireRemote` scenario).
+unix sockets (the ScreenCast/Camera `OpenPipeWireRemote` scenario). An fd
+that arrives **invalid** reads as `-1` — one sentinel in both the scalar
+and array paths, branch-testable in JS (`if (fd === -1)`).
 
 ### The fd quartet + `fdUrl` (`DBusUtils`)
 
