@@ -48,6 +48,17 @@
   `Version`/`version` failed where Set succeeded).
 - **Strict signature gate at depth 32** (was: 64 while walkers cap at
   32 — unmarshalable shapes burned process-global slots).
+- **Strict option typing** (behavior change): the `_options` filter
+  iterates the declared keys and delivers the **typed** (coerced) value;
+  a declared key with a wrong-kind (scalar-for-list, list-for-map,
+  container-for-scalar) or non-convertible value is rejected with
+  `InvalidArgs` and the handler never runs (was: a post-marshal
+  same-kind check that coerced almost anything through, delivering the
+  raw caller value).
+- **Empty option allow-list denies all keys** (behavior change):
+  `_options: { Method: {} }` filters with zero declared keys — every
+  caller key is dropped, the handler receives `{}` (was: collapsed to
+  no-entry, allow-all).
 
 ### Fixed
 

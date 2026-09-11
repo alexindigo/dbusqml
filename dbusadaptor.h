@@ -7,6 +7,7 @@
 #include <QQmlParserStatus>
 #include <QStack>
 #include <QVarLengthArray>
+#include <optional>
 #include <qqmlregistration.h>
 
 #include "dbusconnection.h"
@@ -180,10 +181,12 @@ private:
     // (FD4); warn + drop entries without a trailing a{sv}. Also resolves
     // the entry's method-name key through the naming ladder.
     void validateOptionSpecs();
-    // P10a: the whitelist for a wire method name ({ key: sig }), or empty
-    // when the method has no entry. Name resolution: exact wire name →
-    // folded QML name → alias (same ladder as dispatch).
-    QVariantMap optionWhitelist(const QString &wireMember) const;
+    // P10a: the whitelist for a wire method name ({ key: sig }), or
+    // nullopt when the method has no entry (filter OFF). R2: an engaged
+    // EMPTY map is a real entry — filter ON with zero declared keys
+    // (deny-all-keys). Name resolution: exact wire name → folded QML name
+    // → alias (same ladder as dispatch).
+    std::optional<QVariantMap> optionWhitelist(const QString &wireMember) const;
     // P10a: xdp_filter_options shape — drop unknown keys, type-check the
     // rest against the declared sigs. Returns the filtered dict; sets
     // *error to InvalidArgs detail on mistype (caller sends the reply).

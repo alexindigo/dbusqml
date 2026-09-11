@@ -20,6 +20,10 @@
  *                             returns (outgoing_serial, replies_received).
  *                             The caller reads the reply to learn the serial,
  *                             then queries ReceivedCount(serial).)
+ *   CallAdaptorOptions(s, s, s, s, s, s) -> (uu) (same, but the call
+ *                             carries a trailing a{sv} options dict
+ *                             { key: variant-of-string value } — the R1
+ *                             strict-typing pin's wrong-kind geometry.)
  *   DoubleSend(s, s, s, s) -> (uu) (sensitivity self-test: invokes the
  *                             named adaptor method TWICE on the same outgoing
  *                             serial is impossible on the bus — instead it
@@ -144,6 +148,33 @@ static DBusMessage *handle_received_count(DBusMessage *msg, DBusConnection *conn
     return reply;
 }
 
+/* Shared caller-mode tail: synchronously send `call`, tally the reply
+ * (error replies included — an error reply is a completed round-trip;
+ * NULL means timeout/no reply) and report (serial, replies-so-far). */
+static DBusMessage *send_call_and_report(DBusMessage *msg, DBusConnection *conn,
+                                         DBusMessage *call) {
+    dbus_uint32_t outSerial = 0;
+    DBusError replyErr;
+    dbus_error_init(&replyErr);
+    DBusMessage *reply = dbus_connection_send_with_reply_and_block(conn, call, 5000, &replyErr);
+    if (reply) {
+        outSerial = dbus_message_get_reply_serial(reply);
+        record_recv(dbus_message_get_reply_serial(reply));
+        dbus_message_unref(reply);
+    } else {
+        /* Timed out or errored with no reply message: still report the
+         * outgoing serial so ReceivedCount(serial)==0 pins the swallow. */
+        outSerial = dbus_message_get_serial(call);
+        dbus_error_free(&replyErr);
+    }
+    dbus_message_unref(call);
+    DBusMessage *ret = dbus_message_new_method_return(msg);
+    dbus_uint32_t got = outSerial < MAX_SERIALS ? s_recvCounts[outSerial] : 0;
+    dbus_message_append_args(ret, DBUS_TYPE_UINT32, &outSerial, DBUS_TYPE_UINT32, &got,
+                             DBUS_TYPE_INVALID);
+    return ret;
+}
+
 /* Caller mode: synchronously invoke (service, path, iface, member) with
  * no args and report (outgoing_serial, replies_received_so_far). The
  * harness then pumps the bus / waits and polls ReceivedCount(serial)
@@ -169,26 +200,48 @@ static DBusMessage *handle_call_adaptor(DBusMessage *msg, DBusConnection *conn) 
     if (!call) {
         return dbus_message_new_error(msg, "org.dbusqml.Oracle.Error", "cannot build call");
     }
-    dbus_uint32_t outSerial = 0;
-    DBusError replyErr;
-    dbus_error_init(&replyErr);
-    DBusMessage *reply = dbus_connection_send_with_reply_and_block(conn, call, 5000, &replyErr);
-    if (reply) {
-        outSerial = dbus_message_get_reply_serial(reply);
-        record_recv(dbus_message_get_reply_serial(reply));
-        dbus_message_unref(reply);
-    } else {
-        /* Timed out or errored with no reply message: still report the
-         * outgoing serial so ReceivedCount(serial)==0 pins the swallow. */
-        outSerial = dbus_message_get_serial(call);
-        dbus_error_free(&replyErr);
+    return send_call_and_report(msg, conn, call);
+}
+
+/* Caller mode with options (road-to-one R1): invoke
+ * (service, path, iface, member) with a trailing a{sv} argument
+ * { optKey: variant-of-string optValue }. A scalar string delivered to a
+ * list-declared option key is the wrong-KIND geometry the strict-typing
+ * ruling rejects with InvalidArgs — this pin proves the new error path
+ * still answers exactly one reply per serial. */
+static DBusMessage *handle_call_adaptor_options(DBusMessage *msg, DBusConnection *conn) {
+    const char *service = "";
+    const char *path = "";
+    const char *iface = "";
+    const char *member = "";
+    const char *optKey = "";
+    const char *optValue = "";
+    DBusError err;
+    dbus_error_init(&err);
+    if (!dbus_message_get_args(msg, &err, DBUS_TYPE_STRING, &service, DBUS_TYPE_STRING, &path,
+                               DBUS_TYPE_STRING, &iface, DBUS_TYPE_STRING, &member,
+                               DBUS_TYPE_STRING, &optKey, DBUS_TYPE_STRING, &optValue,
+                               DBUS_TYPE_INVALID)) {
+        DBusMessage *e = dbus_message_new_error(msg, "org.dbusqml.Oracle.Error", "want ssssss");
+        dbus_error_free(&err);
+        return e;
     }
-    dbus_message_unref(call);
-    DBusMessage *ret = dbus_message_new_method_return(msg);
-    dbus_uint32_t got = outSerial < MAX_SERIALS ? s_recvCounts[outSerial] : 0;
-    dbus_message_append_args(ret, DBUS_TYPE_UINT32, &outSerial, DBUS_TYPE_UINT32, &got,
-                             DBUS_TYPE_INVALID);
-    return ret;
+    dbus_error_free(&err);
+    DBusMessage *call = dbus_message_new_method_call(service, path, iface, member);
+    if (!call) {
+        return dbus_message_new_error(msg, "org.dbusqml.Oracle.Error", "cannot build call");
+    }
+    DBusMessageIter args, dict, entry, variant;
+    dbus_message_iter_init_append(call, &args);
+    dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY, "{sv}", &dict);
+    dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &optKey);
+    dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "s", &variant);
+    dbus_message_iter_append_basic(&variant, DBUS_TYPE_STRING, &optValue);
+    dbus_message_iter_close_container(&entry, &variant);
+    dbus_message_iter_close_container(&dict, &entry);
+    dbus_message_iter_close_container(&args, &dict);
+    return send_call_and_report(msg, conn, call);
 }
 
 /* Sensitivity self-test helper: two sequential calls at two serials.
@@ -288,6 +341,8 @@ static DBusHandlerResult oracle_filter(DBusConnection *conn, DBusMessage *msg, v
             reply = handle_received_count(msg, conn);
         else if (!strcmp(member, "CallAdaptor"))
             reply = handle_call_adaptor(msg, conn);
+        else if (!strcmp(member, "CallAdaptorOptions"))
+            reply = handle_call_adaptor_options(msg, conn);
         else if (!strcmp(member, "DoubleSend"))
             reply = handle_double_send(msg, conn);
         else

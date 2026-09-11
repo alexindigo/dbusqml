@@ -329,7 +329,7 @@ void DBusAdaptor::setHeldReplyTimeout(int v) {
     emit heldReplyTimeoutChanged();
 }
 
-QVariantMap DBusAdaptor::optionWhitelist(const QString &wireMember) const {
+std::optional<QVariantMap> DBusAdaptor::optionWhitelist(const QString &wireMember) const {
     // Ladder-consistent lookup: exact wire name → folded QML name →
     // alias (mirrors declaredOutTypes above).
     auto it = m_options.constFind(wireMember);
@@ -341,13 +341,16 @@ QVariantMap DBusAdaptor::optionWhitelist(const QString &wireMember) const {
             it = m_options.constFind(aliased);
     }
     if (it == m_options.constEnd())
-        return {};
+        return std::nullopt; // no entry: filter OFF for that method
     // The value must be a map { key: sig }; anything else is a typo —
     // loud, and treated as no whitelist.
     if (!it.value().canConvert<QVariantMap>()) {
         qWarning("dbusqml: _options entry for %s is not a map — ignored", qPrintable(wireMember));
-        return {};
+        return std::nullopt;
     }
+    // R2 (road-to-one, Call 2): an EMPTY map is a real entry — filter ON
+    // with zero declared keys. Every caller key is then an unknown key →
+    // silently dropped → the handler receives {} (deny-all-keys).
     return it.value().toMap();
 }
 
@@ -392,67 +395,262 @@ void DBusAdaptor::validateOptionSpecs() {
     }
 }
 
-QVariantMap DBusAdaptor::filterOptions(const QVariantMap &whitelist, const QVariantMap &options,
-                                       QString *error) const {
-    // xdp xdp_filter_options shape (xdp-utils.c:248-305): unknown keys
-    // silently dropped (forward-compat); present-but-mistyped keys → the
-    // caller sends InvalidArgs. The FILTERED dict is what the handler
-    // receives.
-    //
-    // Mistype rule (sound for the whitelist's scalar slots): marshal the
-    // value against the declared sig, then check the marshaled value
-    // still converts back through the same slot. The telling case is a
-    // JS string where a numeric slot is declared: toUInt()/toInt() on a
-    // non-numeric string yields 0 — silent corruption. So: a declared
-    // numeric/bool slot rejects non-numeric/non-bool JS strings (and
-    // vice versa: a declared string slot accepts anything via
-    // toString()). Container slots (a*, (...), {...}) require the
-    // value to already be a list/map of the right shape — checked by
-    // attempting the marshal and requiring a valid, same-kind result.
-    QVariantMap out;
-    for (auto it = options.begin(); it != options.end(); ++it) {
-        auto wit = whitelist.constFind(it.key());
-        if (wit == whitelist.constEnd())
-            continue; // unknown: silently dropped
-        const QString sig = wit.value().toString();
-        const QVariant &v = it.value();
-        bool mistyped = false;
-        if (sig == QStringLiteral("s") || sig == QStringLiteral("o") ||
-            sig == QStringLiteral("g")) {
-            mistyped = false; // everything stringifies
-        } else if (sig == QStringLiteral("b")) {
-            mistyped = v.userType() != QMetaType::Bool && v.userType() != QMetaType::QString &&
-                       v.userType() != QMetaType::Int && v.userType() != QMetaType::UInt;
-        } else if (sig == QStringLiteral("y") || sig == QStringLiteral("n") ||
-                   sig == QStringLiteral("q") || sig == QStringLiteral("i") ||
-                   sig == QStringLiteral("u") || sig == QStringLiteral("x") ||
-                   sig == QStringLiteral("t") || sig == QStringLiteral("d")) {
-            // Numeric slots: bools never coerce; strings must be numeric.
-            if (v.userType() == QMetaType::Bool) {
-                mistyped = true;
-            } else if (v.userType() == QMetaType::QString) {
-                bool ok = false;
-                v.toString().toDouble(&ok);
-                mistyped = !ok;
-            } else if (v.userType() != QMetaType::Int && v.userType() != QMetaType::UInt &&
-                       v.userType() != QMetaType::LongLong &&
-                       v.userType() != QMetaType::ULongLong && v.userType() != QMetaType::Double) {
-                mistyped = true;
-            }
-        } else {
-            // Container slots: the value must already be shaped (list
-            // for arrays, map for dicts/structs-as-maps); the marshal
-            // must produce a valid result.
-            const QVariant marshaled = marshalBySignature(sig, v);
-            mistyped = !marshaled.isValid();
-        }
-        if (mistyped) {
-            if (error)
-                *error =
-                    QStringLiteral("option '%1' has wrong type (expected %2)").arg(it.key(), sig);
+namespace {
+
+// ==================== R1 strict option typing (road-to-one, Call 1) ============
+//
+// xdp_filter_options semantics (xdp-utils.c:249): the caller value's KIND is
+// tested against the declared signature's kind BEFORE any coercion — the
+// walkers coerce anything, which made the old post-marshal "same-kind" check
+// a no-op (CF-14). Kinds: scalar / list (arrays; structs as member lists;
+// QByteArray is ay-shaped) / map (a{..}); a declared `v` accepts any kind.
+enum class OptionKind { Scalar, List, Map, Any };
+
+OptionKind optionSigKind(const QString &sig) {
+    if (sig == QLatin1String("v"))
+        return OptionKind::Any;
+    if (sig.startsWith(QLatin1String("a{")))
+        return OptionKind::Map;
+    if (sig.startsWith(QLatin1Char('a')) || sig.startsWith(QLatin1Char('(')))
+        return OptionKind::List;
+    return OptionKind::Scalar;
+}
+
+OptionKind optionValueKind(const QVariant &v) {
+    switch (v.userType()) {
+    case QMetaType::QVariantMap:
+    case QMetaType::QVariantHash:
+        return OptionKind::Map;
+    case QMetaType::QVariantList:
+    case QMetaType::QStringList:
+    case QMetaType::QByteArray: // a byte array is list-shaped (ay)
+        return OptionKind::List;
+    default:
+        return OptionKind::Scalar;
+    }
+}
+
+// The 'got' field of the upstream message shape: the value's own wire
+// signature, falling back to the C++ type name.
+QString optionValueSignature(const QVariant &v) {
+    if (const char *own = QDBusMetaType::typeToSignature(QMetaType(v.userType())))
+        return QString::fromLatin1(own);
+    if (const char *name = QMetaType(v.userType()).name())
+        return QString::fromLatin1(name);
+    return QStringLiteral("?");
+}
+
+QVariant coerceOptionValue(const QString &sig, const QVariant &value, bool *ok, int depth = 0);
+
+// Scalar slots: the pre-existing same-kind acceptance rules (string slots
+// stringify any scalar; bool takes bool/string/int/uint; numeric slots
+// reject bools and non-numeric strings and non-numeric types), now with
+// TYPED delivery (the coerced scalar, not the raw value).
+QVariant coerceScalarOption(const QString &sig, const QVariant &value, bool *ok) {
+    *ok = true;
+    const int t = value.userType();
+    if (sig == QLatin1String("s") || sig == QLatin1String("o") || sig == QLatin1String("g"))
+        return QVariant::fromValue(value.toString());
+    if (sig == QLatin1String("b")) {
+        if (t != QMetaType::Bool && t != QMetaType::QString && t != QMetaType::Int &&
+            t != QMetaType::UInt) {
+            *ok = false;
             return {};
         }
-        out.insert(it.key(), v);
+        return QVariant::fromValue(value.toBool());
+    }
+    if (sig == QLatin1String("y") || sig == QLatin1String("n") || sig == QLatin1String("q") ||
+        sig == QLatin1String("i") || sig == QLatin1String("u") || sig == QLatin1String("x") ||
+        sig == QLatin1String("t") || sig == QLatin1String("d") || sig == QLatin1String("h")) {
+        if (t == QMetaType::Bool) {
+            *ok = false; // bools never coerce to numeric
+            return {};
+        }
+        if (t == QMetaType::QString) {
+            bool numeric = false;
+            value.toString().toDouble(&numeric);
+            if (!numeric) {
+                *ok = false;
+                return {};
+            }
+        } else if (t != QMetaType::Int && t != QMetaType::UInt && t != QMetaType::LongLong &&
+                   t != QMetaType::ULongLong && t != QMetaType::Double) {
+            *ok = false;
+            return {};
+        }
+        if (sig == QLatin1String("y") || sig == QLatin1String("q"))
+            return QVariant::fromValue(value.toUInt());
+        if (sig == QLatin1String("n") || sig == QLatin1String("i"))
+            return QVariant::fromValue(value.toInt());
+        if (sig == QLatin1String("u"))
+            return QVariant::fromValue(value.toUInt());
+        if (sig == QLatin1String("x"))
+            return QVariant::fromValue(value.toLongLong());
+        if (sig == QLatin1String("t"))
+            return QVariant::fromValue(value.toULongLong());
+        if (sig == QLatin1String("d"))
+            return QVariant::fromValue(value.toDouble());
+        // h: an fd option is a plain int (the -1 sentinel contract is the
+        // producer's; delivery stays the int).
+        return QVariant::fromValue(value.toInt());
+    }
+    // Unrecognized declared sig (an authoring typo) — reject loud.
+    *ok = false;
+    return {};
+}
+
+QVariant coerceOptionValue(const QString &sig, const QVariant &value, bool *ok, int depth) {
+    // Same recursion discipline as the wire walkers (PARITY §2).
+    if (depth > 32) {
+        *ok = false;
+        return {};
+    }
+    // Defensive: a nested variant wrapper is unwrapped before kind-checks.
+    if (value.userType() == qMetaTypeId<QDBusVariant>())
+        return coerceOptionValue(sig, value.value<QDBusVariant>().variant(), ok, depth);
+    if (value.userType() == qMetaTypeId<QDBusArgument>()) {
+        *ok = false; // should have been unwrapped by dispatch — loud, never guess
+        return {};
+    }
+    if (sig == QLatin1String("v")) {
+        *ok = true; // a declared variant accepts any kind, delivered as-is
+        return value;
+    }
+    const OptionKind sk = optionSigKind(sig);
+    if (optionValueKind(value) != sk) {
+        *ok = false; // wrong KIND — decided before any coercion (R1)
+        return {};
+    }
+    if (sk == OptionKind::Scalar)
+        return coerceScalarOption(sig, value, ok);
+
+    if (sk == OptionKind::Map) {
+        // a{KV}: keys validate against K (JS map keys stay strings on
+        // delivery), values recurse against V.
+        QString inner = sig.mid(1); // "{KV}"
+        int pos = 1;                // past '{'
+        const QString keySig = firstCompleteType(inner, pos);
+        const QString valSig = firstCompleteType(inner, pos);
+        if (keySig.isEmpty() || valSig.isEmpty()) {
+            *ok = false;
+            return {};
+        }
+        QVariantMap out;
+        const QVariantMap map = value.toMap();
+        for (auto it = map.begin(); it != map.end(); ++it) {
+            if (keySig != QLatin1String("s")) {
+                bool kok = false;
+                coerceOptionValue(keySig, QVariant(it.key()), &kok, depth + 1);
+                if (!kok) {
+                    *ok = false;
+                    return {};
+                }
+            }
+            QVariant cv = it.value();
+            if (valSig != QLatin1String("v")) {
+                bool vok = false;
+                cv = coerceOptionValue(valSig, it.value(), &vok, depth + 1);
+                if (!vok) {
+                    *ok = false;
+                    return {};
+                }
+            }
+            out.insert(it.key(), cv);
+        }
+        *ok = true;
+        return QVariant::fromValue(out);
+    }
+
+    // OptionKind::List — arrays and structs-as-member-lists.
+    if (sig == QLatin1String("ay")) {
+        *ok = true;
+        if (value.userType() == QMetaType::QByteArray)
+            return value;
+        if (value.userType() == QMetaType::QString)
+            return QVariant::fromValue(value.toString().toUtf8());
+        QByteArray bytes;
+        const QVariantList list = value.toList();
+        bytes.reserve(list.size());
+        for (const QVariant &b : list)
+            bytes.append(static_cast<char>(b.toInt()));
+        return QVariant::fromValue(bytes);
+    }
+    if (sig.startsWith(QLatin1Char('('))) {
+        // Struct: fixed-arity member list — arity mismatch is unproducible.
+        const QString inner = sig.mid(1, sig.size() - 2);
+        QStringList memberSigs;
+        for (int pos = 0; pos < inner.size();) {
+            const QString ms = firstCompleteType(inner, pos);
+            if (ms.isEmpty()) {
+                *ok = false;
+                return {};
+            }
+            memberSigs << ms;
+        }
+        const QVariantList members = value.toList();
+        if (members.size() != memberSigs.size()) {
+            *ok = false;
+            return {};
+        }
+        QVariantList out;
+        out.reserve(members.size());
+        for (int i = 0; i < members.size(); ++i) {
+            bool mok = false;
+            const QVariant c = coerceOptionValue(memberSigs.at(i), members.at(i), &mok, depth + 1);
+            if (!mok) {
+                *ok = false;
+                return {};
+            }
+            out.append(c);
+        }
+        *ok = true;
+        return QVariant::fromValue(out);
+    }
+    // Plain array aE: per-element recursion against E.
+    const QString elemSig = sig.mid(1);
+    QVariantList out;
+    const QVariantList list = value.toList();
+    out.reserve(list.size());
+    for (const QVariant &e : list) {
+        bool eok = false;
+        const QVariant c = coerceOptionValue(elemSig, e, &eok, depth + 1);
+        if (!eok) {
+            *ok = false;
+            return {};
+        }
+        out.append(c);
+    }
+    *ok = true;
+    return QVariant::fromValue(out);
+}
+
+} // namespace
+
+QVariantMap DBusAdaptor::filterOptions(const QVariantMap &whitelist, const QVariantMap &options,
+                                       QString *error) const {
+    // xdp xdp_filter_options shape (xdp-utils.c:249): iterate the DECLARED
+    // keys — never the caller's dict — so unknown caller keys are silently
+    // dropped (forward-compat) and absent declared keys are simply not
+    // delivered. A declared key present with a matching/coercible-same-kind
+    // value delivers the TYPED (coerced) value, not the raw one (R1, the
+    // CF-14 raw-delivery hole). A declared key present with a wrong-KIND
+    // value → the caller gets InvalidArgs and the handler never runs.
+    QVariantMap out;
+    for (auto wit = whitelist.begin(); wit != whitelist.end(); ++wit) {
+        const QString sig = wit.value().toString();
+        const auto it = options.constFind(wit.key());
+        if (it == options.constEnd())
+            continue; // declared key absent from this call
+        bool ok = false;
+        const QVariant typed = coerceOptionValue(sig, it.value(), &ok);
+        if (!ok) {
+            if (error)
+                // Upstream message shape (xdp_set_error in xdp_filter_options).
+                *error = QStringLiteral("Expected type '%1' for option '%2', got '%3'")
+                             .arg(sig, wit.key(), optionValueSignature(it.value()));
+            return {};
+        }
+        out.insert(wit.key(), typed);
     }
     return out;
 }
@@ -1389,14 +1587,16 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
     for (QVariant &a : dbusArgs)
         a = unwrapDbus(a);
 
-    // P10a: served option-whitelist. When the method declares an
-    // _options entry AND the last in-arg is a{sv}, filter the dict
-    // BEFORE dispatch: unknown keys silently dropped, mistyped keys →
-    // InvalidArgs error reply (xdp semantics). The FILTERED dict is
-    // what the handler receives.
+    // P10a: served option-whitelist. When the method declares an _options
+    // entry AND the last in-arg is a{sv}, filter the dict BEFORE dispatch:
+    // unknown keys silently dropped, wrong-kind/mistyped keys → InvalidArgs
+    // error reply (xdp semantics, R1). The FILTERED dict — with TYPED
+    // values — is what the handler receives. R2: an engaged-but-empty
+    // whitelist is a real entry (filter ON, zero declared keys → the
+    // handler receives {}); only a MISSING entry skips filtering.
     {
-        const QVariantMap whitelist = optionWhitelist(member);
-        if (!whitelist.isEmpty() && !dbusArgs.isEmpty()) {
+        const std::optional<QVariantMap> whitelist = optionWhitelist(member);
+        if (whitelist.has_value() && !dbusArgs.isEmpty()) {
             const QVariant &last = dbusArgs.last();
             QVariantMap opts;
             bool isOptionsDict = false;
@@ -1406,7 +1606,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
             }
             if (isOptionsDict) {
                 QString filterError;
-                const QVariantMap filtered = filterOptions(whitelist, opts, &filterError);
+                const QVariantMap filtered = filterOptions(*whitelist, opts, &filterError);
                 if (!filterError.isEmpty()) {
                     sendReply(msg.createErrorReply(
                         QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"), filterError));

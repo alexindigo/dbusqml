@@ -386,6 +386,12 @@ private slots:
     void testOptionsDropMistypePassthrough();
     void testOptionsNoWhitelistUntouched();
     void testOptionsIgnoredWithoutTrailingDict();
+    // road-to-one R1/R2 (owner Calls 1/2): strict option typing (wrong-KIND
+    // matrix + typed delivery), empty allow-list denies keys, and the
+    // exactly-one-error-reply wire pin through the oracle.
+    void testOptionsStrictKindMatrix();
+    void testOptionsEmptyWhitelistDeniesKeys();
+    void testOptionsInvalidArgsExactlyOneReply();
     // Phase 6 (P10b sender authorization): AccessDenied for the
     // stranger, pass for the owner, Properties surfaces covered.
     void testAllowedSenderMethodGate();
@@ -1801,6 +1807,24 @@ static quint32 oracleReceivedCount(quint32 serial) {
     return r.arguments().at(0).toUInt();
 }
 
+// Oracle CallAdaptorOptions(service, path, iface, member, optKey, optString)
+// -> outgoing serial. Like CallAdaptor but the call carries a trailing
+// a{sv} options dict { optKey: variant-of-string optString } — the R1
+// strict-typing pin delivers a scalar string to a list-declared key
+// (wrong KIND) and asserts exactly-one-error-reply on the wire.
+static quint32 oracleCallAdaptorOptions(const QString &service, const QString &path,
+                                        const QString &iface, const QString &member,
+                                        const QString &optKey, const QString &optValue) {
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("/Oracle"),
+        QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("CallAdaptorOptions"));
+    m.setArguments({service, path, iface, member, optKey, optValue});
+    const QDBusMessage r = QDBusConnection::sessionBus().call(m, QDBus::Block, 10000);
+    if (r.type() != QDBusMessage::ReplyMessage || r.arguments().size() < 2)
+        return 0;
+    return r.arguments().at(0).toUInt();
+}
+
 // Sensitivity control: a service that deliberately sends TWO replies per
 // call serial. The oracle MUST report ReceivedCount == 2 for it — otherwise
 // the ==1 evidence in the pins above would be vacuous (a broken counter
@@ -2445,6 +2469,208 @@ void TestDBusAdaptor::testOptionsIgnoredWithoutTrailingDict() {
     delete wC;
     QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(r.arguments().first().toInt(), 42);
+    delete adaptor;
+}
+
+// ==================== road-to-one R1/R2: strict option typing ====================
+//
+// R1 (owner Call 1 — xdp_filter_options semantics, xdp-utils.c:249): the
+// filter iterates the DECLARED keys; a declared key present with a
+// matching/coercible-same-kind value delivers the TYPED (coerced) value —
+// not the raw one; a wrong-KIND value (scalar where list-shaped declared,
+// list where map declared, container where scalar declared,
+// non-convertible scalar for a basic sig) → InvalidArgs and the handler
+// never runs. R2 (owner Call 2): an empty allow-list is a real entry —
+// filter ON with zero declared keys → every caller key is unknown → the
+// handler receives {}.
+void TestDBusAdaptor::testOptionsStrictKindMatrix() {
+    QObject *adaptor = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.OptStrict'\n"
+        "  path: '/OptStrict'\n"
+        "  iface: 'org.dbusqml.OptStrict'\n"
+        "  property int handlerCalls: 0\n"
+        "  _options: ({ DoIt: ({ names: 'as', props: 'a{sv}', pairs: 'a(ss)', count: 'u',"
+        " label: 's' }) })\n"
+        "  function doIt(options) {\n"
+        "    handlerCalls++;\n"
+        "    var parts = [];\n"
+        "    for (var k in options) {\n"
+        "      var v = options[k];\n"
+        "      if (Array.isArray(v))\n"
+        "        parts.push(k + '=[list:' + v.length + ':' + v.join(',') + ']');\n"
+        "      else if (typeof v === 'object')\n"
+        "        parts.push(k + '=[map:' + Object.keys(v).join(',') + ']');\n"
+        "      else\n"
+        "        parts.push(k + '=' + typeof v + ':' + v);\n"
+        "    }\n"
+        "    parts.sort();\n"
+        "    return parts.join(';') + '|calls=' + handlerCalls;\n"
+        "  }\n"
+        "}");
+    QVERIFY(adaptor != nullptr);
+    auto callDo = [&](const QVariantMap &opts) -> QDBusMessage {
+        QDBusPendingCallWatcher *w = asyncCallDeferred(
+            QStringLiteral("org.dbusqml.OptStrict"), QStringLiteral("/OptStrict"),
+            QStringLiteral("org.dbusqml.OptStrict"), QStringLiteral("DoIt"), QVariantList{opts});
+        QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+        if (!spy.wait(5000))
+            return QDBusMessage::createError(QStringLiteral("org.dbusqml.Test.Timeout"),
+                                             QStringLiteral("callDo timed out"));
+        QDBusMessage reply = w->reply();
+        delete w;
+        return reply;
+    };
+
+    // Typed delivery: matching/coercible-same-kind values arrive COERCED.
+    QDBusMessage typed = callDo(QVariantMap{{QStringLiteral("count"), QStringLiteral("42")},
+                                            {QStringLiteral("label"), 7},
+                                            {QStringLiteral("names"), QStringList{"a", "b"}}});
+    QCOMPARE(typed.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(typed.arguments().first().toString(),
+             QStringLiteral("count=number:42;label=string:7;names=[list:2:a,b]|calls=1"));
+
+    // Wrong-KIND matrix: every cell must reply InvalidArgs, name the
+    // option, and NOT run the handler (calls stays 1 throughout).
+    const QList<QPair<QString, QVariant>> wrongKind = {
+        {QStringLiteral("names"), QStringLiteral("oops")},                // scalar for as
+        {QStringLiteral("names"), QVariantMap{{QStringLiteral("a"), 1}}}, // map for as
+        {QStringLiteral("props"), QVariantList{1, 2}},                    // list for a{sv}
+        {QStringLiteral("props"), QStringLiteral("x")},                   // scalar for a{sv}
+        {QStringLiteral("pairs"), QStringLiteral("x")},                   // scalar for a(ss)
+        {QStringLiteral("pairs"), QVariantMap{{QStringLiteral("a"), 1}}}, // map for a(ss)
+        {QStringLiteral("pairs"),
+         QVariantList{QVariantList{QStringLiteral("x")}}}, // arity 1 vs (ss)
+        {QStringLiteral("pairs"),
+         QVariantList{QVariantList{QStringLiteral("x"),
+                                   QVariantMap{{QStringLiteral("a"), 1}}}}}, // map member for s
+        {QStringLiteral("count"), QVariantList{1}},                          // list for u
+        {QStringLiteral("count"), QVariantMap{{QStringLiteral("a"), 1}}},    // map for u
+        {QStringLiteral("count"), QStringLiteral("abc")},                    // non-numeric scalar
+        {QStringLiteral("count"), true},                                     // bool for numeric
+        {QStringLiteral("label"), QVariantList{QStringLiteral("x")}},        // list for s
+        {QStringLiteral("label"), QVariantMap{{QStringLiteral("a"), 1}}},    // map for s
+    };
+    for (const auto &cell : wrongKind) {
+        QDBusMessage r = callDo(QVariantMap{{cell.first, cell.second}});
+        QCOMPARE(r.type(), QDBusMessage::ErrorMessage);
+        QCOMPARE(r.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+        QVERIFY2(r.errorMessage().contains(QStringLiteral("Expected type")),
+                 qPrintable(r.errorMessage()));
+        QVERIFY2(r.errorMessage().contains(cell.first), qPrintable(r.errorMessage()));
+    }
+    QCOMPARE(adaptor->property("handlerCalls").toInt(), 1);
+
+    // Right-kind container coercion: elements typed per the declared sig.
+    QDBusMessage cont = callDo(QVariantMap{
+        {QStringLiteral("names"), QVariantList{QStringLiteral("a"), 1, true}},
+        {QStringLiteral("pairs"), QVariantList{QVariantList{QStringLiteral("x"), 9}}},
+    });
+    QCOMPARE(cont.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(cont.arguments().first().toString(),
+             QStringLiteral("names=[list:3:a,1,true];pairs=[list:1:x,9]|calls=2"));
+
+    // Absent declared keys are simply not delivered (iterate-declared).
+    QDBusMessage absent = callDo(QVariantMap{{QStringLiteral("label"), QStringLiteral("z")}});
+    QCOMPARE(absent.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(absent.arguments().first().toString(), QStringLiteral("label=string:z|calls=3"));
+    delete adaptor;
+}
+
+void TestDBusAdaptor::testOptionsEmptyWhitelistDeniesKeys() {
+    // R2: `_options: { DoIt: {} }` — an EMPTY entry is filter ON with zero
+    // declared keys: every caller key is unknown → silently dropped → the
+    // handler receives {} and the call proceeds. No runtime notice.
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.OptDeny'\n"
+                                        "  path: '/OptDeny'\n"
+                                        "  iface: 'org.dbusqml.OptDeny'\n"
+                                        "  _options: ({ DoIt: ({}) })\n"
+                                        "  function doIt(options) {\n"
+                                        "    var keys = [];\n"
+                                        "    for (var k in options) keys.push(k);\n"
+                                        "    return keys.length + ' keys';\n"
+                                        "  }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    // No runtime notice on the empty-entry path — capture warnings issued
+    // during the call.
+    static QStringList *sink = nullptr;
+    QStringList local;
+    sink = &local;
+    QtMessageHandler prior =
+        qInstallMessageHandler([](QtMsgType, const QMessageLogContext &, const QString &m) {
+            if (sink)
+                sink->append(m);
+        });
+
+    QDBusPendingCallWatcher *w = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.OptDeny"), QStringLiteral("/OptDeny"),
+        QStringLiteral("org.dbusqml.OptDeny"), QStringLiteral("DoIt"),
+        QVariantList{QVariantMap{{QStringLiteral("anything"), 1}, {QStringLiteral("else"), 2}}});
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QDBusMessage r = w->reply();
+    delete w;
+
+    qInstallMessageHandler(prior);
+    sink = nullptr;
+
+    QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r.arguments().first().toString(), QStringLiteral("0 keys"));
+    QVERIFY2(local.isEmpty(),
+             qPrintable(
+                 QStringLiteral("unexpected warnings: %1").arg(local.join(QStringLiteral(" | ")))));
+    delete adaptor;
+}
+
+void TestDBusAdaptor::testOptionsInvalidArgsExactlyOneReply() {
+    // R1 wire assertion (oracle): the new wrong-KIND error path must still
+    // answer EXACTLY ONE reply per serial. A scalar string is delivered to
+    // a list-declared key ('as') — the parent tree's lenient path would
+    // have marshalled and invoked; the strict path replies InvalidArgs and
+    // the handler never runs.
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.OptWire'\n"
+                                        "  path: '/OptWire'\n"
+                                        "  iface: 'org.dbusqml.OptWire'\n"
+                                        "  property bool boomRan: false\n"
+                                        "  _options: ({ DoIt: ({ tags: 'as' }) })\n"
+                                        "  function doIt(options) { boomRan = true; return 'x'; }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+    const quint32 serial =
+        oracleCallAdaptorOptions(QStringLiteral("org.dbusqml.OptWire"), QStringLiteral("/OptWire"),
+                                 QStringLiteral("org.dbusqml.OptWire"), QStringLiteral("DoIt"),
+                                 QStringLiteral("tags"), QStringLiteral("oops"));
+    QVERIFY(serial != 0);
+    QTest::qWait(500); // settle + quiet window
+    QCOMPARE(oracleReceivedCount(serial), 1u);
+
+    // The handler never ran, and the in-suite caller sees the InvalidArgs.
+    QCOMPARE(adaptor->property("boomRan").toBool(), false);
+    QDBusPendingCallWatcher *w = asyncCallDeferred(
+        QStringLiteral("org.dbusqml.OptWire"), QStringLiteral("/OptWire"),
+        QStringLiteral("org.dbusqml.OptWire"), QStringLiteral("DoIt"),
+        QVariantList{QVariantMap{{QStringLiteral("tags"), QStringLiteral("oops")}}});
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QDBusMessage r = w->reply();
+    delete w;
+    QCOMPARE(r.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(r.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    QVERIFY2(r.errorMessage().contains(QStringLiteral("Expected type 'as' for option 'tags'")),
+             qPrintable(r.errorMessage()));
     delete adaptor;
 }
 
