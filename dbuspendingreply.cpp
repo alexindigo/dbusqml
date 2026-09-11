@@ -129,6 +129,12 @@ void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
     }
 
     m_finished = true;
+    // Clean up the watcher. SingleShotConnection means this is the only
+    // slot, so the signal emission completes before the destructor runs.
+    // Immediate delete (not deleteLater) is safe here.
+    delete watcher;
+    m_watcher = nullptr;
+
     // Queue the emission so a synchronous reply.finished.connect() right
     // after call() always lands first. QPointer guard: if the engine is
     // destroyed before the queued call runs, m_engine is null and the
@@ -139,11 +145,25 @@ void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
         emit finished();
     }
 
-    // Clean up the watcher after the signal is delivered. SingleShotConnection
-    // means this is the only slot, so the signal emission completes before the
-    // destructor runs. Immediate delete (not deleteLater) is safe here.
-    delete watcher;
-    m_watcher = nullptr;
+    // R4 (road-to-one, owner Call 4 = safe-A): hand completed replies to
+    // the JS garbage collector — SYNCHRONOUSLY, in this same stack frame.
+    // The 27a5f72 attempt posted the handoff as a queued event and died in
+    // ccaade6 (the posted lambda ran during engine teardown, touching
+    // half-destroyed engine state). A synchronous handoff runs while the
+    // engine is verifiably alive (m_engine is a QPointer — nulled the
+    // moment ~QQmlEngine starts), so teardown never observes a reparent.
+    //
+    // Self-check first: in the direct-emit branch a re-entrant handler may
+    // have destroyed this reply inside finished — nothing left to hand off.
+    QPointer<DBusPendingReply> self(this);
+    if (!self)
+        return;
+    if (m_engine && m_gcHandoff) {
+        setParent(nullptr);
+        QQmlEngine::setObjectOwnership(this, QQmlEngine::JavaScriptOwnership);
+    }
+    // No engine (pure C++ consumer): keep the parent — current behavior.
+    // (27a5f72 had this branch; kept.)
 }
 
 void DBusPendingReply::completeFromReply(const QDBusMessage &reply) {

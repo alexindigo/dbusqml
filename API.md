@@ -775,6 +775,18 @@ Represents the result of an asynchronous D-Bus call.
 | :--- | :--- |
 | `finished` | Emitted when the reply arrives. |
 
+#### Lifetime
+
+A reply's data is cached at completion, so `value`/`values`/`error` stay
+readable after `finished` — the reply is self-contained. Ownership: while the
+call is in flight the reply is parented to its creator; **at completion it is
+handed to the JavaScript garbage collector** (synchronously, before your
+`finished` handler can run). Keep a reference (`var r = ...; r.finished.connect(...)`)
+and the reply stays alive as long as you hold it; drop every reference and the
+next `gc()` collects it — fire-and-forget calls no longer accumulate on the
+connection. A pure C++ consumer (no QML engine) keeps the old behavior: the
+reply stays parented to its creator.
+
 ---
 
 ### `DBusError` (Structured Value)

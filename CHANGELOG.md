@@ -56,6 +56,17 @@
   with a loud warning.
 - **Strict signature gate at depth 32** (was: 64 while walkers cap at
   32 — unmarshalable shapes burned process-global slots).
+- **Completed replies are handed to the JS GC** (behavior change): at
+  completion a `DBusPendingReply` is unparented and marked
+  `JavaScriptOwnership` — synchronously, in the completion's own stack
+  frame (the 27a5f72 posted-handoff attempt died in ccaade6; the
+  synchronous form survives the full engine-teardown matrix under ASan,
+  spike-proven before landing). Fire-and-forget calls no longer
+  accumulate reply objects on the connection; callers that keep a
+  reference keep the reply (late subscribers are safe by construction).
+  Pure C++ consumers (no engine) keep parented ownership. The
+  promise-style `asyncCall` overload manages its reply C++-side
+  (unchanged; it never crosses into JS and opts out of the handoff).
 - **Strict option typing** (behavior change): the `_options` filter
   iterates the declared keys and delivers the **typed** (coerced) value;
   a declared key with a wrong-kind (scalar-for-list, list-for-map,

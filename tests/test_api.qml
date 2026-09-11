@@ -232,7 +232,7 @@ TestCase {
             service: "org.freedesktop.DBus",
             path: "/org/freedesktop/DBus",
             iface: "org.freedesktop.DBus",
-            member: "ListNames",
+            member: "ListNames"
         }, function(result) {
             done = true
         }, function(error) {
@@ -240,6 +240,46 @@ TestCase {
         })
         tryVerify(function() { return done; }, 5000,
                   "promise-style call should complete")
+    }
+
+    // ── R4: pending-reply GC handoff (road-to-one, owner Call 4) ─────
+    // Completed replies are handed to the JS GC synchronously at
+    // completion (safe-A; spike green under ASan on the fork before
+    // landing). QML-level pin: N looped calls with references dropped,
+    // gc() forced between completion batches — every finished must still
+    // fire (no collection-before-delivery), and after gc() the engine and
+    // bus keep working. (QML cannot observe findChildren()/destroyed() on
+    // plain wrappers — the collection/baseline proof is the C++-side pin
+    // testReplyGcHandoffCollection; this pin covers the real module path:
+    // DBusQML.SessionBus singleton + plugin-registered types.)
+    function test_pending_reply_gc_handoff() {
+        var N = 8
+        var finishedCount = 0
+        for (var i = 0; i < N; i++) {
+            let r = DBusQML.SessionBus.asyncCall({
+                service: "org.freedesktop.DBus",
+                path: "/org/freedesktop/DBus",
+                iface: "org.freedesktop.DBus",
+                member: "ListNames"
+            })
+            r.finished.connect(function() { finishedCount++ })
+        }
+        tryVerify(function() { return finishedCount === N; }, 10000,
+                  "all replies should finish")
+        gc()
+        gc()
+        // After gc() collected the dropped, handed-off replies: a fresh
+        // call through the same singleton completes with real values.
+        var r = DBusQML.SessionBus.asyncCall({
+            service: "org.freedesktop.DBus",
+            path: "/org/freedesktop/DBus",
+            iface: "org.freedesktop.DBus",
+            member: "NameHasOwner",
+            arguments: ["org.freedesktop.DBus"]
+        })
+        tryVerify(function() { return r.isFinished; }, 5000)
+        verify(!r.isError, "post-gc call should not error: " + r.error.message)
+        compare(r.value, true, "post-gc call should return real values")
     }
 
     function test_properties_get() {

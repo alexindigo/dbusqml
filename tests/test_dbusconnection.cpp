@@ -13,6 +13,7 @@
 #include <QProcess>
 #include <unistd.h>
 #include <QDBusConnectionInterface>
+#include <QDBusContext>
 #include <QDBusMetaType>
 #include <QDBusVariant>
 #include <QDBusVirtualObject>
@@ -489,6 +490,86 @@ static QString echoWireSignature(const QVariant &arg) {
 }
 
 // ==================== Test Class ====================
+
+// ==================== R4 pending-reply GC handoff fixtures ====================
+// (road-to-one, owner Call 4 = safe-A; spike-verified on the fork — see
+// plans/road-to-one/artifacts/r4-spike-*.)
+//
+// DelayEchoObject: Echo replies immediately; Delay replies after N ms — the
+// in-flight-at-teardown geometry needs a slow reply on a live bus.
+class DelayEchoObject : public QObject, protected QDBusContext {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.dbusqml.R4Echo")
+public slots:
+    QString Echo(const QString &s) { return s; }
+    void Delay(const QString &s, int ms) {
+        setDelayedReply(true);
+        const QDBusMessage msg = message();
+        const QDBusConnection conn = connection();
+        QTimer::singleShot(ms, this, [conn, msg, s]() mutable { conn.send(msg.createReply(s)); });
+    }
+};
+
+// R4MsgFactory: DBusMessage gadgets for evaluate()d JS (the JS-object →
+// gadget conversion needs the QML module's registration, unavailable to
+// bare evaluate(); C++ builds the messages instead).
+class R4MsgFactory : public QObject {
+    Q_OBJECT
+public:
+    Q_INVOKABLE DBusMessage echo() const {
+        DBusMessage m;
+        m.setService(QStringLiteral("org.dbusqml.R4Echo"));
+        m.setPath(QStringLiteral("/R4Echo"));
+        m.setIface(QStringLiteral("org.dbusqml.R4Echo"));
+        m.setMember(QStringLiteral("Echo"));
+        m.setArguments({QStringLiteral("spike-value-42")});
+        return m;
+    }
+    Q_INVOKABLE DBusMessage delay(int ms) const {
+        DBusMessage m;
+        m.setService(QStringLiteral("org.dbusqml.R4Echo"));
+        m.setPath(QStringLiteral("/R4Echo"));
+        m.setIface(QStringLiteral("org.dbusqml.R4Echo"));
+        m.setMember(QStringLiteral("Delay"));
+        m.setArguments({QStringLiteral("in-flight"), ms});
+        return m;
+    }
+    Q_INVOKABLE DBusMessage listNames() const {
+        DBusMessage m;
+        m.setService(QStringLiteral("org.freedesktop.DBus"));
+        m.setPath(QStringLiteral("/org/freedesktop/DBus"));
+        m.setIface(QStringLiteral("org.freedesktop.DBus"));
+        m.setMember(QStringLiteral("ListNames"));
+        return m;
+    }
+};
+
+// Expose a C++ object to evaluate()d JS as a true global (context
+// properties are NOT in evaluate()'s scope chain). newQObject flips
+// ownership as a side effect; restore it so the test keeps lifetime control.
+static void r4ExposeGlobal(QQmlEngine *engine, const char *name, QObject *obj) {
+    const QQmlEngine::ObjectOwnership prior = QQmlEngine::objectOwnership(obj);
+    engine->globalObject().setProperty(QString::fromLatin1(name), engine->newQObject(obj));
+    QQmlEngine::setObjectOwnership(obj, prior);
+}
+
+// newQObject alone does not make qmlEngine(obj) resolve — and
+// qmlEngine(creator) is what sets the reply's m_engine, i.e. the handoff
+// gate. setContextForObject attaches the engine context, mirroring
+// QML-created elements in real consumers.
+static void r4ExposeConn(QQmlEngine *engine, DBusConnection *conn) {
+    r4ExposeGlobal(engine, "conn", conn);
+    QQmlEngine::setContextForObject(conn, engine->rootContext());
+}
+
+// Deletes the dedicated connection on JS demand (pin: conn death inside
+// the finished handler).
+class R4ConnKiller : public QObject {
+    Q_OBJECT
+public:
+    QPointer<DBusConnection> conn;
+    Q_INVOKABLE void kill() { delete conn; }
+};
 
 class TestDBusConnection : public QObject {
     Q_OBJECT
@@ -3066,6 +3147,272 @@ private slots:
                  qPrintable(capture.messages.join(QStringLiteral(" | "))));
         PropertyServerObject::s_clampMax = 0u; // disarm for other tests
         delete proxy;
+    }
+
+    // ==================== R4: pending-reply GC handoff ====================
+    // (road-to-one, owner Call 4 = safe-A; spike pins green under ASan on
+    // the fork BEFORE this landed — plans/road-to-one/artifacts/. Design:
+    // in flight = parented, CppOwnership; at completion, synchronously in
+    // onFinished's stack frame: cache → delete watcher → emit finished →
+    // QPointer self-check → setParent(nullptr) + JavaScriptOwnership. No
+    // engine → keep the parent (pure C++ consumer behavior unchanged).
+    // The promise-style overload opts out (library-managed lifetime).
+
+    // Pin 1: engine teardown with a reply IN FLIGHT → no crash, no leak;
+    // the reply completes engine-less, stays parented, dies with the
+    // connection.
+    void testReplyGcHandoffEngineDeathInFlight() {
+        DelayEchoObject svc;
+        QVERIFY(QDBusConnection::sessionBus().registerObject(QStringLiteral("/R4Echo"), &svc,
+                                                             QDBusConnection::ExportAllSlots));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        r4ExposeConn(engine, conn);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+        const QJSValue r =
+            engine->evaluate(QStringLiteral("var r = conn.asyncCall(msgFactory.delay(400)); r"));
+        QVERIFY(!r.isError());
+        QPointer<DBusPendingReply> rp = qobject_cast<DBusPendingReply *>(r.toQObject());
+        QVERIFY(rp != nullptr);
+
+        delete engine; // engine dies with the call in flight
+        QVERIFY(!conn->findChildren<DBusPendingReply *>().isEmpty()); // kept parent
+        // Let the delayed reply land; onFinished runs engine-less.
+        QTest::qWait(1200);
+        QVERIFY(rp != nullptr);
+        QVERIFY(rp->isFinished());
+        QVERIFY(!rp->isError());
+        delete conn; // reply is a child → deleted here (no leak)
+        QVERIFY(rp.isNull());
+    }
+
+    // Pin 2: engine teardown with a FINISHED + JS-referenced reply →
+    // no crash; the handoff happened (unparented, JS-owned) and the
+    // engine collects the reply at teardown.
+    void testReplyGcHandoffEngineDeathReferenced() {
+        DelayEchoObject svc;
+        QVERIFY(QDBusConnection::sessionBus().registerObject(QStringLiteral("/R4Echo"), &svc,
+                                                             QDBusConnection::ExportAllSlots));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        r4ExposeConn(engine, conn);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+        const QJSValue res = engine->evaluate(QStringLiteral(
+            "var grabbed = null; var done = false;"
+            "(function(){ var r = conn.asyncCall(msgFactory.echo());"
+            " r.finished.connect(function(){ grabbed = r; done = true; }); })(); 'ok'"));
+        QVERIFY2(!res.isError(), qPrintable(res.toString()));
+        QTRY_VERIFY_WITH_TIMEOUT(engine->evaluate(QStringLiteral("done === true")).toBool(), 10000);
+
+        DBusPendingReply *rp = qobject_cast<DBusPendingReply *>(
+            engine->evaluate(QStringLiteral("grabbed")).toQObject());
+        QVERIFY(rp != nullptr);
+        QCOMPARE(rp->parent(), nullptr); // handed off
+        QCOMPARE(QQmlEngine::objectOwnership(rp), QQmlEngine::JavaScriptOwnership);
+        QPointer<DBusPendingReply> qp(rp);
+
+        delete engine; // collects the JS-owned, referenced reply
+        QVERIFY(qp.isNull());
+        QTest::qWait(200);
+        delete conn;
+    }
+
+    // Pin 2b (matrix): engine teardown with a finished + UNREFERENCED
+    // reply → no crash; the JS-owned reply is collected at teardown.
+    void testReplyGcHandoffEngineDeathUnreferenced() {
+        DelayEchoObject svc;
+        QVERIFY(QDBusConnection::sessionBus().registerObject(QStringLiteral("/R4Echo"), &svc,
+                                                             QDBusConnection::ExportAllSlots));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        r4ExposeConn(engine, conn);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+        const QJSValue res = engine->evaluate(
+            QStringLiteral("var done = false;"
+                           "(function(){ var r = conn.asyncCall(msgFactory.echo());"
+                           " r.finished.connect(function(){ done = true; }); })(); 'ok'"));
+        QVERIFY2(!res.isError(), qPrintable(res.toString()));
+        // The reply exists synchronously, parented pre-completion.
+        const auto kids = conn->findChildren<DBusPendingReply *>();
+        QCOMPARE(kids.size(), 1);
+        QPointer<DBusPendingReply> qp(kids.first());
+        QTRY_VERIFY_WITH_TIMEOUT(engine->evaluate(QStringLiteral("done === true")).toBool(), 10000);
+        QVERIFY(qp != nullptr);
+        QCOMPARE(qp->parent(), nullptr); // handed off
+
+        delete engine;
+        QVERIFY(qp.isNull()); // collected with the engine despite no JS reference
+        QTest::qWait(200);
+        delete conn;
+    }
+
+    // Pin 3: a handler that grabs the reply reads .value AFTER finished →
+    // the cached, self-contained values.
+    void testReplyGcHandoffReadAfterFinished() {
+        DelayEchoObject svc;
+        QVERIFY(QDBusConnection::sessionBus().registerObject(QStringLiteral("/R4Echo"), &svc,
+                                                             QDBusConnection::ExportAllSlots));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        r4ExposeConn(engine, conn);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+        const QJSValue res = engine->evaluate(QStringLiteral(
+            "var grabbed = null; var done = false;"
+            "(function(){ var r = conn.asyncCall(msgFactory.echo());"
+            " r.finished.connect(function(){ grabbed = r; done = true; }); })(); 'ok'"));
+        QVERIFY2(!res.isError(), qPrintable(res.toString()));
+        QTRY_VERIFY_WITH_TIMEOUT(engine->evaluate(QStringLiteral("done === true")).toBool(), 10000);
+
+        // Read .value AFTER finished — and again after a gc() cycle
+        // (referenced ⇒ survives, still readable).
+        QJSValue v = engine->evaluate(QStringLiteral("grabbed.value"));
+        QVERIFY(!v.isError());
+        QCOMPARE(v.toString(), QStringLiteral("spike-value-42"));
+        engine->collectGarbage();
+        QTest::qWait(50);
+        v = engine->evaluate(QStringLiteral("grabbed.value"));
+        QVERIFY(!v.isError());
+        QCOMPARE(v.toString(), QStringLiteral("spike-value-42"));
+        delete engine;
+        delete conn;
+    }
+
+    // Pin 4: N looped calls, references dropped, gc() forced →
+    // findChildren<DBusPendingReply*>() returns to baseline. (Collection
+    // itself is proven two ways: LSan silence at exit in sanitizer builds,
+    // and the QML-side destroyed-count pin in test_api.qml.)
+    void testReplyGcHandoffCollection() {
+        DelayEchoObject svc;
+        QVERIFY(QDBusConnection::sessionBus().registerObject(QStringLiteral("/R4Echo"), &svc,
+                                                             QDBusConnection::ExportAllSlots));
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        r4ExposeConn(engine, conn);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+        const QJSValue res =
+            engine->evaluate(QStringLiteral("var done = 0;"
+                                            "function onDone() { done++; }"
+                                            "(function(){"
+                                            "  for (var i = 0; i < 50; i++) {"
+                                            "    var r = conn.asyncCall(msgFactory.listNames());"
+                                            "    r.finished.connect(onDone);"
+                                            "  }"
+                                            "})(); 'ok'"));
+        QVERIFY2(!res.isError(), qPrintable(res.toString()));
+        QTRY_VERIFY_WITH_TIMEOUT(engine->evaluate(QStringLiteral("done === 50")).toBool(), 20000);
+
+        for (int i = 0; i < 5; ++i) {
+            engine->collectGarbage();
+            QTest::qWait(60);
+        }
+        QVERIFY(conn->findChildren<DBusPendingReply *>().isEmpty()); // baseline
+        delete engine;
+        delete conn;
+    }
+
+    // Pin 5: a handler that destroys the CONNECTION inside finished →
+    // no crash; the reply (unparented at completion, JS-owned, referenced)
+    // survives and stays readable.
+    void testReplyGcHandoffConnDeathInHandler() {
+        DelayEchoObject svc;
+        QVERIFY(QDBusConnection::sessionBus().registerObject(QStringLiteral("/R4Echo"), &svc,
+                                                             QDBusConnection::ExportAllSlots));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        R4ConnKiller killer;
+        killer.conn = conn;
+        r4ExposeConn(engine, conn);
+        r4ExposeGlobal(engine, "killer", &killer);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+        QPointer<DBusConnection> cp(conn);
+        const QJSValue res = engine->evaluate(QStringLiteral(
+            "var grabbed = null; var afterKill = false;"
+            "(function(){ var r = conn.asyncCall(msgFactory.echo()); grabbed = r;"
+            " r.finished.connect(function(){ killer.kill(); afterKill = true; }); })(); 'ok'"));
+        QVERIFY2(!res.isError(), qPrintable(res.toString()));
+        QTRY_VERIFY_WITH_TIMEOUT(engine->evaluate(QStringLiteral("afterKill === true")).toBool(),
+                                 10000);
+        QVERIFY(cp.isNull()); // the connection really died inside the handler
+        const QJSValue v = engine->evaluate(QStringLiteral("grabbed.isFinished"));
+        QVERIFY(!v.isError());
+        QVERIFY(v.toBool());
+        QTest::qWait(200);
+        delete engine; // collects the reply
+    }
+
+    // Pin 6 (promise path): the promise-style overload manages its reply
+    // C++-side (the CF-11 deleteLater settle) and opts OUT of the handoff —
+    // under a GC storm every promise still settles exactly once.
+    void testReplyGcHandoffPromisePathSettles() {
+        DelayEchoObject svc;
+        QVERIFY(QDBusConnection::sessionBus().registerObject(QStringLiteral("/R4Echo"), &svc,
+                                                             QDBusConnection::ExportAllSlots));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        r4ExposeConn(engine, conn);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+        const QJSValue res = engine->evaluate(QStringLiteral(
+            "var settled = 0;"
+            "(function(){"
+            "  for (var i = 0; i < 40; i++) {"
+            "    conn.asyncCall(msgFactory.echo(), function(v){ settled++; }, function(e){"
+            "      settled++; });"
+            "  }"
+            "})(); 'ok'"));
+        QVERIFY2(!res.isError(), qPrintable(res.toString()));
+        // GC storm while the completions land (opens the
+        // completion→delivery window the handoff creates).
+        QTimer storm;
+        storm.setInterval(1);
+        QObject::connect(&storm, &QTimer::timeout, conn, [engine] { engine->collectGarbage(); });
+        storm.start();
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < 20000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            if (engine->evaluate(QStringLiteral("settled === 40")).toBool())
+                break;
+            QThread::msleep(2);
+        }
+        storm.stop();
+        QVERIFY2(engine->evaluate(QStringLiteral("settled === 40")).toBool(),
+                 qPrintable(QStringLiteral("settled=%1")
+                                .arg(engine->evaluate(QStringLiteral("settled")).toString())));
+        delete engine;
+        delete conn;
     }
 
     // ==================== P5: bus connection-loss handling ====================

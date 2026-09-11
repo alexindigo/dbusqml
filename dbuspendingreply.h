@@ -30,6 +30,14 @@ public:
     void setWatcher(QDBusPendingCallWatcher *watcher);
     void setEngine(QQmlEngine *engine) { m_engine = engine; }
 
+    // R4 (road-to-one, Call 4): completed replies are handed to the JS GC
+    // (see onFinished). A reply whose lifetime the LIBRARY manages C++-side
+    // opts out: the promise-style asyncCall overload settles its reply
+    // itself (deleteLater, CF-11) and never returns it to JS — handing it
+    // off would unparent it with no JS wrapper ever created (nothing to
+    // collect it → leak), and its C++ settle contract already covers it.
+    void setGcHandoffEnabled(bool on) { m_gcHandoff = on; }
+
     // Complete LOCALLY with a D-Bus error — no wire round-trip. The
     // client-exit guard path: a call whose arguments cannot be marshaled
     // fails here (with org.freedesktop.DBus.Error.Failed, "argument N is not
@@ -70,4 +78,5 @@ private:
     QVariantList m_values;
     bool m_cached = false;
     QPointer<QQmlEngine> m_engine;
+    bool m_gcHandoff = true;
 };

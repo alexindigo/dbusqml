@@ -1644,6 +1644,12 @@ void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resol
     //     containers are unwrapped via unwrapDbus).
     //   reject is called with a single error object { name, message }.
     auto reply = asyncCall(message);
+    // R4: the promise path manages this reply C++-side (settled →
+    // deleteLater below) and never returns it to JS — opt it out of the
+    // completion GC handoff (unparenting it with no JS wrapper would leak
+    // it; its settle contract already covers deletion). Set BEFORE the
+    // early return so the no-callback call stays connection-parented too.
+    reply->setGcHandoffEnabled(false);
     if (!resolve.isCallable() && !reject.isCallable())
         return;
 
