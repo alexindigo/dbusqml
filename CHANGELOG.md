@@ -18,8 +18,9 @@
   drop/error semantics; `InvalidArgs` on mistype.
 - **P10b sender authorization**: `allowedSender` adaptor property,
   `AccessDenied` on mismatch (methods + Properties).
-- **P8 failed-Set rollback**: prior value restored + warn + optional
-  `propertyWriteFailed(name, errorName, message)` signal.
+- **P8 failed-Set handling**: `propertyWriteFailed(name, errorName,
+  message)` signal on rejected writes. (Superseded before release: see
+  the re-fetch entry under Changed.)
 - **P9 concurrent Get/Set dedupe**: in-flight Get coalesced (one wire
   call); Set latest-wins queue. No new surface.
 - **Held-reply TTL**: `heldReplyTimeout` (ms, default 0=off); expiry
@@ -46,6 +47,13 @@
   marshaled as their own type while XML advertises `v`).
 - **`getProperty` sends the wire name** (was: QML name — split
   `Version`/`version` failed where Set succeeded).
+- **Failed writes re-fetch from the service** (behavior change, supersedes
+  the P8 rollback design before release — owner Call 3): a rejected `Set`
+  issues a `Properties.Get` for the key once the write chain settles and
+  the server's value lands in the map — the proxy never invents a value
+  (no local rollback). `propertyWriteFailed` fires unchanged (consumer
+  hook for gesture policy); a failed re-fetch keeps the current value
+  with a loud warning.
 - **Strict signature gate at depth 32** (was: 64 while walkers cap at
   32 — unmarshalable shapes burned process-global slots).
 - **Strict option typing** (behavior change): the `_options` filter

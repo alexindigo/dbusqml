@@ -604,13 +604,9 @@ void DBusProxy::setProperty(const QString &name, const QVariant &value) {
         sit->queued = true;
         return;
     }
-    // P8: capture the prior QML-visible value; on error reply restore it
-    // (KDE dbusproperties.cpp:154-158) + warn + propertyWriteFailed.
-    // The optimistic value is NOT inserted here (unlike updateValue's
-    // immediate insert — see below): the map already holds the caller's
-    // value when driven through QML bindings; setProperty restores on
-    // failure only.
-    const QVariant prior = QQmlPropertyMap::value(name);
+    // R3 (road-to-one, Call 3): no rollback inference — a failed Set
+    // triggers a Properties.Get for the key once the chain settles and
+    // the SERVER's value lands in the map; the proxy never invents one.
     QDBusPendingCall call = m_bus.asyncCall(msg, m_callTimeout);
     auto *watcher = new QDBusPendingCallWatcher(call, this);
     // P9: the fresh wire call registers its pending-Set record (the
@@ -621,28 +617,26 @@ void DBusProxy::setProperty(const QString &name, const QVariant &value) {
     ps.watcher = watcher;
     ps.latestValue = converted;
     ps.qmlKey = name;
-    ps.prior = prior;
     ps.service = m_service;
     ps.path = m_path;
     ps.iface = m_iface;
     m_pendingSets.insert(wireName, ps);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
-            [this, name, wireName, prior](QDBusPendingCallWatcher *w) {
+            [this, name, wireName](QDBusPendingCallWatcher *w) {
                 QDBusMessage r = w->reply();
                 const bool failed = r.type() == QDBusMessage::ErrorMessage;
                 const QString errName = failed ? r.errorName() : QString();
                 const QString errMsg = failed ? r.errorMessage() : QString();
                 w->deleteLater();
+                if (failed)
+                    m_failedSetRefetch.insert(wireName);
                 finishPendingSet(wireName, r);
                 if (failed) {
-                    // Roll back the QML-visible value to the prior one.
-                    if (prior.isValid())
-                        insert(name, prior);
-                    else
-                        clear(name);
-                    qWarning("dbusqml: Set of property %s failed (%s: %s) — value restored",
+                    qWarning("dbusqml: Set of property %s failed (%s: %s) — re-fetching from the "
+                             "service",
                              qPrintable(wireName), qPrintable(errName), qPrintable(errMsg));
                     emit propertyWriteFailed(name, errName, errMsg);
+                    maybeRefetchAfterFailedWrite(wireName);
                 }
             });
 }
@@ -711,42 +705,43 @@ QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
     QDBusMessage msg =
         QDBusMessage::createMethodCall(m_service, m_path, "org.freedesktop.DBus.Properties", "Set");
     msg.setArguments({m_iface, dbusName, QVariant::fromValue(QDBusVariant(converted))});
-    // P8: the map insert below is optimistic (QQmlPropertyMap reactivity
-    // needs the value synchronously). Capture the PRIOR value first; on
-    // error reply roll back + warn + propertyWriteFailed (KDE shape).
+    // R3 (road-to-one, Call 3): the map insert IS optimistic
+    // (QQmlPropertyMap reactivity needs the value synchronously), and a
+    // failed Set does NOT roll back — no local inference. Instead the
+    // proxy re-fetches the property from the service once the Set chain
+    // settles (Properties.Get; the CF-10 epoch guard applies like any
+    // other re-fetch) and the server's value lands in the map.
     // NOTE: updateValue's return value IS the inserted value — the caller
     // (QQmlPropertyMap::insert) applies it after we return, so the
-    // rollback on failure replaces it asynchronously. That is the KDE
-    // semantic (restore on error), just one event-loop turn later.
-    const QVariant prior = QQmlPropertyMap::value(key);
+    // re-fetched value replaces it asynchronously, one event-loop turn
+    // later.
     QDBusPendingCall call = m_bus.asyncCall(msg, m_callTimeout);
     auto *watcher = new QDBusPendingCallWatcher(call, this);
     PendingSet ps;
     ps.watcher = watcher;
     ps.latestValue = converted;
     ps.qmlKey = key;
-    ps.prior = prior;
     ps.service = m_service;
     ps.path = m_path;
     ps.iface = m_iface;
     m_pendingSets.insert(dbusName, ps);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
-            [this, key, dbusName, prior](QDBusPendingCallWatcher *w) {
+            [this, key, dbusName](QDBusPendingCallWatcher *w) {
                 QDBusMessage r = w->reply();
                 const QString errName =
                     r.type() == QDBusMessage::ErrorMessage ? r.errorName() : QString();
                 const QString errMsg =
                     r.type() == QDBusMessage::ErrorMessage ? r.errorMessage() : QString();
                 w->deleteLater();
+                if (r.type() == QDBusMessage::ErrorMessage)
+                    m_failedSetRefetch.insert(dbusName);
                 finishPendingSet(dbusName, r);
                 if (r.type() == QDBusMessage::ErrorMessage) {
-                    if (prior.isValid())
-                        insert(key, prior);
-                    else
-                        clear(key);
-                    qWarning("dbusqml: Set of property %s failed (%s: %s) — value restored",
+                    qWarning("dbusqml: Set of property %s failed (%s: %s) — re-fetching from the "
+                             "service",
                              qPrintable(dbusName), qPrintable(errName), qPrintable(errMsg));
                     emit propertyWriteFailed(key, errName, errMsg);
+                    maybeRefetchAfterFailedWrite(dbusName);
                 }
             });
     return input;
@@ -755,9 +750,9 @@ QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
 void DBusProxy::finishPendingSet(const QString &dbusName, const QDBusMessage &reply) {
     // P9: latest-wins drain. If a newer value queued while the Set was
     // in flight, send it now (one chained call); otherwise drop the
-    // record. Errors on the chained call run the SAME P8 rollback +
+    // record. Errors on the chained call run the SAME R3 re-fetch +
     // warn + propertyWriteFailed as the fresh-call paths (the chained
-    // watcher below carries the qmlKey/prior from the PendingSet).
+    // watcher below carries the qmlKey from the PendingSet).
     Q_UNUSED(reply);
     auto it = m_pendingSets.find(dbusName);
     if (it == m_pendingSets.end())
@@ -778,7 +773,6 @@ void DBusProxy::finishPendingSet(const QString &dbusName, const QDBusMessage &re
     ps2.watcher = watcher;
     ps2.latestValue = ps.latestValue;
     ps2.qmlKey = ps.qmlKey;
-    ps2.prior = ps.prior;
     ps2.service = ps.service;
     ps2.path = ps.path;
     ps2.iface = ps.iface;
@@ -786,29 +780,42 @@ void DBusProxy::finishPendingSet(const QString &dbusName, const QDBusMessage &re
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
             [this, dbusName](QDBusPendingCallWatcher *w) {
                 QDBusMessage r = w->reply();
-                w->deleteLater();
-                if (r.type() == QDBusMessage::ErrorMessage) {
-                    // P8 on the chained call: restore + warn + signal.
+                const bool failed = r.type() == QDBusMessage::ErrorMessage;
+                // The signal names the QML key — read it from the record
+                // BEFORE finishPendingSet may erase it.
+                QString qmlKey = dbusName;
+                if (failed) {
                     auto it2 = m_pendingSets.find(dbusName);
-                    QString qmlKey = dbusName;
-                    QVariant prior;
-                    if (it2 != m_pendingSets.end()) {
+                    if (it2 != m_pendingSets.end() && !it2.value().qmlKey.isEmpty())
                         qmlKey = it2.value().qmlKey;
-                        prior = it2.value().prior;
-                    }
-                    if (qmlKey.isEmpty())
-                        qmlKey = dbusName;
-                    if (prior.isValid())
-                        insert(qmlKey, prior);
-                    else
-                        clear(qmlKey);
-                    qWarning("dbusqml: Set of property %s failed (%s: %s) — value restored",
+                }
+                w->deleteLater();
+                if (failed)
+                    m_failedSetRefetch.insert(dbusName);
+                finishPendingSet(dbusName, r);
+                if (failed) {
+                    // R3 on the chained call: re-fetch (post-settle) +
+                    // warn + signal — no rollback inference.
+                    qWarning("dbusqml: Set of property %s failed (%s: %s) — re-fetching from the "
+                             "service",
                              qPrintable(dbusName), qPrintable(r.errorName()),
                              qPrintable(r.errorMessage()));
                     emit propertyWriteFailed(qmlKey, r.errorName(), r.errorMessage());
+                    maybeRefetchAfterFailedWrite(dbusName);
                 }
-                finishPendingSet(dbusName, r);
             });
+}
+
+void DBusProxy::maybeRefetchAfterFailedWrite(const QString &wireName) {
+    // R3: exactly one re-fetch, and only after the latest-wins chain has
+    // FULLY settled (a mid-chain Get could interleave with the pending
+    // write and deliver a pre-write value). The Get itself runs through
+    // the CF-10 epoch + destination guard like any re-fetch.
+    if (m_pendingSets.contains(wireName))
+        return; // chain still in flight — the final link's handler refetches
+    if (!m_failedSetRefetch.remove(wireName))
+        return; // no recorded failure for this key
+    refetchInvalidated({wireName});
 }
 
 void DBusProxy::disconnectSignals() {
@@ -1070,8 +1077,9 @@ void DBusProxy::refetchInvalidated(const QStringList &names) {
                 [this, wireName, service, path, iface, epoch](QDBusPendingCallWatcher *w) {
                     QDBusPendingReply<QVariant> reply = *w;
                     if (reply.isError()) {
-                        qWarning("dbusqml: re-fetch of %s after invalidation failed: %s",
-                                 qPrintable(wireName), qPrintable(reply.error().message()));
+                        qWarning(
+                            "dbusqml: re-fetch of %s failed: %s — keeping the last known value",
+                            qPrintable(wireName), qPrintable(reply.error().message()));
                     } else if (epoch == m_refetchEpoch && service == m_service && path == m_path &&
                                iface == m_iface) {
                         const QString qmlName = dbusPropToQml(wireName);

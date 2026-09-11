@@ -84,6 +84,15 @@ bat.timeToEmpty            // → Properties.Get("...Device", "TimeToEmpty")
 
 Properties auto-update via `PropertiesChanged` signals. Property names follow QML camelCase — see Property Name Conventions below.
 
+Writes through the proxy are **optimistic**: the value is visible immediately
+and `Properties.Set` goes out on the wire. A **failed** write re-fetches the
+property from the service (`Properties.Get`, once the write chain settles) and
+the server's value lands in the map — the proxy never invents a value (there
+is no local rollback). `propertyWriteFailed(name, errorName, message)` still
+fires, so consumers can apply gesture policy. If the re-fetch itself fails
+(service gone), the current value stays with a loud warning; connection-loss
+handling owns the rest.
+
 #### Configuration Properties
 
 | Property | Type | Description |
@@ -113,7 +122,7 @@ Properties auto-update via `PropertiesChanged` signals. Property names follow QM
 | `send(method, args)` | `string method`, `list args` | — | Fire-and-forget call (`NO_REPLY_EXPECTED`); no reply object. |
 | `getProperty(name)` | `string name` | `DBusPendingReply` | Read a single D-Bus property directly via `Properties.Get`. |
 | `setProperty(name, value)` | `string name`, `variant value` | — | Write a D-Bus property directly via `Properties.Set`. |
-| `propertyWriteFailed(name, errorName, message)` | `string`, `string`, `string` | Signal: a `Set` the proxy issued was rejected (P8 — the QML-visible value is rolled back). |
+| `propertyWriteFailed(name, errorName, message)` | `string`, `string`, `string` | Signal: a `Set` the proxy issued was rejected (the property is re-fetched from the service; the proxy never invents a value). |
 | `emitSignal(name, args)` | `string name`, `list args` | — | Emit a D-Bus signal from this proxy's path/interface. |
 | `connectToBus(address)` | `string address` | `DBusConnection` | (static) Connect to a custom D-Bus address. Returns null on failure. |
 | `reloadTypes()` | — | — | (static) Re-scan the type catalog after drop-in changes. See `docs/TYPES.md`. |
@@ -143,7 +152,7 @@ falls back to inference.
 | `statusChanged` | | Emitted when `status` changes (Null/Loading/Ready/Error). |
 | `introspectionCompleted` | | Emitted after introspection finishes and dynamic methods/properties are ready. |
 | `serviceAvailableChanged` | | Emitted when `serviceAvailable` changes (requires `watchServiceStatus`). |
-| `propertyWriteFailed(name, errorName, message)` | `string`, `string`, `string` | Emitted when a property `Set` the proxy issued is rejected (P8 — the QML-visible value is rolled back). |
+| `propertyWriteFailed(name, errorName, message)` | `string`, `string`, `string` | Emitted when a property `Set` the proxy issued is rejected (the property is re-fetched from the service; see the optimistic-writes note above). |
 
 #### Data Signals
 

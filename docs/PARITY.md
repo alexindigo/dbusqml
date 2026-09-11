@@ -150,12 +150,15 @@ flips + `disconnected()` fires once; proxies flip to `Error` and drop
 match subscriptions; served claims emit `nameLost` through the T1 relay.
 No resubscribe/reconnect, ever.
 
-## 9c. Failed writes roll back; concurrent ops dedupe (P8/P9)
+## 9c. Failed writes re-fetch; concurrent ops dedupe (R3/P9)
 
-A rejected `Set` restores the prior QML-visible value + warns +
-`propertyWriteFailed` (KDE shape). Duplicate in-flight `Get` coalesces
-(one wire call, all waiters answered); `Set` dedupe is latest-wins
-(interleaved set/set converges to the last value).
+A rejected `Set` re-fetches the property from the service
+(`Properties.Get` once the write chain settles) and the server's value
+lands in the map — no local rollback inference; the proxy never invents
+a value. `propertyWriteFailed` fires unchanged (KDE signal shape). A
+failed re-fetch keeps the current value + warns loud. Duplicate
+in-flight `Get` coalesces (one wire call, all waiters answered); `Set`
+dedupe is latest-wins (interleaved set/set converges to the last value).
 
 ## 9. Flake policy
 

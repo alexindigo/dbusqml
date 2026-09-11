@@ -309,6 +309,11 @@ public:
             // Honor the value on the served side (read-back pins it).
             if (s_lastSetProp == QLatin1String("Level"))
                 s_level = s_lastSetValue;
+            // R3 clamp mode: the write is ACCEPTED but the stored value
+            // clamps — a later re-fetch then shows the server's truth,
+            // which is neither the optimistic write nor the prior value.
+            if (s_lastSetProp == QLatin1String("Level") && s_clampMax > 0 && s_level > s_clampMax)
+                s_level = s_clampMax;
             conn.send(msg.createReply());
             return true;
         }
@@ -323,11 +328,14 @@ public:
     static int s_getCount;      // P9: Get calls observed on the wire
     static int s_setCount;      // P9: Set calls observed on the wire
     static uint s_lastSetValue; // P9: last served Set value
+    static uint s_clampMax;     // R3 clamp mode: 0 = off; >0 = accepted
+                                // writes store min(value, s_clampMax)
 };
 uint PropertyServerObject::s_level = 7u;
 int PropertyServerObject::s_getCount = 0;
 int PropertyServerObject::s_setCount = 0;
 uint PropertyServerObject::s_lastSetValue = 0u;
+uint PropertyServerObject::s_clampMax = 0u;
 QString PropertyServerObject::s_lastSetProp;
 QString PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServer");
 bool PropertyServerObject::s_declarePayload = false;
@@ -945,7 +953,8 @@ private slots:
                            QVariant(QVariantMap{}),
                            QVariant(QStringList{QStringLiteral("Ghost")})});
         QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
-                                               ".*re-fetch of Ghost after invalidation failed.*")));
+                                               ".*re-fetch of Ghost failed.*keeping the last "
+                                               "known value.*")));
         QVERIFY(QDBusConnection::sessionBus().send(inv2));
         QTest::qWait(500);
         QCOMPARE(proxy.property("level").toUInt(), 999u);
@@ -2623,12 +2632,15 @@ private slots:
         delete proxy;
     }
 
-    // ==================== P8: failed-Set rollback ====================
+    // ==================== P8→R3: failed-Set re-fetch ====================
     //
-    // Client proxy: capture the prior value on write; on error reply
-    // restore it in the property map + warn + propertyWriteFailed
-    // (KDE dbusproperties.cpp:154-158). Successful Set leaves the value.
-    void testFailedSetRollbackRestores() {
+    // Client proxy: on a Set error reply the proxy does NOT roll back —
+    // it issues a Properties.Get for the failed key and the SERVER's
+    // value lands in the map (road-to-one, owner Call 3: the proxy never
+    // invents a value). propertyWriteFailed still fires (unchanged
+    // consumer hook). A failed re-fetch keeps the current value + warns
+    // loud. Successful Set leaves the value.
+    void testFailedSetRefetchServerTruth() {
         // Served side: plain int property; the CLIENT writes a name the
         // service does not know → Set replies InvalidArgs "No such
         // property" (the read-only/inconvertible class: a rejected Set).
@@ -2660,34 +2672,42 @@ private slots:
         QCOMPARE(proxy->property("level").toInt(), 7);
 
         QSignalSpy failSpy(proxy, &DBusProxy::propertyWriteFailed);
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
-                                               "dbusqml: Set of property.*failed.*restored")));
+        ConnMessageCapture capture;
         proxy->setProperty(QStringLiteral("noSuchProp"), 99);
-        // The failed write restores: the map has no noSuchProp afterwards
-        // (prior was invalid → cleared) and the signal fired.
+        // The failed write re-fetches: the Get on the unknown name fails
+        // too, so the map keeps the (never-inserted) invalid state and
+        // both warnings fired — Set failure + re-fetch failure.
         QTRY_VERIFY_WITH_TIMEOUT(failSpy.count() >= 1, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(capture.contains(QStringLiteral("re-fetch of noSuchProp failed")),
+                                 10000);
         QCOMPARE(failSpy.first().first().toString(), QStringLiteral("noSuchProp"));
+        QVERIFY2(capture.contains(QStringLiteral("re-fetching from the service")),
+                 qPrintable(capture.messages.join(QStringLiteral(" | "))));
+        QVERIFY2(capture.contains(QStringLiteral("keeping the last known value")),
+                 qPrintable(capture.messages.join(QStringLiteral(" | "))));
         QVERIFY(!proxy->property("noSuchProp").isValid());
         // The real property is untouched.
         QCOMPARE(proxy->property("level").toInt(), 7);
 
-        // Successful Set leaves the value in place (no rollback, no
+        // Successful Set leaves the value in place (no re-fetch, no
         // signal): write level=42 through the proxy, read it back.
+        capture.messages.clear();
         proxy->setProperty(QStringLiteral("level"), 42);
         QTest::qWait(1500);
         QCOMPARE(failSpy.count(), 1);
         QCOMPARE(adaptor->property("level").toInt(), 42);
+        QVERIFY(!capture.contains(QStringLiteral("re-fetching from the service")));
         delete proxy;
         delete adaptor;
     }
 
-    void testFailedSetRollbackUpdateValueQml() {
-        // Same rollback through the QML-binding path (updateValue).
+    void testFailedSetRefetchUpdateValueQml() {
+        // Same re-fetch through the QML-binding path (updateValue).
         // QML source (not C++): a binding write to an unknown property
         // routes through QQmlPropertyMap::updateValue → failing Set →
-        // rollback + propertyWriteFailed. The QML engine is the caller
-        // here, so the updateValue path is genuinely exercised (C++
-        // insert()/operator[] never reach it by Qt design).
+        // re-fetch attempt + propertyWriteFailed. The QML engine is the
+        // caller here, so the updateValue path is genuinely exercised
+        // (C++ insert()/operator[] never reach it by Qt design).
         QQmlEngine engine;
         QDir binDir(QCoreApplication::applicationDirPath());
         engine.addImportPath(binDir.path());
@@ -2726,8 +2746,7 @@ private slots:
         // via QQmlPropertyMap::updateValue — C++ insert()/operator[]
         // never reach it by Qt design).
         QSignalSpy failSpy(proxy, &DBusProxy::propertyWriteFailed);
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
-                                               "dbusqml: Set of property.*failed.*restored")));
+        ConnMessageCapture capture;
         QQmlComponent writerComp(&engine);
         writerComp.setData("import QtQml 2.15\n"
                            "QtObject {\n"
@@ -2740,11 +2759,21 @@ private slots:
         QVERIFY(writer != nullptr);
         writer->setProperty("target", QVariant::fromValue(proxy));
         QMetaObject::invokeMethod(writer, "go");
-        // The binding write failed the Set: rollback cleared it, the
-        // signal fired with the name, the real property is untouched.
+        // The binding write failed the Set: the signal fired with the
+        // name, the re-fetch was attempted and failed (the service does
+        // not know "bogus" either), so the map keeps the OPTIMISTIC
+        // value (the proxy never invents one — the visible value is the
+        // attempted write until the server answers), the real property
+        // is untouched.
         QTRY_VERIFY_WITH_TIMEOUT(failSpy.count() >= 1, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(capture.contains(QStringLiteral("re-fetch of bogus failed")),
+                                 10000);
         QCOMPARE(failSpy.first().first().toString(), QStringLiteral("bogus"));
-        QVERIFY(!proxy->property("bogus").isValid());
+        QVERIFY2(capture.contains(QStringLiteral("re-fetching from the service")),
+                 qPrintable(capture.messages.join(QStringLiteral(" | "))));
+        QVERIFY2(capture.contains(QStringLiteral("keeping the last known value")),
+                 qPrintable(capture.messages.join(QStringLiteral(" | "))));
+        QCOMPARE(proxy->property("bogus").toInt(), 11);
         QCOMPARE(proxy->property("level").toInt(), 3);
         delete writer;
         delete proxyObj;
@@ -2911,16 +2940,19 @@ private slots:
         delete proxyObj;
     }
 
-    void testChainedSetErrorRollsBack() {
-        // V1 (P9 gap fix, FD2(a)): the CHAINED latest-wins Set runs the
-        // P8 rollback+warn+signal on error. Geometry: two overlapping
-        // writes where the FIRST succeeds and the CHAINED second is
-        // refused (0xDEAD sentinel → InvalidArgs). The chained error
-        // must restore the map to the pre-write prior, warn, and emit
-        // propertyWriteFailed — exactly like the fresh-call paths.
+    void testChainedSetErrorRefetchesFromServer() {
+        // R3 (road-to-one, owner Call 3 — re-pinned; was
+        // testChainedSetErrorRollsBack): the CHAINED latest-wins Set runs
+        // the re-fetch + warn + signal on error — NO rollback. Geometry:
+        // two overlapping writes where the FIRST succeeds and the CHAINED
+        // second is refused (0xDEAD sentinel → InvalidArgs). After the
+        // chain settles, exactly ONE re-fetch runs and the proxy shows
+        // the SERVER's value (10 — the first, successful write), never a
+        // local inference (the old rollback would have restored 5).
         PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.P9Chain");
         PropertyServerObject::s_level = 5u;
         PropertyServerObject::s_setCount = 0;
+        PropertyServerObject::s_getCount = 0;
         PropertyServerObject::s_lastSetValue = 0u;
         auto *server = new PropertyServerObject();
         QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/P9Chain"),
@@ -2951,8 +2983,7 @@ private slots:
 
         // Overlap: issue the first write, then — with NO loop turn so
         // the record is still in flight — the refused second. The first
-        // succeeds (prior=5 captured on ITS record); the chained second
-        // errors and must roll back to 5 + warn + signal.
+        // succeeds; the chained second errors and the proxy re-fetches.
         ConnMessageCapture capture;
         QSignalSpy failSpy(proxy, &DBusProxy::propertyWriteFailed);
         PropertyServerObject::s_setCount = 0;
@@ -2968,21 +2999,73 @@ private slots:
                 if (failSpy.count() >= 1)
                     break;
             }
-            QVERIFY2(failSpy.count() >= 1, "chained Set error never signalled rollback");
+            QVERIFY2(failSpy.count() >= 1, "chained Set error never signalled");
         }
         QCOMPARE(PropertyServerObject::s_setCount, 2);
-        // Rollback: the map holds the pre-write prior again...
-        QCOMPARE(proxy->property("level").toUInt(), 5u);
-        // ...the warn fired...
-        QVERIFY2(capture.contains(QStringLiteral("value restored")),
-                 qPrintable(QStringLiteral("missing rollback warn; got: %1")
+        // Server truth lands after the chain settles: the proxy shows
+        // the server's value (10), and exactly ONE re-fetch ran for the
+        // settled chain (no mid-chain Get interleaving).
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->property("level").toUInt() == 10u, 10000);
+        QCOMPARE(PropertyServerObject::s_getCount, 1);
+        QCOMPARE(PropertyServerObject::s_level, 10u);
+        // ...the re-fetch warn fired (and no rollback warn survived)...
+        QVERIFY2(capture.contains(QStringLiteral("re-fetching from the service")),
+                 qPrintable(QStringLiteral("missing re-fetch warn; got: %1")
                                 .arg(capture.messages.join(QStringLiteral(" | ")))));
+        QVERIFY2(!capture.contains(QStringLiteral("value restored")),
+                 qPrintable(capture.messages.join(QStringLiteral(" | "))));
         // ...and the signal names the property + InvalidArgs.
         QCOMPARE(failSpy.count(), 1);
         QCOMPARE(failSpy.first().at(0).toString(), QStringLiteral("level"));
         QVERIFY2(failSpy.first().at(1).toString().contains(QStringLiteral("InvalidArgs")),
                  qPrintable(failSpy.first().at(1).toString()));
         delete proxyObj;
+    }
+
+    void testFailedSetRefetchShowsServerClamp() {
+        // R3 clamp case (documents why C — re-fetch — beats A — rollback):
+        // the service ACCEPTS a write but stores a CLAMPED value. A later
+        // refused write triggers the re-fetch, and the proxy converges to
+        // the server's actual state (1000) — neither the attempted 1500
+        // nor the 0 a rollback would have restored.
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.R3Clamp");
+        PropertyServerObject::s_level = 0u;
+        PropertyServerObject::s_clampMax = 1000u;
+        PropertyServerObject::s_setCount = 0;
+        PropertyServerObject::s_getCount = 0;
+        PropertyServerObject::s_lastSetValue = 0u;
+        auto *server = new PropertyServerObject();
+        QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/R3Clamp"),
+                                                                    server));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R3Clamp")));
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.R3Clamp");
+
+        auto *proxy = new DBusProxy;
+        proxy->setService(QStringLiteral("org.dbusqml.R3Clamp"));
+        proxy->setPath(QStringLiteral("/R3Clamp"));
+        proxy->setIface(QStringLiteral("org.dbusqml.R3Clamp"));
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->status() == DBusProxy::Ready, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->property("level").toUInt() == 0u, 10000);
+
+        QSignalSpy failSpy(proxy, &DBusProxy::propertyWriteFailed);
+        ConnMessageCapture capture;
+        // Accepted-but-clamped write: reply OK, server stores 1000, no
+        // signal, no re-fetch (the write did not fail).
+        proxy->setProperty(QStringLiteral("level"), 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(PropertyServerObject::s_setCount == 1, 10000);
+        QCOMPARE(PropertyServerObject::s_level, 1000u);
+        QCOMPARE(failSpy.count(), 0);
+        // The refused write: 0xDEAD → InvalidArgs → ONE re-fetch, and the
+        // proxy lands on the server's clamped truth.
+        proxy->setProperty(QStringLiteral("level"), 0xDEADu);
+        QTRY_VERIFY_WITH_TIMEOUT(failSpy.count() >= 1, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->property("level").toUInt() == 1000u, 10000);
+        QCOMPARE(PropertyServerObject::s_getCount, 1);
+        QVERIFY2(capture.contains(QStringLiteral("re-fetching from the service")),
+                 qPrintable(capture.messages.join(QStringLiteral(" | "))));
+        PropertyServerObject::s_clampMax = 0u; // disarm for other tests
+        delete proxy;
     }
 
     // ==================== P5: bus connection-loss handling ====================

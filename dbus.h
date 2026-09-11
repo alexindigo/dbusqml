@@ -10,6 +10,7 @@
 #include <QQmlEngine>
 #include <QQmlParserStatus>
 #include <QQmlPropertyMap>
+#include <QSet>
 #include <QVariantList>
 #include <qqmlregistration.h>
 
@@ -128,8 +129,9 @@ Q_SIGNALS:
     void signaturesChanged();
     void callTimeoutChanged();
     // P8 (features train, Phase 7): a property write the service
-    // rejected (failed Set). The QML-visible value is rolled back to
-    // the prior value (KDE dbusproperties.cpp:154-158).
+    // rejected (failed Set). R3 (road-to-one, Call 3): the proxy
+    // re-fetches the property from the service instead of rolling back —
+    // the map converges to the server's value, never a local inference.
     void propertyWriteFailed(const QString &name, const QString &errorName, const QString &message);
 
 private Q_SLOTS:
@@ -219,19 +221,22 @@ private:
         QDBusPendingCallWatcher *watcher = nullptr;
         QVariant latestValue;
         bool queued = false; // a newer value arrived while in flight
-        // P8 rollback context for the CHAINED send: the QML-side key +
-        // the prior value it must restore on error (the fresh-call
-        // lambdas carry these as captures; the chained path has no
-        // lambda, so it carries them here).
+        // The QML-side key for the propertyWriteFailed signal (the
+        // fresh-call lambdas carry it as a capture; the chained path has
+        // no lambda, so it carries it here).
         // CF-15: destination identity snapshot — a repoint mid-queue
         // must not fire the queued write at the NEW service.
         QString qmlKey;
-        QVariant prior;
         QString service;
         QString path;
         QString iface;
     };
     QHash<QString, PendingSet> m_pendingSets;
+    // R3 (road-to-one, Call 3): wire names whose Set failed, awaiting
+    // chain settle for the one post-settle re-fetch (server truth replaces
+    // the optimistic value; the proxy never invents one).
+    QSet<QString> m_failedSetRefetch;
     void finishPendingGet(const QString &dbusName, const QDBusMessage &reply);
     void finishPendingSet(const QString &dbusName, const QDBusMessage &reply);
+    void maybeRefetchAfterFailedWrite(const QString &wireName);
 };
