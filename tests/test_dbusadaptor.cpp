@@ -429,6 +429,8 @@ private slots:
 
     // Multiple DBusAdaptor instances on the same path (M1–M9).
     void testCoLocatedSamePath();
+    // C4 (road-to-one; CF-19 late-joiner pin; fix landed in d7f6849).
+    void testLateJoinerNameAcquired();
     void testCoLocatedIntrospection();
     void testCoLocatedPropertiesRouting();
     void testCoLocatedTeardownPath();
@@ -3517,6 +3519,63 @@ void TestDBusAdaptor::testCoLocatedSamePath() {
 
     delete a;
     delete b;
+}
+
+// C4 (road-to-one; council CF-19 — fix landed in d7f6849, this is the
+// missing pin the punch report flagged): adaptor A owns a service name;
+// adaptor B attaches to the SAME name while the claim is already owned.
+// B is the late joiner: no watch transition will ever fire for it, so the
+// dispatcher delivers nameAcquired directly at attach. Spy: fires
+// EXACTLY ONCE (pre-fix: zero — the joiner never learned it owned).
+void TestDBusAdaptor::testLateJoinerNameAcquired() {
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    static const char *kSrcA = "import DBus 1.0\n"
+                               "DBusAdaptor {\n"
+                               "  service: 'org.dbusqml.LateJoin'\n"
+                               "  path: '/LateJoinA'\n"
+                               "  iface: 'org.dbusqml.LateJoinA'\n"
+                               "  function ping() { return 'a' }\n"
+                               "}";
+    static const char *kSrcB = "import DBus 1.0\n"
+                               "DBusAdaptor {\n"
+                               "  service: 'org.dbusqml.LateJoin'\n"
+                               "  path: '/LateJoinB'\n"
+                               "  iface: 'org.dbusqml.LateJoinB'\n"
+                               "  function pong() { return 'b' }\n"
+                               "}";
+
+    // Adaptor A: owns the name (settle its acquisition first so B joins
+    // an ALREADY-OWNED claim — the CF-19 geometry).
+    QQmlComponent compA(&engine);
+    compA.setData(kSrcA, QUrl());
+    QVERIFY2(compA.isReady(), qPrintable(compA.errorString()));
+    QObject *a = compA.beginCreate(engine.rootContext());
+    QVERIFY(a != nullptr);
+    QSignalSpy spyA(a, SIGNAL(nameAcquired()));
+    compA.completeCreate();
+    QTRY_VERIFY_WITH_TIMEOUT(spyA.count() >= 1, 10000);
+    QVERIFY(QDBusConnection::sessionBus().interface()->isServiceRegistered(
+        QStringLiteral("org.dbusqml.LateJoin")));
+
+    // Adaptor B: late joiner on the owned claim. The spy attaches BEFORE
+    // completeCreate (the attach runs inside it).
+    QQmlComponent compB(&engine);
+    compB.setData(kSrcB, QUrl());
+    QVERIFY2(compB.isReady(), qPrintable(compB.errorString()));
+    QObject *b = compB.beginCreate(engine.rootContext());
+    QVERIFY(b != nullptr);
+    QSignalSpy spyB(b, SIGNAL(nameAcquired()));
+    compB.completeCreate();
+    QTRY_VERIFY_WITH_TIMEOUT(spyB.count() >= 1, 10000);
+    QTest::qWait(500); // quiet window — any stray second delivery must show
+    QCOMPARE(spyB.count(), 1);
+
+    delete b;
+    delete a;
 }
 
 // M2 — merged introspection: Introspect on the shared path returns XML with
