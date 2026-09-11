@@ -204,6 +204,14 @@ if(BUILD_TEST_MODE)
     target_include_directories(payload_echo_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(payload_echo_service PRIVATE Qt6::Core Qt6::Qml Qt6::DBus dbusqml)
 
+    # TSan canary (road-to-one C3): deliberately racy binary the sanitizer
+    # CI job runs FIRST, requiring the detection grep to find its warning.
+    # Non-default target — built on demand, never part of ALL.
+    add_executable(tsan_canary EXCLUDE_FROM_ALL tests/tsan_canary.cpp)
+    set_target_properties(tsan_canary PROPERTIES AUTOMOC OFF)
+    find_package(Threads REQUIRED)
+    target_link_libraries(tsan_canary PRIVATE Threads::Threads)
+
     # Wire oracle (council CF-7): the raw-libdbus peer the exactly-one-reply
     # pins assert through. Built only when libdbus-1 headers are present;
     # the pins QSKIP when the binary is absent (CI images carry

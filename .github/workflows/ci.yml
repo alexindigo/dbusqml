@@ -25,7 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
-            dbus dbus-x11 \
+            dbus dbus-x11 libdbus-1-dev \
             libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
 
       - name: Install Qt ${{ matrix.qt }}
@@ -40,7 +40,14 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      - name: Run C++ tests (all four targets — E0: run-tests used to skip test_adaptor/test_introspect)
+      - name: Oracle target built (C5)
+        # The wire-oracle pins QSKIP when the binary is absent — a missing
+        # oracle must fail the job, not silently shrink the evidence.
+        run: |
+          cmake --build build --target oracle
+          test -x build/oracle
+
+      - name: "Run C++ tests (all four targets — E0: run-tests used to skip test_adaptor/test_introspect)"
         run: ctest --test-dir build --output-on-failure
 
       - name: Run QML tests
@@ -83,7 +90,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build clang \
-            dbus dbus-x11 \
+            dbus dbus-x11 libdbus-1-dev \
             libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
 
       - name: Install Qt 6.8.2
@@ -103,22 +110,64 @@ jobs:
       - name: Build
         run: cmake --build build-san
 
+      - name: Oracle target built (C5)
+        run: |
+          cmake --build build-san --target oracle
+          test -x build-san/oracle
+
       - name: Run C++ tests under sanitizer
         env:
           QT_QPA_PLATFORM: offscreen
           # Ledger-zero L2/L3: checked-in suppressions for Qt-internal
           # exit-time (LSan) and race (TSan) noise; see
           # tests/lsan-suppressions.txt and tests/tsan-suppressions.txt.
-          # TSan gate = targeted T1 selection (full-suite ctest wedges
-          # TSan's thread registry under churn — L3 wedge triage,
-          # plan.md §L3 appendix; per-test processes stay green).
+          # TSan gate = the targeted selection below (full-suite ctest
+          # wedges TSan's thread registry under churn — L3 wedge triage,
+          # docs/PARITY.md §9; per-test processes).
+          #
+          # C3 (road-to-one): TSAN_OPTIONS exitcode=0 — the pass condition
+          # is the grep for "WARNING: ThreadSanitizer" below, NOT the
+          # process exit code (the default 66 was red-by-noise; silencing
+          # it without the grep would be blind). Any report that matches
+          # no suppression prints a WARNING and fails the job.
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan-suppressions.txt
-          TSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/tsan-suppressions.txt
+          TSAN_OPTIONS: exitcode=0:suppressions=${{ github.workspace }}/tests/tsan-suppressions.txt
         run: |
           if [ "${{ matrix.sanitizer }}" = "thread" ]; then
-            for t in testOwnerChangeDestroyDuringNotification testOwnerChangeStormImmediateDelete testOwnerChangeReentrantHandler testOwnerChangeAnchorSpyTiming testOwnerChangeForeignThreadAdaptor; do
-              dbus-run-session -- ./build-san/test_adaptor "$t" || exit 1
+            # Canary FIRST: a deliberately-racy binary MUST trip the grep.
+            # If it doesn't, the detection pipeline (instrumentation,
+            # output capture, grep) is dead and the real run's silence
+            # proves nothing.
+            cmake --build build-san --target tsan_canary
+            ./build-san/tsan_canary > tsan-canary.log 2>&1 || true
+            if ! grep -q "WARNING: ThreadSanitizer" tsan-canary.log; then
+              echo "TSan detection pipeline DEAD: the racy canary produced no warning"
+              exit 1
+            fi
+            echo "canary caught its deliberate race — detection pipeline live"
+            fail=0
+            for spec in \
+              "test_adaptor testOwnerChangeDestroyDuringNotification" \
+              "test_adaptor testOwnerChangeStormImmediateDelete" \
+              "test_adaptor testOwnerChangeReentrantHandler" \
+              "test_adaptor testOwnerChangeAnchorSpyTiming" \
+              "test_adaptor testOwnerChangeForeignThreadAdaptor" \
+              "test_adaptor testHeldReplyTimeoutDisabledByDefault" \
+              "test_adaptor testHeldReplyTimeoutExpires" \
+              "test_adaptor testHeldReplyTimeoutNoReplySilent" \
+              "test_adaptor testHeldReplyTimeoutSettleCancels" \
+              "test_adaptor testCoLocatedSamePath" \
+              "test_dbus testLossProbeIdleTraffic" \
+              "test_dbus testConnectionLossHandling"; do
+              set -- $spec
+              dbus-run-session -- "./build-san/$1" "$2" > "tsan-$1-$2.log" 2>&1 || fail=1
+              if grep -q "WARNING: ThreadSanitizer" "tsan-$1-$2.log"; then
+                echo "UNSUPPRESSED TSan report in $1 $2 — failing (see tsan-$1-$2.log)"
+                cat "tsan-$1-$2.log"
+                fail=1
+              fi
             done
+            [ "$fail" -eq 0 ] || exit 1
           else
             ctest --test-dir build-san --output-on-failure
           fi
