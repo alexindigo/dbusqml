@@ -163,11 +163,48 @@ A flake that recurs is a defect with luck — root-cause it (the takeover
 flake was a real deadlock, accepted twice). Timing-sensitive tests use
 sync barriers on bus STATE, never fixed sleeps; stress shapes with
 wall-clock bounds convert hangs into loud failures. TSan in CI catches
-the thread class nobody had listed. TSan gate = targeted T1 selection
-(per-test processes with tests/tsan-suppressions.txt): full-suite ctest
-wedges TSan's thread registry under churn geometries (L3 wedge triage —
-thread-count effect, not a program race; all per-test processes green
-with zero novel frames). ASan gate = full ctest with
+the thread class nobody had listed.
+
+**TSan gate (road-to-one C1/C3 rebuild).** The gate is a targeted
+selection of per-test processes (full-suite ctest wedges TSan's thread
+registry under churn geometries — L3 wedge triage: thread-count effect,
+not a program race), run with `tests/tsan-suppressions.txt`. Reality,
+as of the C1 rebuild:
+
+- Suppressions are **typed** (`race:`/`thread:`/`deadlock:`) and
+  **symbol-or-module-named** — hex offsets never match (TSan needs a
+  runtime-visible symbol) and do not port across Qt versions. Every
+  register entry carries an evidence block (SUMMARY class, addr2line
+  symbol, isolation-probe mode, owning test, parent-tree parity,
+  upstream link).
+- Known classes (all Qt/libdbus-internal; zero dbusqml frames as
+  writer): thread-leak on `QThread::start` (per-test process teardown);
+  two libdbus lock-order-inversions (`dbus_bus_register`,
+  `dbus_connection_preallocate_send` path); the QtDBus global bus-bind
+  allocator race (qDBusBindToApplication vs the QDBusConnection worker);
+  the proxy-teardown trio (`QObject::~QObject`,
+  `QCoreApplication::removePostedEvents`,
+  `QDBusServiceWatcher::setConnection`-side delete — all via
+  `DBusProxy::~DBusProxy` caller context) racing the bus worker; the
+  ledger-zero QML/QQmlThread churn classes.
+- **Accepted-risk register:** `0x2d1ab3` =
+  `QArrayData::reallocateUnaligned` (main-thread realloc of an
+  implicitly-shared container during meta-call argument churn vs the
+  worker's memmove) is suppressed as *accepted-unresolved-Qt-internal-risk
+  — NOT a proven false positive*: the block is allocated by main and
+  realloc'd by the worker with no intervening free, inside Qt's implicit
+  sharing. Falsifier: a TSan-instrumented Qt build would decide it —
+  standing offer, deliberately not executed.
+- **Pass condition (C3):** `TSAN_OPTIONS=exitcode=0:suppressions=…` and
+  the gate greps the captured output for `WARNING: ThreadSanitizer` —
+  ANY hit fails the job (a report that matches no suppression). A
+  deliberately-racy canary binary runs first and MUST trip the grep,
+  proving the detection pipeline is alive before the real run's silence
+  is trusted. (Pre-rebuild the file was 100% `race:` entries, the
+  thread-leak/deadlock classes never matched, exit was 66 on every run,
+  and "green" was QtTest PASS masking it — the hollow-gate origin story.)
+
+ASan gate = full ctest with
 tests/lsan-suppressions.txt (Qt-internal exit-time noise only; zero ODR
 — test binaries link libdbusqml.so exactly once).
 

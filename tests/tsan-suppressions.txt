@@ -1,108 +1,203 @@
-# ThreadSanitizer suppressions (ledger-zero L3).
+# ThreadSanitizer suppressions (ledger-zero L3; road-to-one C1 rebuild).
 #
-# Pattern (xdp ships this for ASan/valgrind): suppress ONLY the
-# Qt/libdbus-internal races characterized on the fork VM
-# (arch-niri-dbusqml-features, Qt 6.11.2) across the T1-selection TSan
-# runs (G1 destroy-churn, G2 storm, G3 re-entrant, G4 spy-timing, G5
-# foreign-thread — 3/3 runs) plus the churn-free G4+G5 geometry. Every
-# entry cites its evidence. Zero dbusqml frames appear in any report:
-# no dbusqml lock, queue, relay field, holder, or claim state is ever
-# named — the single dbusqml-adjacent frame
-# (DBusPathDispatcher::handleServiceOwnerChange, a QString == compare)
-# appears only as a READER inside Qt-internal races.
+# Suppress ONLY the Qt/libdbus-internal report classes characterized on the
+# fork VM (arch-niri-dbusqml-roadone, Qt 6.11.2 — same library build as the
+# council-punch evidence base, BuildId 3e89a2b2…/65f44f39…/bd573e32…).
+# Zero dbusqml frames appear as WRITER in any report below; the only
+# dbusqml-adjacent frames are test-binary dispatch frames and the
+# DBusProxy::~DBusProxy caller context in the teardown classes.
+#
+# Rebuild (C1, owner-approved amended-B): every entry is TYPED
+# (race:/deadlock:/thread:) and SYMBOL/MODULE-named — hex offsets do not
+# port across Qt versions (CI runs 6.8.2, fork runs 6.11.2) and TSan only
+# matches frames its runtime symbolizer can see. The prior file was 100%
+# race: entries, so the thread-leak and lock-order-inversion classes never
+# matched (TSan types are report-type-specific) — the gate's old "green"
+# was QtTest PASS masking TSan's exit 66.
+#
 # Usage: TSAN_OPTIONS="suppressions=tests/tsan-suppressions.txt".
-# Acceptance: T1-selection TSan run is zero-UNSUPPRESSED; any NEW frame
-# fails loud (it matches no entry below).
+# Acceptance: the P1 selection (12 tests, council-punch geometry) re-run →
+# zero unsuppressed reports, TSan exit 0 per process; any NEW class fails
+# loud (it matches no entry below).
+#
+# Evidence-block fields per register entry: SUMMARY class / addr2line symbol
+# / isolation-probe mode / owning test / parent-tree parity / upstream link.
 
-# 1. QCoreApplicationPrivate::sendPostedEvents (3× every run) —
-# the Qt event-posting path racing QQmlThread/manager delivery.
-# Evidence: "SUMMARY: ... in QCoreApplicationPrivate::sendPostedEvents"
-# ×3 in each of san-tsan-t1-{1,2,3}.log and ×2 in san-tsan-g45.log.
+# ==================== 1. Infra/harness classes ====================
+
+# 1.1 thread-leak on QThread::start (×29 across the P1 selection) — per-test
+# TSan processes leave QtDBus/QML worker threads running at exit; TSan
+# reports the un-joined threads as leaks. Harness/infra lifecycle, no
+# dbusqml frame. Was race:QThread::start (never matched — wrong type).
+# Evidence: p1-tsan-*.log "thread leak … in QThread::start(QThread::Priority)";
+# parent-tree parity: identical class pre-existing (l3wedge logs 2026-09-09).
+thread:QThread::start
+
+# 1.2 libdbus lock-order-inversion, register path (×9): the daemon client
+# library's own global lock cycle M0→M1→M2→M0 taken on the QDBusConnection
+# worker (dbus_bus_register ↔ dbus_connection_send_with_reply_and_block ↔
+# anonymous 0x16644 = addr2line dbus_connection_remove_filter). libdbus
+# internals, no Qt/dbusqml frame in the cycle stacks. Was
+# race:dbus_bus_register (never matched — wrong type).
+# Evidence: p1-tsan-test_dbus-testConnectionLossHandling.log lock-order-
+# inversion "in dbus_bus_register"; pre-existing since ledger-zero L3.
+deadlock:dbus_bus_register
+
+# 1.3 libdbus lock-order-inversion, preallocate path (×12): cycle
+# M0→M1→M0 between anonymous libdbus frames 0x154e1 (addr2line
+# dbus_connection_preallocate_send) and 0x16644 (dbus_connection_remove_
+# filter) — runtime-symbolizer shows <null> for both (not in dynsym), so
+# the only TSan-visible name is the module. Same libdbus-internal lock
+# graph as 1.2; no Qt/dbusqml frame in the cycle stacks.
+# Evidence: p1-tsan-test_dbus-testConnectionLossHandling.log (and 11 more
+# p1-tsan-*.log) lock-order-inversion "(libdbus-1.so.3+0x154e1)"; parent-
+# tree parity: same classes pre-existing (council-punch report §P1).
+deadlock:libdbus-1.so.3
+
+# 1.4 QTest runner module races (libQt6Test 0x1ad86 class) — runner
+# startup/shutdown internals; zero dbusqml frames (ledger-zero L3 wedge
+# triage, l3wedge-<test>.log per-test SUMMARY blocks, 2026-09-09).
+race:libQt6Test.so.6
+
+# ============== 2. QtDBus global-init vs its manager worker ==============
+
+# 2.1 The 0x1d43ee class (×3 in the P1 selection): main thread allocates
+# inside qDBusBindToApplication() (libQt6DBus+0x3b647, addr2line — the
+# once-per-process bus bind) while the QDBusConnection worker frees at
+# libQt6Core+0x1d43ee (allocator internals; addr2line's nearest symbol,
+# QMimeData::qt_metacall, is bogus — the frame is unexported). QtDBus's
+# global bus-init races its own manager thread; both racing frames are
+# runtime-invisible, so the entry anchors on the only symbolized dispatch
+# frame common to every occurrence (the queued meta-call that triggered
+# the bind). Tripwire: fires only for tests whose bus init happens inside
+# a queued slot invocation — a new geometry shifts the stack and fails loud.
+# ANCHOR NOTE: invokeImpl also appears in 4.1-class stacks; TSan counts a
+# report against one matching entry — see 4.1's anchor note.
+# Evidence: p1-tsan-test_dbus-testConnectionLossHandling.log (initTestCase
+# :491), p1-tsan-test_adaptor-testOwnerChangeAnchorSpyTiming.log,
+# p1-tsan-test_dbus-testLossProbeIdleTraffic.log; parent-tree parity: same
+# class at parent offsets 0xde77f/0x1d5ba1 (council-punch report §P1);
+# isolation: iso-proxynowatch.log (0x1d43ee fires without any watcher).
+race:QMetaMethodInvoker::invokeImpl
+
+# ============ 3. Teardown-noise register (evidence-blocked) ============
+
+# 3.1 QObject::~QObject (P1 ×1): main-thread operator delete[] inside
+# QObject::~QObject (libQt6Core+0x1e66bb) via DBusProxy::~DBusProxy
+# (dbus.cpp:93 — caller context, never the racing writer) vs worker
+# operator new[] at libQt6Core+0x1ddb54 (addr2line
+# QObjectPrivate::ConnectionData::removeConnection). Qt object-teardown
+# internals racing the bus worker's connection-list bookkeeping.
+# Isolation: reproduces on a live bus under churn (2/3 runs —
+# council-punch §P1), i.e. generic proxy-teardown-vs-worker churn, not
+# loss-specific. Owning test: test_dbus testConnectionLossHandling.
+# Parent parity: same class at parent (p1parent-tsan-*.log). Upstream:
+# no exact report found; QTBUG-79770 (TSan races with deleteLater) is the
+# adjacent Qt-side acknowledgment for the object-teardown race class.
+race:QObject::~QObject
+
+# 3.2 QCoreApplication::removePostedEvents (P1 ×1): main-thread operator
+# delete inside QCoreApplication::removePostedEvents(QObject*, int)
+# (libQt6Core+0x18325d) via DBusProxy::~DBusProxy (same caller context)
+# vs worker operator new at libQt6Core+0x1ed8c9 (addr2line nearest
+# operator<<(QDebug, QObject const*) — bogus; unexported event-queue
+# internals). Qt event-queue teardown racing the worker. Isolation: same
+# churn window as 3.1 (proxy-teardown-with-watcher geometry —
+# iso-proxywatch.log). Owning test: test_dbus testConnectionLossHandling.
+# Parent parity: same class at parent. Upstream: none found (QTBUG-79770
+# adjacent for the teardown class generally).
+race:QCoreApplication::removePostedEvents
+
+# 3.3 QDBusServiceWatcher::setConnection-side delete vs QDBusMessage ctor
+# (P1 ×1, libQt6DBus+0x9df2f): main-thread operator delete inside the
+# watcher's setConnection teardown path (addr2line; runtime-invisible —
+# not in dynsym) via DBusProxy::~DBusProxy (dbus.cpp:93) vs worker
+# operator new inside QDBusMessage::QDBusMessage. QtDBus watcher teardown
+# racing the worker's message allocation; the entry anchors on our
+# destructor frame — the only symbolized frame — with the racing frames
+# both QtDBus-internal. Tripwire: DBusProxy teardown is the anchor; if
+# that path changes, re-validate (fable's owning-test rule).
+# Owning test: test_dbus testConnectionLossHandling. Isolation: same churn
+# window as 3.1 (2/3 live-bus runs, council-punch §P1). Parent parity: same
+# class at parent. Upstream: none found.
+race:DBusProxy::~DBusProxy
+
+# ================ 4. Accepted-risk register (one entry) ================
+
+# 4.1 libQt6Core+0x2d1ab3 = QArrayData::reallocateUnaligned (addr2line;
+# runtime-invisible — the report shows <null>, so the anchor is the
+# symbolized meta-dispatch frame above it). Main-thread realloc of an
+# implicitly-shared Qt container during queued meta-call argument churn
+# (TestDBusAdaptor::qt_static_metacall via QMetaMethodInvoker::invokeImpl)
+# vs the QDBusConnection worker's memmove at 0x2ae4aa (addr2line
+# QRunnable::QGenericRunnable::~QGenericRunnable vicinity).
+#
+# CLASSIFICATION: accepted-unresolved-Qt-internal-risk — NOT a proven
+# false positive (astra's framing, council-punch round 2). The Location
+# analysis shows a block allocated by main, then realloc/memmove'd by the
+# worker with no intervening free — possibly real, inside Qt's implicit
+# sharing. No dbusqml object is ever handed to the worker (the T1 relay
+# is value-only), so if real, it is Qt's implicit-sharing surface.
+# FALSIFIER (standing offer, deliberately not executed): a TSan-instrumented
+# Qt build would decide this class.
+# Isolation: iso-proxywatch.log (reproduces from a 20-line proxy+watcher
+# lifecycle — the storm is an amplifier, not the cause). Owning test:
+# test_adaptor testOwnerChangeStormImmediateDelete — per fable's tripwire,
+# if the owning test changes, re-validate this entry. Parent parity: same
+# class at parent (p1parent-tsan-*.log). Upstream: none found (QTBUG-79770
+# is adjacent: Qt object-teardown TSan races generally, not this class).
+# ANCHOR NOTE: TestDBusAdaptor::qt_static_metacall also appears in 2.1-class
+# stacks from test_adaptor — TSan counts a report against one matching
+# entry; both anchors are documented here and in 2.1. The anchor is the
+# test binary's dispatch frame, so a real dbusqml-frame race in
+# test_adaptor would also carry it — breadth accepted per amended-B
+# (narrowest frame the runtime symbolizer exposes); the falsifier above is
+# the decider for the underlying class.
+race:TestDBusAdaptor::qt_static_metacall
+
+# ======== 5. Legacy geometry register (ledger-zero, retained) ========
+# Classes from the T1/G4/G5 geometries that did not fire in the P1
+# selection but remain live for full-suite/other-geometry runs. Evidence:
+# ledger-zero san-tsan-t1-{1,2,3}.log and san-tsan-g45.log (see the
+# ledger-zero plan dir). All module/symbol-named; zero dbusqml writers.
+
+# 5.1 Qt event-posting path racing QQmlThread/manager delivery (3×/run).
 race:QCoreApplicationPrivate::sendPostedEvents
 
-# 2. QObject moveToThread/delete churn (libQt6Core 0x2aea67/0x2aea76,
-# 1× every run) — operator new vs operator delete on QObject storage
-# across the main thread and the QQmlThread worker (created by main at
-# test invocation). Qt object-affinity internals, not ours.
-# Evidence: "operator new ... by main thread" vs "operator delete ...
-# by thread T2 'QQmlThread'" in san-tsan-t1-1.log.
+# 5.2 QObject moveToThread/delete churn — operator new vs delete on QObject
+# storage across main and the QQmlThread worker; Qt object-affinity internals.
 race:QObject::moveToThread
-
-# 3. libQt6Core 0x1d43ee + 0x29e500 (1× every run each) — operator
-# new/delete + memcpy inside QtCore racing the QQmlThread worker;
-# unnamed (stripped) frames, same QQmlThread-creation stack as (2).
-# Evidence: san-tsan-t1-{1,2,3}.log, identical counts every run.
-# (0x1d43ee ALSO appears standalone as a SUMMARY key — same allocator
-# frames, same creation stack; covered by the same class.)
 race:QQmlThread
 race:QDBusConnection::connectToBus
-race:0x1d43ee
 
-# 4. libQt6Qml 0x483149 (1× every run incl. churn-free G4+G5) —
-# QML-engine-internal race, present even with no churn threads.
-# Evidence: san-tsan-g45.log (G4+G5 only, no storm).
+# 5.3 libQt6Qml engine-internal race (present even churn-free, G4+G5).
 race:libQt6Qml.so.6
 
-# 5. libdbus dbus_connection_get_is_connected (1× every T1 run) —
-# libdbus-internal connected-flag race on the QDBusConnection worker
-# thread (created by main in the churn tests). C library internals.
-# Evidence: "in dbus_connection_get_is_connected" in
-# san-tsan-t1-{1,2,3}.log.
+# 5.4 libdbus connected-flag race on the bus worker thread + further
+# unnamed libdbus-internal races (0x3805a, 0x24a81). C library internals.
 race:dbus_connection_get_is_connected
-
-# 6. libdbus 0x3805a (run 2 only) + 0x24a81 (G4+G5 only) — further
-# unnamed libdbus-internal races on bus worker threads. Same class as
-# (5): C library internals, no dbusqml frames.
 race:libdbus-1.so.3
 
-# 7. QWaitCondition::~QWaitCondition (run 3 only) — Qt thread-shutdown
-# race at teardown. Evidence: san-tsan-t1-3.log.
+# 5.5 Qt thread-shutdown + message-teardown races at teardown.
 race:QWaitCondition::~QWaitCondition
-
-# 8. QDBusMessage::~QDBusMessage (run 3 only) — QtDBus message-teardown
-# race. Evidence: san-tsan-t1-3.log.
 race:QDBusMessage::~QDBusMessage
 
-# 9. QString/QArrayData internals (G4+G5 only: qarraydatapointer.h:111,
-# qobjectdefs_impl.h:117, qstring.h:277) — Qt container races on the
-# foreign-thread adaptor geometry; the dbusqml-adjacent reader frame
-# (handleServiceOwnerChange QString ==) appears here ONLY as a reader
-# inside these Qt-internal races, never as a writer of shared state.
-# Evidence: san-tsan-g45.log.
+# 5.6 QString/QArrayData internals (G4+G5 foreign-thread geometry) —
+# Qt container races; the dbusqml-adjacent reader frame
+# (handleServiceOwnerChange QString ==) appears only as a READER.
 race:QArrayDataPointer
 race:QString::size
 
-# 10. libglib event-pump (G4+G5 only) — glib main-loop internals under
-# the Qt event dispatcher. Evidence: san-tsan-g45.log.
+# 5.7 libglib event-pump under the Qt event dispatcher (G4+G5).
 race:libglib-2.0.so.0
 
-# 11. QTest runner + thread-lifecycle + libdbus-init infra (per-test
-# TSan processes, all 5 T1 tests): libQt6Test 0x1ad86, thread-leak
-# QThread::start reports, libdbus lock-order-inversion
-# (dbus_bus_register init locks). Harness/infra-triggered (runner
-# startup, worker-thread lifecycle, bus init) — zero dbusqml frames.
-# Evidence: l3wedge-<test>.log per-test SUMMARY blocks, 2026-09-09.
-# Documented (not hidden): these stay OUT of the suppressions file is
-# WRONG — they ARE suppressed below, narrowly, because they are
-# time-invariant infra classes; any NEW class still fails loud (§L3
-# acceptance: the verifier greps for novel SUMMARY lines).
-race:libQt6Test.so.6
-race:QThread::start
-race:dbus_bus_register
-
-# 12. G5 posted-attach-task path (foreign-thread adaptor = the
-# documented-unsupported geometry): the test main-thread-`new`s the
-# adaptor, moveToThreads it, and posts attach as a queued lambda; the
-# worker thread's first touch (metaObject, componentComplete,
-# test lines 4169/4171) races the main thread's construction. Qt
-# functor-dispatch/container internals on that path
-# (qobjectdefs_impl.h operator()/impl, qcomparehelpers, qscopedpointer,
-# qsharedpointer, QQueuedMetaCallEvent dtor, unnamed 0x1d43ee allocator
-# frames — same class as entry 3). No library lock/queue/relay frame is
-# a WRITER in any of these stacks; the writer is the test's own
-# cross-thread setup. Documented in plan.md §L3 appendix; suppressed
-# narrowly here so the gate stays green while the path stays
-# unsupported (loud warning + safe main-thread delivery stand).
+# 5.8 G5 posted-attach-task path (foreign-thread adaptor = documented-
+# unsupported geometry): the test main-thread-news the adaptor,
+# moveToThreads it, and posts attach as a queued lambda; the worker's
+# first touch races the main thread's construction. Qt functor-dispatch/
+# container internals; the writer is the test's own cross-thread setup.
+# Loud warning + safe main-thread delivery stand; suppressed narrowly so
+# the gate stays green while the path stays unsupported.
 race:ForeignT1G5Adaptor::metaObject
 race:DBusAdaptor::componentComplete
 race:test_dbusadaptor.cpp:4169
