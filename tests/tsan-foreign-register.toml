@@ -1,0 +1,229 @@
+# tsan-foreign-register.toml — the foreign-class register of the F-amended
+# TSan gate (road-to-one follow-up; plans:
+# ~/Documents/dbusqml/plans/tsan-classifier-gate/,
+# tsan-register-tightening/ — fingerprint v2 — and tsan-gate-edgecases/ —
+# fingerprint v3 site anchors + report-type coverage).
+#
+# A TSan report block whose every ATTRIBUTION-stack frame (access stacks +
+# allocation/Location stack; for "thread leak" blocks the creation stack —
+# the type-scoped exception, PARITY §9) is foreign, and whose fingerprint
+# matches an entry below validated on the log's Qt version, is counted,
+# censused, and non-failing. A foreign block with NO matching entry FAILS
+# the gate (the knob is FAIL, council 5–1): the hitter adds the entry with
+# the full evidence block in the same change. Registering is deliberately
+# cheap; silent accumulation is not.
+#
+# Fingerprint v3 — THREE match layers, all required:
+#
+#   1. Version: the log's Qt version (parsed from the QtTest config line)
+#      must be in the entry's qt_validated list, else the entry is INERT —
+#      not a match, FAIL, census names it. (A log with no parseable version
+#      never gates this layer; its anchors then match against ANY validated
+#      version's list — the block demonstrably came from a validated build.)
+#   2. Arrangement (v2, astra's pooled-set objection): the ordered
+#      per-attribution-stack records — [[class.arrangement]]:
+#        role         access-first | access-second | alloc | creation
+#                     (creation only under the thread-leak exception)
+#        interceptor  the frame-#0 TSan interceptor name, or "none"
+#        below_module module basename of the first resolvable frame below
+#                     the interceptor
+#        thread       "main" | the acting worker's name parsed from the
+#                     block's own creation headers | "worker"
+#        access       "kind:size" from the stack's own header ("write:8")
+#      Exact match on the ordered record list — a future, distinct Qt race
+#      sharing the pooled ingredients in a different arrangement does NOT
+#      match.
+#   3. Site anchors (v3 → v3.1, astra's shape-is-not-location AND
+#      build-identity objections): [class.anchors."<qt-version>"] — the
+#      ordered list of "module+0xoffset@buildid" TRIPLES, one per
+#      arrangement record: the racing frame below each stack's
+#      interceptor. Module-relative offsets are ASLR-independent and stable
+#      per Qt build (verified identical across every captured fire of a
+#      class); the BuildId is the module's content-hash identity, printed
+#      on every frame line of every captured log. A version string is not
+#      a binary identity — the same "6.11.2" rebuilt differently must NOT
+#      match; matching therefore requires the full triple, and a frame
+#      with no BuildId token cannot prove identity -> fail-closed (the
+#      block is unregistered -> FAIL). Versionless logs (probes/canaries)
+#      match by triple against any validated version's list: their binary
+#      must BE a validated build, proven by content hash, not assumed.
+#      Same arrangement + different site, or same site + different build,
+#      or absent build identity = three distinct near-misses: no match,
+#      the census names which, the gate FAILs.
+#
+# The identity ladder is complete: report TYPE -> ARRANGEMENT (shape) ->
+# SITE (location) -> BINARY IDENTITY (content hash). Beyond binary content
+# identity, report content is run-variable (addresses, pids, timestamps) —
+# structurally unmatchable. No further identity rung exists.
+#
+# SCHEMA (validated fail-closed at load — a malformed register FAILS the
+# gate with the error named, it never silently weakens it): every entry
+# carries id, report_type, classification, qt_validated (list of version
+# strings), the evidence block (summary_class, addr2line, reproducer,
+# owning_test, parent_parity, upstream_link, honesty_qualifier, falsifier),
+# a non-empty [[class.arrangement]] (each record exactly the five keys
+# above), and [class.anchors] with a TRIPLE list for EVERY validated
+# version (one anchor per arrangement record, each matching
+# 'module+0xoffset@buildid'). Unknown keys anywhere are an error.
+# TOML note: [[class.arrangement]] tables absorb every following key, so
+# each entry's scalars and its [class.anchors] table come FIRST.
+#
+# Revalidation on a Qt bump: run scripts/tsan-gate on the new Qt, confirm
+# the census shows the same arrangement, capture the new build's site
+# anchors from the revalidation run, and append version + anchors together
+# — a one-small-PR, evidence-carrying change. DELIBERATE CONSEQUENCE: the
+# first CI run on an unvalidated Qt (6.8.2) FAILS by design until its
+# cells are validated — the red→validate→green loop is the honest sequence
+# for a genuinely unvalidated surface.
+
+[[class]]
+id = "qt6-dbus-bus-bind-worker-startup"
+
+report_type = "data race"
+classification = "accepted-unresolved-Qt-internal-risk — NOT proven false positive"
+qt_validated = ["6.11.2"]
+
+# --- Evidence block (mirrors the suppression file's six-field discipline) ---
+# SUMMARY class: data race (libQt6Core.so.6+0x2ae895) — main-thread free()
+#   inside qDBusBindToApplication (the once-per-process bus bind spawning
+#   the QDBusConnection worker) vs the just-spawned worker's memmove.
+summary_class = "data race (libQt6Core.so.6+0x2ae895) — QtDBus bus-bind task teardown vs worker startup"
+# addr2line best-symbols (Qt 6.11.2, fork): 0x2ae895 =
+#   QRunnable::QGenericRunnable::~QGenericRunnable (main, free side);
+#   0x2ae4aa = same vicinity (worker memmove side); 0x3b97e =
+#   qDBusBindToApplication. All runtime-invisible to TSan (<null> frames) —
+#   the class is structurally beyond TSan's suppression matcher, which is
+#   why it lives HERE (the verdict layer) and not in tsan-suppressions.txt.
+addr2line = "0x2ae895=QRunnable::QGenericRunnable::~QGenericRunnable; 0x2ae4aa=QGenericRunnable vicinity (worker); 0x3b97e=qDBusBindToApplication"
+# Reproducing probe + rate: council-punch artifacts/isolate_tsan.cpp
+#   connonly mode — 20/20 deterministic; suite testHeldReplyTimeoutSettleCancels
+#   ~4/10 (ambient timing).
+reproducer = "isolate_tsan connonly (council-punch artifacts), 20/20; suite testHeldReplyTimeoutSettleCancels ~4/10"
+# Owning test: the suite fires it in testHeldReplyTimeoutSettleCancels
+#   (test_dbusadaptor.cpp); the probe is the deterministic reproducer.
+owning_test = "test_dbusadaptor.cpp testHeldReplyTimeoutSettleCancels (suite); isolate_tsan connonly (probe)"
+# Parent-tree parity: pre-existing at c513a2b — the PRE-cycle library fires
+#   it 20/20 via the probe with identical stacks (road-to-one report §STOP
+#   item; tsan-tip-fire-logs.tgz).
+parent_parity = "pre-existing at c513a2b (20/20 probe, identical stacks, pre-cycle library)"
+# Upstream link: none found for this exact class; QTBUG-79770 is the
+#   adjacent Qt-side acknowledgment of TSan-visible teardown races.
+upstream_link = "none exact; QTBUG-79770 (adjacent: Qt object-teardown TSan races)"
+# fable's honesty qualifier, spelled out: a dbusqml-CAUSED race can in
+#   principle present all-foreign (both access PCs inside Qt containers).
+#   This entry does not exempt such a race from anything — it matches this
+#   arrangement + these anchors only. The tripwires: the census (a new
+#   foreign fingerprint fails the gate) and the red-team probe (attempts to
+#   construct exactly that shape).
+honesty_qualifier = "a dbusqml-caused race can in principle present all-foreign; the census + red-team probe are the tripwires"
+# Falsifier: the B run (one-shot TSan-instrumented Qt build) decides whether
+#   this class is a real Qt bug (then: upstream QTBUG, link here) or an
+#   instrumentation artifact (then: reword to proven-false-positive with
+#   the run date). Scheduled in ~/Documents/dbusqml/todos/TODO.md.
+falsifier = "the B run (TSan-instrumented Qt build) — ~/Documents/dbusqml/todos/TODO.md"
+
+# Site anchors verified identical across every captured fire (suite
+# fixture, probe fixture, and 4 canary fires), all Qt 6.11.2.
+[class.anchors]
+"6.11.2" = ["libQt6Core.so.6+0x2ae895@3e89a2b2af7893db9e9a63269b878a94627e4142", "libQt6Core.so.6+0x2ae4aa@3e89a2b2af7893db9e9a63269b878a94627e4142"]
+
+# The arrangement — derived from BOTH captured shapes
+# (tests/tsan-fixtures/foreign-bus-bind-{suite,probe}.log): identical
+# attribution arrangements (they differ only in creation context, which
+# never enters the fingerprint — question-1 ruling), so ONE entry covers
+# both shapes.
+[[class.arrangement]]
+role = "access-first"
+interceptor = "free"
+below_module = "libQt6Core.so.6"
+thread = "main"
+access = "write:8"
+
+[[class.arrangement]]
+role = "access-second"
+interceptor = "__tsan_memmove"
+below_module = "libQt6Core.so.6"
+thread = "QDBusConnection"
+access = "write:8"
+
+# --- Bus-bind family variants (registered tsan-gate-edgecases E2) ---
+# The two arrangements below were captured LIVE during the
+# register-tightening cycle's canary measurement (full blocks:
+# plans/tsan-register-tightening/probes/canary-variant-captures.tgz;
+# committed as fixtures foreign-bus-bind-variant-{worker,main}-realloc.log).
+# Both are the 0x2d1ab3 allocator site (QArrayData::reallocateUnaligned —
+# the detector layer's accepted-risk register entry) racing the bus-bind
+# worker's memmove at 0x2ae4aa; in suite binaries the detector layer's
+# test-scoped suppression anchors (qt_static_metacall) absorb it — it
+# reaches the verdict layer only in non-test binaries (canary/probe).
+# They differ ONLY in which thread performs the realloc — the
+# arrangement-tightness case made flesh. The previously demoted pooled
+# entry (free×realloc, FD1 of tsan-register-tightening) was NEVER captured;
+# its refire still follows the FD1 flow (red once → capture → register
+# tight).
+
+[[class]]
+id = "qt6-dbus-bus-bind-realloc-worker"
+
+report_type = "data race"
+classification = "accepted-unresolved-Qt-internal-risk — NOT proven false positive"
+qt_validated = ["6.11.2"]
+
+summary_class = "data race (libQt6Core.so.6+0x2d1ab3) — QDBusConnection worker's QArrayData realloc vs main-thread memmove (bus-bind family)"
+addr2line = "0x2d1ab3=QArrayData::reallocateUnaligned (realloc side); 0x2ae4aa=QGenericRunnable vicinity (memmove side)"
+reproducer = "amplified pure-QtDBus bind loop (25 binds/run) — 3/20 this arrangement; never observed in the suite selection"
+owning_test = "none in the suite — canary/probe context only (tsan_canary_foreign)"
+parent_parity = "family pre-existing; the 0x2d1ab3 site is the detector layer's accepted-risk register entry (test-binary-scoped suppression anchors keep it out of suite binaries)"
+upstream_link = "none exact; QTBUG-79770 (adjacent: Qt object-teardown TSan races)"
+honesty_qualifier = "a dbusqml-caused race can in principle present all-foreign; the census + red-team probe are the tripwires"
+falsifier = "the B run (TSan-instrumented Qt build) — ~/Documents/dbusqml/todos/TODO.md"
+
+[class.anchors]
+"6.11.2" = ["libQt6Core.so.6+0x2d1ab3@3e89a2b2af7893db9e9a63269b878a94627e4142", "libQt6Core.so.6+0x2ae4aa@3e89a2b2af7893db9e9a63269b878a94627e4142"]
+
+[[class.arrangement]]
+role = "access-first"
+interceptor = "realloc"
+below_module = "libQt6Core.so.6"
+thread = "QDBusConnection"
+access = "write:8"
+
+[[class.arrangement]]
+role = "access-second"
+interceptor = "__tsan_memmove"
+below_module = "libQt6Core.so.6"
+thread = "main"
+access = "write:8"
+
+[[class]]
+id = "qt6-dbus-bus-bind-realloc-main"
+
+report_type = "data race"
+classification = "accepted-unresolved-Qt-internal-risk — NOT proven false positive"
+qt_validated = ["6.11.2"]
+
+summary_class = "data race (libQt6Core.so.6+0x2d1ab3) — main-thread QArrayData realloc vs the QDBusConnection worker's memmove (bus-bind family)"
+addr2line = "0x2d1ab3=QArrayData::reallocateUnaligned (realloc side); 0x2ae4aa=QGenericRunnable vicinity (memmove side)"
+reproducer = "amplified pure-QtDBus bind loop (25 binds/run) — 1/20 this arrangement; never observed in the suite selection"
+owning_test = "none in the suite — canary/probe context only (tsan_canary_foreign)"
+parent_parity = "family pre-existing; the 0x2d1ab3 site is the detector layer's accepted-risk register entry (test-binary-scoped suppression anchors keep it out of suite binaries)"
+upstream_link = "none exact; QTBUG-79770 (adjacent: Qt object-teardown TSan races)"
+honesty_qualifier = "a dbusqml-caused race can in principle present all-foreign; the census + red-team probe are the tripwires"
+falsifier = "the B run (TSan-instrumented Qt build) — ~/Documents/dbusqml/todos/TODO.md"
+
+[class.anchors]
+"6.11.2" = ["libQt6Core.so.6+0x2d1ab3@3e89a2b2af7893db9e9a63269b878a94627e4142", "libQt6Core.so.6+0x2ae4aa@3e89a2b2af7893db9e9a63269b878a94627e4142"]
+
+[[class.arrangement]]
+role = "access-first"
+interceptor = "realloc"
+below_module = "libQt6Core.so.6"
+thread = "main"
+access = "write:8"
+
+[[class.arrangement]]
+role = "access-second"
+interceptor = "__tsan_memmove"
+below_module = "libQt6Core.so.6"
+thread = "QDBusConnection"
+access = "write:8"

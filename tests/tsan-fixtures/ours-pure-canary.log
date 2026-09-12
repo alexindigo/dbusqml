@@ -1,0 +1,69 @@
+==================
+WARNING: ThreadSanitizer: data race (pid=367955)
+  Read of size 4 at 0x7fff1954612c by thread T2:
+    #0 operator() /home/tester/dbusqml-tip/tests/tsan_canary.cpp:23 (tsan_canary+0x12d4) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #1 __invoke_impl<void, main()::<lambda()> > /usr/include/c++/16/bits/invoke.h:63 (tsan_canary+0x1dfe) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #2 __invoke<main()::<lambda()> > /usr/include/c++/16/bits/invoke.h:98 (tsan_canary+0x1d23) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #3 _M_invoke<0> /usr/include/c++/16/bits/std_thread.h:303 (tsan_canary+0x1c44) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #4 operator() /usr/include/c++/16/bits/std_thread.h:310 (tsan_canary+0x1ba8) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #5 _M_run /usr/include/c++/16/bits/std_thread.h:255 (tsan_canary+0x1b18) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #6 <null> <null> (libstdc++.so.6+0xea858) (BuildId: 5b8d3de442de987b24d0e3679533068f2ae62497)
+
+  Previous write of size 4 at 0x7fff1954612c by thread T1:
+    #0 operator() /home/tester/dbusqml-tip/tests/tsan_canary.cpp:19 (tsan_canary+0x1276) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #1 __invoke_impl<void, main()::<lambda()> > /usr/include/c++/16/bits/invoke.h:63 (tsan_canary+0x1e69) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #2 __invoke<main()::<lambda()> > /usr/include/c++/16/bits/invoke.h:98 (tsan_canary+0x1d93) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #3 _M_invoke<0> /usr/include/c++/16/bits/std_thread.h:303 (tsan_canary+0x1c9a) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #4 operator() /usr/include/c++/16/bits/std_thread.h:310 (tsan_canary+0x1bee) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #5 _M_run /usr/include/c++/16/bits/std_thread.h:255 (tsan_canary+0x1b62) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #6 <null> <null> (libstdc++.so.6+0xea858) (BuildId: 5b8d3de442de987b24d0e3679533068f2ae62497)
+
+  Location is stack of main thread.
+
+  Thread T2 (tid=367958, running) created by main thread at:
+    #0 pthread_create <null> (libtsan.so.2+0x616c9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xea961) (BuildId: 5b8d3de442de987b24d0e3679533068f2ae62497)
+    #2 main /home/tester/dbusqml-tip/tests/tsan_canary.cpp:24 (tsan_canary+0x1386) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+
+  Thread T1 (tid=367957, running) created by main thread at:
+    #0 pthread_create <null> (libtsan.so.2+0x616c9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xea961) (BuildId: 5b8d3de442de987b24d0e3679533068f2ae62497)
+    #2 main /home/tester/dbusqml-tip/tests/tsan_canary.cpp:20 (tsan_canary+0x135f) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+
+SUMMARY: ThreadSanitizer: data race /home/tester/dbusqml-tip/tests/tsan_canary.cpp:23 in operator()
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=367955)
+  Write of size 4 at 0x7fff1954612c by thread T2:
+    #0 operator() /home/tester/dbusqml-tip/tests/tsan_canary.cpp:23 (tsan_canary+0x12e2) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #1 __invoke_impl<void, main()::<lambda()> > /usr/include/c++/16/bits/invoke.h:63 (tsan_canary+0x1dfe) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #2 __invoke<main()::<lambda()> > /usr/include/c++/16/bits/invoke.h:98 (tsan_canary+0x1d23) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #3 _M_invoke<0> /usr/include/c++/16/bits/std_thread.h:303 (tsan_canary+0x1c44) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #4 operator() /usr/include/c++/16/bits/std_thread.h:310 (tsan_canary+0x1ba8) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #5 _M_run /usr/include/c++/16/bits/std_thread.h:255 (tsan_canary+0x1b18) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #6 <null> <null> (libstdc++.so.6+0xea858) (BuildId: 5b8d3de442de987b24d0e3679533068f2ae62497)
+
+  Previous write of size 4 at 0x7fff1954612c by thread T1:
+    #0 operator() /home/tester/dbusqml-tip/tests/tsan_canary.cpp:19 (tsan_canary+0x1276) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #1 __invoke_impl<void, main()::<lambda()> > /usr/include/c++/16/bits/invoke.h:63 (tsan_canary+0x1e69) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #2 __invoke<main()::<lambda()> > /usr/include/c++/16/bits/invoke.h:98 (tsan_canary+0x1d93) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #3 _M_invoke<0> /usr/include/c++/16/bits/std_thread.h:303 (tsan_canary+0x1c9a) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #4 operator() /usr/include/c++/16/bits/std_thread.h:310 (tsan_canary+0x1bee) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #5 _M_run /usr/include/c++/16/bits/std_thread.h:255 (tsan_canary+0x1b62) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+    #6 <null> <null> (libstdc++.so.6+0xea858) (BuildId: 5b8d3de442de987b24d0e3679533068f2ae62497)
+
+  Location is stack of main thread.
+
+  Thread T2 (tid=367958, running) created by main thread at:
+    #0 pthread_create <null> (libtsan.so.2+0x616c9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xea961) (BuildId: 5b8d3de442de987b24d0e3679533068f2ae62497)
+    #2 main /home/tester/dbusqml-tip/tests/tsan_canary.cpp:24 (tsan_canary+0x1386) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+
+  Thread T1 (tid=367957, running) created by main thread at:
+    #0 pthread_create <null> (libtsan.so.2+0x616c9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xea961) (BuildId: 5b8d3de442de987b24d0e3679533068f2ae62497)
+    #2 main /home/tester/dbusqml-tip/tests/tsan_canary.cpp:20 (tsan_canary+0x135f) (BuildId: 93b6ed00c8f06ab812d8a0d99d7be1ae99bcc96d)
+
+SUMMARY: ThreadSanitizer: data race /home/tester/dbusqml-tip/tests/tsan_canary.cpp:23 in operator()
+==================
+ThreadSanitizer: reported 2 warnings

@@ -1,0 +1,2 @@
+# test-scoped register copy with NO entries — every foreign block is
+# unregistered here (the knob must FAIL).

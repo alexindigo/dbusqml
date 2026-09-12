@@ -58,6 +58,11 @@ compile_commands.json
 *.bak
 *.swp
 
+# ...except the committed TSan classifier fixtures (captured real logs +
+# mutation fixtures the classifier self-tests run against — intentional
+# evidence files, not transient output; tsan-classifier-gate cycle).
+!tests/tsan-fixtures/*.log
+
 # vcpkg
 vcpkg_installed/
 

@@ -1,0 +1,28 @@
+[[class]]
+id = "probe"
+report_type = "data race"
+classification = "accepted-unresolved-Qt-internal-risk — test"
+qt_validated = ["6.11.2"]
+summary_class = "s"
+summary_clas = "typo"
+addr2line = "a"
+reproducer = "r"
+owning_test = "o"
+parent_parity = "p"
+upstream_link = "u"
+honesty_qualifier = "h"
+falsifier = "f"
+[class.anchors]
+"6.11.2" = ["libQt6Core.so.6+0x1@3e89a2b2af7893db9e9a63269b878a94627e4142", "libQt6Core.so.6+0x2@3e89a2b2af7893db9e9a63269b878a94627e4142"]
+[[class.arrangement]]
+role = "access-first"
+interceptor = "free"
+below_module = "libQt6Core.so.6"
+thread = "main"
+access = "write:8"
+[[class.arrangement]]
+role = "access-second"
+interceptor = "__tsan_memmove"
+below_module = "libQt6Core.so.6"
+thread = "QDBusConnection"
+access = "write:8"

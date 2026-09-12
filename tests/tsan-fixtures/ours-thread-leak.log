@@ -1,0 +1,242 @@
+********* Start testing of TestDBusAdaptor *********
+Config: Using QtTest library 6.11.2, Qt 6.11.2 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 16.2.1 20260810), arch unknown
+PASS   : TestDBusAdaptor::initTestCase()
+QWARN  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() Connecting to deprecated signal QDBusConnectionInterface::serviceOwnerChanged(QString,QString,QString)
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 0: steal reply=1 lost=0 acquired=1 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 0: reacq done=1 lost=1 acquired=2 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 1: steal reply=1 lost=1 acquired=2 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 1: reacq done=1 lost=2 acquired=3 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 2: steal reply=1 lost=2 acquired=3 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 2: reacq done=1 lost=3 acquired=4 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 3: steal reply=1 lost=3 acquired=4 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 3: reacq done=1 lost=4 acquired=5 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 4: steal reply=1 lost=4 acquired=5 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 4: reacq done=1 lost=5 acquired=6 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 5: steal reply=1 lost=5 acquired=6 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 5: reacq done=1 lost=6 acquired=7 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 6: steal reply=1 lost=6 acquired=7 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 6: reacq done=1 lost=7 acquired=8 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 7: steal reply=1 lost=7 acquired=8 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 7: reacq done=1 lost=8 acquired=9 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 8: steal reply=1 lost=8 acquired=9 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 8: reacq done=1 lost=9 acquired=10 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 9: steal reply=1 lost=9 acquired=10 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 9: reacq done=1 lost=10 acquired=11 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 10: steal reply=1 lost=10 acquired=11 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 10: reacq done=1 lost=11 acquired=12 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 11: steal reply=1 lost=11 acquired=12 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 11: reacq done=1 lost=12 acquired=13 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 12: steal reply=1 lost=12 acquired=13 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 12: reacq done=1 lost=13 acquired=14 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 13: steal reply=1 lost=13 acquired=14 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 13: reacq done=1 lost=14 acquired=15 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 14: steal reply=1 lost=14 acquired=15 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 14: reacq done=1 lost=15 acquired=16 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 15: steal reply=1 lost=15 acquired=16 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 15: reacq done=1 lost=16 acquired=17 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 16: steal reply=1 lost=16 acquired=17 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 16: reacq done=1 lost=17 acquired=18 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 17: steal reply=1 lost=17 acquired=18 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 17: reacq done=1 lost=18 acquired=19 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 18: steal reply=1 lost=18 acquired=19 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 18: reacq done=1 lost=19 acquired=20 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 19: steal reply=1 lost=19 acquired=20 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 19: reacq done=1 lost=20 acquired=21 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 20: steal reply=1 lost=20 acquired=21 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 20: reacq done=1 lost=21 acquired=22 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 21: steal reply=1 lost=21 acquired=22 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 21: reacq done=1 lost=22 acquired=23 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 22: steal reply=1 lost=22 acquired=23 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 22: reacq done=1 lost=23 acquired=24 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 23: steal reply=1 lost=23 acquired=24 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 23: reacq done=1 lost=24 acquired=25 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 24: steal reply=1 lost=24 acquired=25 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 24: reacq done=1 lost=25 acquired=26 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 25: steal reply=1 lost=25 acquired=26 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 25: reacq done=1 lost=26 acquired=27 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 26: steal reply=1 lost=26 acquired=27 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 26: reacq done=1 lost=27 acquired=28 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 27: steal reply=1 lost=27 acquired=28 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 27: reacq done=1 lost=28 acquired=29 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 28: steal reply=1 lost=28 acquired=29 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 28: reacq done=1 lost=29 acquired=30 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 29: steal reply=1 lost=29 acquired=30 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 29: reacq done=1 lost=30 acquired=31 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 30: steal reply=1 lost=30 acquired=31 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 30: reacq done=1 lost=31 acquired=32 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 31: steal reply=1 lost=31 acquired=32 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 31: reacq done=1 lost=32 acquired=33 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 32: steal reply=1 lost=32 acquired=33 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 32: reacq done=1 lost=33 acquired=34 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 33: steal reply=1 lost=33 acquired=34 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 33: reacq done=1 lost=34 acquired=35 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 34: steal reply=1 lost=34 acquired=35 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 34: reacq done=1 lost=35 acquired=36 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 35: steal reply=1 lost=35 acquired=36 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 35: reacq done=1 lost=36 acquired=37 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 36: steal reply=1 lost=36 acquired=37 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 36: reacq done=1 lost=37 acquired=38 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 37: steal reply=1 lost=37 acquired=38 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 37: reacq done=1 lost=38 acquired=39 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 38: steal reply=1 lost=38 acquired=39 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 38: reacq done=1 lost=39 acquired=40 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 39: steal reply=1 lost=39 acquired=40 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 39: reacq done=1 lost=40 acquired=41 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 40: steal reply=1 lost=40 acquired=41 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 40: reacq done=1 lost=41 acquired=42 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 41: steal reply=1 lost=41 acquired=42 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 41: reacq done=1 lost=42 acquired=43 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 42: steal reply=1 lost=42 acquired=43 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 42: reacq done=1 lost=43 acquired=44 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 43: steal reply=1 lost=43 acquired=44 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 43: reacq done=1 lost=44 acquired=45 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 44: steal reply=1 lost=44 acquired=45 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 44: reacq done=1 lost=45 acquired=46 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 45: steal reply=1 lost=45 acquired=46 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 45: reacq done=1 lost=46 acquired=47 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 46: steal reply=1 lost=46 acquired=47 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 46: reacq done=1 lost=47 acquired=48 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 47: steal reply=1 lost=47 acquired=48 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 47: reacq done=1 lost=48 acquired=49 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 48: steal reply=1 lost=48 acquired=49 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 48: reacq done=1 lost=49 acquired=50 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 49: steal reply=1 lost=49 acquired=50 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 49: reacq done=1 lost=50 acquired=51 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 50: steal reply=1 lost=50 acquired=51 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 50: reacq done=1 lost=51 acquired=52 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 51: steal reply=1 lost=51 acquired=52 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 51: reacq done=1 lost=52 acquired=53 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 52: steal reply=1 lost=52 acquired=53 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 52: reacq done=1 lost=53 acquired=54 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 53: steal reply=1 lost=53 acquired=54 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 53: reacq done=1 lost=54 acquired=55 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 54: steal reply=1 lost=54 acquired=55 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 54: reacq done=1 lost=55 acquired=56 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 55: steal reply=1 lost=55 acquired=56 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 55: reacq done=1 lost=56 acquired=57 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 56: steal reply=1 lost=56 acquired=57 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 56: reacq done=1 lost=57 acquired=58 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 57: steal reply=1 lost=57 acquired=58 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 57: reacq done=1 lost=58 acquired=59 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 58: steal reply=1 lost=58 acquired=59 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 58: reacq done=1 lost=59 acquired=60 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 59: steal reply=1 lost=59 acquired=60 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 59: reacq done=1 lost=60 acquired=61 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 60: steal reply=1 lost=60 acquired=61 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 60: reacq done=1 lost=61 acquired=62 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 61: steal reply=1 lost=61 acquired=62 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 61: reacq done=1 lost=62 acquired=63 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 62: steal reply=1 lost=62 acquired=63 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 62: reacq done=1 lost=63 acquired=64 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 63: steal reply=1 lost=63 acquired=64 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 63: reacq done=1 lost=64 acquired=65 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 64: steal reply=1 lost=64 acquired=65 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 64: reacq done=1 lost=65 acquired=66 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 65: steal reply=1 lost=65 acquired=66 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 65: reacq done=1 lost=66 acquired=67 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 66: steal reply=1 lost=66 acquired=67 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 66: reacq done=1 lost=67 acquired=68 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 67: steal reply=1 lost=67 acquired=68 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 67: reacq done=1 lost=68 acquired=69 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 68: steal reply=1 lost=68 acquired=69 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 68: reacq done=1 lost=69 acquired=70 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 69: steal reply=1 lost=69 acquired=70 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 69: reacq done=1 lost=70 acquired=71 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 70: steal reply=1 lost=70 acquired=71 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 70: reacq done=1 lost=71 acquired=72 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 71: steal reply=1 lost=71 acquired=72 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 71: reacq done=1 lost=72 acquired=73 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 72: steal reply=1 lost=72 acquired=73 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 72: reacq done=1 lost=73 acquired=74 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 73: steal reply=1 lost=73 acquired=74 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 73: reacq done=1 lost=74 acquired=75 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 74: steal reply=1 lost=74 acquired=75 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 74: reacq done=1 lost=75 acquired=76 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 75: steal reply=1 lost=75 acquired=76 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 75: reacq done=1 lost=76 acquired=77 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 76: steal reply=1 lost=76 acquired=77 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 76: reacq done=1 lost=77 acquired=78 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 77: steal reply=1 lost=77 acquired=78 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 77: reacq done=1 lost=78 acquired=79 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 78: steal reply=1 lost=78 acquired=79 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 78: reacq done=1 lost=79 acquired=80 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 79: steal reply=1 lost=79 acquired=80 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 79: reacq done=1 lost=80 acquired=81 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 80: steal reply=1 lost=80 acquired=81 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 80: reacq done=1 lost=81 acquired=82 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 81: steal reply=1 lost=81 acquired=82 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 81: reacq done=1 lost=82 acquired=83 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 82: steal reply=1 lost=82 acquired=83 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 82: reacq done=1 lost=83 acquired=84 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 83: steal reply=1 lost=83 acquired=84 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 83: reacq done=1 lost=84 acquired=85 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 84: steal reply=1 lost=84 acquired=85 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 84: reacq done=1 lost=85 acquired=86 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 85: steal reply=1 lost=85 acquired=86 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 85: reacq done=1 lost=86 acquired=87 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 86: steal reply=1 lost=86 acquired=87 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 86: reacq done=1 lost=87 acquired=88 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 87: steal reply=1 lost=87 acquired=88 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 87: reacq done=1 lost=88 acquired=89 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 88: steal reply=1 lost=88 acquired=89 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 88: reacq done=1 lost=89 acquired=90 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 89: steal reply=1 lost=89 acquired=90 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 89: reacq done=1 lost=90 acquired=91 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 90: steal reply=1 lost=90 acquired=91 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 90: reacq done=1 lost=91 acquired=92 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 91: steal reply=1 lost=91 acquired=92 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 91: reacq done=1 lost=92 acquired=93 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 92: steal reply=1 lost=92 acquired=93 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 92: reacq done=1 lost=93 acquired=94 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 93: steal reply=1 lost=93 acquired=94 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 93: reacq done=1 lost=94 acquired=95 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 94: steal reply=1 lost=94 acquired=95 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 94: reacq done=1 lost=95 acquired=96 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 95: steal reply=1 lost=95 acquired=96 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 95: reacq done=1 lost=96 acquired=97 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 96: steal reply=1 lost=96 acquired=97 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 96: reacq done=1 lost=97 acquired=98 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 97: steal reply=1 lost=97 acquired=98 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 97: reacq done=1 lost=98 acquired=99 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 98: steal reply=1 lost=98 acquired=99 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 98: reacq done=1 lost=99 acquired=100 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 99: steal reply=1 lost=99 acquired=100 owner=:1.0
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2 pair 99: reacq done=1 lost=100 acquired=101 owner=:1.1
+QINFO  : TestDBusAdaptor::testOwnerChangeStormImmediateDelete() G2: 100 genuine pairs, 0 voided flaps
+PASS   : TestDBusAdaptor::testOwnerChangeStormImmediateDelete()
+PASS   : TestDBusAdaptor::cleanupTestCase()
+Totals: 3 passed, 0 failed, 0 skipped, 0 blacklisted, 301ms
+********* Finished testing of TestDBusAdaptor *********
+==================
+WARNING: ThreadSanitizer: thread leak (pid=5275)
+  Thread T1 'QtTest Watchdog' (tid=5277, finished) created by main thread at:
+    #0 pthread_create <null> (libtsan.so.2+0x616c9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 QThread::start(QThread::Priority) <null> (libQt6Core.so.6+0x36bb8c) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #2 <null> <null> (libc.so.6+0x27780) (BuildId: 503200d7fda94a5dc6058d7e0694e5d1dcb2e372)
+
+SUMMARY: ThreadSanitizer: thread leak (/usr/lib/libQt6Core.so.6+0x36bb8c) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142) in QThread::start(QThread::Priority)
+==================
+==================
+WARNING: ThreadSanitizer: thread leak (pid=5275)
+  Thread T2 'QQmlThread' (tid=5279, finished) created by main thread at:
+    #0 pthread_create <null> (libtsan.so.2+0x616c9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 QThread::start(QThread::Priority) <null> (libQt6Core.so.6+0x36bb8c) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #2 TestDBusAdaptor::qt_static_metacall(QObject*, QMetaObject::Call, int, void**) /home/tester/build-tsan/test_adaptor_autogen/include/test_dbusadaptor.moc:1971 (test_adaptor+0xe39aa) (BuildId: d30299ce857c7b1a1940834a3a599e36a039a0a8)
+    #3 QMetaMethodInvoker::invokeImpl(QMetaMethod, void*, Qt::ConnectionType, long long, void const* const*, char const* const*, QtPrivate::QMetaTypeInterface const* const*) <null> (libQt6Core.so.6+0x19a840) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #4 <null> <null> (libc.so.6+0x27780) (BuildId: 503200d7fda94a5dc6058d7e0694e5d1dcb2e372)
+
+SUMMARY: ThreadSanitizer: thread leak (/usr/lib/libQt6Core.so.6+0x36bb8c) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142) in QThread::start(QThread::Priority)
+==================
+==================
+WARNING: ThreadSanitizer: thread leak (pid=5275)
+  Thread T3 'QDBusConnection' (tid=5280, finished) created by main thread at:
+    #0 pthread_create <null> (libtsan.so.2+0x616c9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 QThread::start(QThread::Priority) <null> (libQt6Core.so.6+0x36bb8c) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #2 TestDBusAdaptor::testOwnerChangeStormImmediateDelete() /home/tester/dbusqml-tip/tests/test_dbusadaptor.cpp:3905 (test_adaptor+0x746c4) (BuildId: d30299ce857c7b1a1940834a3a599e36a039a0a8)
+    #3 TestDBusAdaptor::qt_static_metacall(QObject*, QMetaObject::Call, int, void**) /home/tester/build-tsan/test_adaptor_autogen/include/test_dbusadaptor.moc:1971 (test_adaptor+0xe39aa) (BuildId: d30299ce857c7b1a1940834a3a599e36a039a0a8)
+    #4 QMetaMethodInvoker::invokeImpl(QMetaMethod, void*, Qt::ConnectionType, long long, void const* const*, char const* const*, QtPrivate::QMetaTypeInterface const* const*) <null> (libQt6Core.so.6+0x19a840) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #5 <null> <null> (libc.so.6+0x27780) (BuildId: 503200d7fda94a5dc6058d7e0694e5d1dcb2e372)
+
+SUMMARY: ThreadSanitizer: thread leak (/usr/lib/libQt6Core.so.6+0x36bb8c) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142) in QThread::start(QThread::Priority)
+==================
+ThreadSanitizer: reported 3 warnings

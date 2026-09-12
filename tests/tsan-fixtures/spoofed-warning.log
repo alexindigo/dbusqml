@@ -1,0 +1,27 @@
+# fixture-provenance: real TSan-run test_types pass log (21/21, zero reports) plus ONE injected spoofed WARNING line (as a qDebug print of the literal string would emit) mid-log, no real block following; synthetic injection
+********* Start testing of TestDBusTypes *********
+Config: Using QtTest library 6.11.2, Qt 6.11.2 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 16.2.1 20260810), arch unknown
+PASS   : TestDBusTypes::initTestCase()
+WARNING: ThreadSanitizer: data race
+PASS   : TestDBusTypes::testUint32()
+PASS   : TestDBusTypes::testInt32()
+PASS   : TestDBusTypes::testUint16()
+PASS   : TestDBusTypes::testInt16()
+PASS   : TestDBusTypes::testUint64()
+PASS   : TestDBusTypes::testInt64()
+PASS   : TestDBusTypes::testBool()
+PASS   : TestDBusTypes::testDouble()
+PASS   : TestDBusTypes::testByte()
+PASS   : TestDBusTypes::testString()
+PASS   : TestDBusTypes::testObjectPath()
+PASS   : TestDBusTypes::testSignature()
+PASS   : TestDBusTypes::testVariant()
+PASS   : TestDBusTypes::testDict()
+PASS   : TestDBusTypes::testDBusMessageDefaults()
+PASS   : TestDBusTypes::testDBusMessageSetters()
+PASS   : TestDBusTypes::testDBusMessageFromMap()
+PASS   : TestDBusTypes::testDBusMessageFromEmptyMap()
+PASS   : TestDBusTypes::testDBusError()
+PASS   : TestDBusTypes::cleanupTestCase()
+Totals: 21 passed, 0 failed, 0 skipped, 0 blacklisted, 10ms
+********* Finished testing of TestDBusTypes *********

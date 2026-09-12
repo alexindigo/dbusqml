@@ -1,0 +1,28 @@
+==369733==ERROR: ThreadSanitizer: SEGV on unknown address 0x72280100f437 (pc 0x7fa9210f32a4 bp 0x7fa9159fcb20 sp 0x7fa9159fca58 T369737)
+==369733==The signal is caused by a READ memory access.
+    #0 <null> <null> (libQt6Core.so.6+0xf32a4) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #1 QString::vasprintf(char const*, __va_list_tag*) <null> (libQt6Core.so.6+0x293f75) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #2 <null> <null> (libQt6Core.so.6+0xfa545) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #3 QMessageLogger::warning(char const*, ...) const <null> (libQt6Core.so.6+0x97756) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #4 QObject::QObject(QObjectPrivate&, QObject*) <null> (libQt6Core.so.6+0x1e0d67) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #5 QDBusPendingCallWatcher::QDBusPendingCallWatcher(QDBusPendingCall const&, QObject*) <null> (libQt6DBus.so.6+0x993ef) (BuildId: bd573e32ad26630bc55f94feb1f5b625d74277f5)
+    #6 DBusProxy::ensureServiceWatcher() /home/tester/dbusqml-tip/dbus.cpp:340 (libdbusqml.so+0x3f4f1d) (BuildId: cd7148545d99ffcc1cd8af0af825911959e37780)
+    #7 DBusProxy::setService(QString const&) /home/tester/dbusqml-tip/dbus.cpp:110 (libdbusqml.so+0x3f2c52) (BuildId: cd7148545d99ffcc1cd8af0af825911959e37780)
+    #8 operator() /home/tester/redteam-src/redteam_tsan.cpp:116 (redteam_tsan+0x5f3e) (BuildId: 9d4008b0ab56072ae5eb70d692faa531d53f2b32)
+    #9 __invoke_impl<void, main(int, char**)::<lambda(DBusProxy*)>, DBusProxy*> /usr/include/c++/16/bits/invoke.h:63 (redteam_tsan+0x875a) (BuildId: 9d4008b0ab56072ae5eb70d692faa531d53f2b32)
+    #10 __invoke<main(int, char**)::<lambda(DBusProxy*)>, DBusProxy*> /usr/include/c++/16/bits/invoke.h:98 (redteam_tsan+0x8517) (BuildId: 9d4008b0ab56072ae5eb70d692faa531d53f2b32)
+    #11 _M_invoke<0, 1> /usr/include/c++/16/bits/std_thread.h:303 (redteam_tsan+0x833c) (BuildId: 9d4008b0ab56072ae5eb70d692faa531d53f2b32)
+    #12 operator() /usr/include/c++/16/bits/std_thread.h:310 (redteam_tsan+0x81fa) (BuildId: 9d4008b0ab56072ae5eb70d692faa531d53f2b32)
+    #13 _M_run /usr/include/c++/16/bits/std_thread.h:255 (redteam_tsan+0x80d6) (BuildId: 9d4008b0ab56072ae5eb70d692faa531d53f2b32)
+    #14 <null> <null> (libstdc++.so.6+0xea858) (BuildId: 5b8d3de442de987b24d0e3679533068f2ae62497)
+    #15 <null> <null> (libtsan.so.2+0x557e9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #16 <null> <null> (libc.so.6+0x980a1) (BuildId: 503200d7fda94a5dc6058d7e0694e5d1dcb2e372)
+    #17 <null> <null> (libc.so.6+0x12080b) (BuildId: 503200d7fda94a5dc6058d7e0694e5d1dcb2e372)
+
+==369733==Register values:
+rax = 0x0000000000000000  rbx = 0x00007fa92159ff00  rcx = 0x00007fa9159fcb78  rdx = 0x00007fa9159fccf0  
+rdi = 0x000072280100f437  rsi = 0x00000000ffffffff  rbp = 0x00007fa9159fcb20  rsp = 0x00007fa9159fca58  
+ r8 = 0x00007fa92159ff44   r9 = 0x0000000000000057  r10 = 0x000000000000044e  r11 = 0x00007fa9233cffa8  
+r12 = 0x00007fa9159fcad0  r13 = 0x0000000000000200  r14 = 0x000072280100f437  r15 = 0x00007fa9214cc358  
+ThreadSanitizer can not provide additional info.
+SUMMARY: ThreadSanitizer: SEGV (/usr/lib/libQt6Core.so.6+0xf32a4) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142) 

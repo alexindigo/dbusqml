@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# tsan-gate — the F-amended TSan gate as one command: fixture self-tests →
+# live canary battery → the C1-validated 12-test selection → classifier
+# verdict + independent cross-check + census. Fork evidence runs and the CI
+# job run THIS SAME flow (the CI step calls this script).
+#
+# Usage: scripts/tsan-gate [--build DIR] [--runs N]
+#   --build DIR   the TSan-instrumented build tree (default ~/build-tsan)
+#   --runs N      selection loop repetitions (default 1)
+#
+# Exit 0 = gate green. The detector never owns the verdict
+# (TSAN_OPTIONS=exitcode=0 throughout — grok's amendment).
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUILD="$HOME/build-tsan"
+RUNS=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --build)
+        BUILD="$2"
+        shift 2
+        ;;
+    --runs)
+        RUNS="$2"
+        shift 2
+        ;;
+    *)
+        echo "unknown arg: $1" >&2
+        exit 2
+        ;;
+    esac
+done
+
+REGISTER="$REPO/tests/tsan-foreign-register.toml"
+CLASSIFY=(python3 "$REPO/tests/tsan-classify.py" --register "$REGISTER")
+export QT_QPA_PLATFORM=offscreen
+export TSAN_OPTIONS="exitcode=0:suppressions=$REPO/tests/tsan-suppressions.txt"
+
+step() {
+    echo
+    echo "=== tsan-gate: $* ==="
+}
+
+# ---------- step 2: fixture self-tests (fast, hermetic) ----------
+step "fixture self-tests"
+python3 "$REPO/tests/tsan-classify-selftest.py" || {
+    echo "GATE FAIL: classifier self-tests"
+    exit 1
+}
+
+# ---------- step 3: live canary battery ----------
+step "live canary battery"
+WORK="$(mktemp -d /tmp/tsan-gate.XXXXXX)"
+# Evidence hygiene: the workdir (per-test logs, verdicts, foreign-block
+# dump) survives on FAILURE for triage; cleaned on green.
+gate_fail() {
+    echo "tsan-gate: evidence kept in $WORK" >&2
+    trap - EXIT
+    exit 1
+}
+
+for t in tsan_canary tsan_canary_mixed tsan_canary_foreign; do
+    [ -x "$BUILD/$t" ] || cmake --build "$BUILD" --target "$t" >/dev/null || {
+        echo "GATE FAIL: cannot build $t"
+        gate_fail
+    }
+done
+
+# canaries 1-2: must produce report blocks AND classify OURS/FAIL.
+for c in tsan_canary tsan_canary_mixed; do
+    "$BUILD/$c" >"$WORK/$c.log" 2>&1
+    echo "$?" >"$WORK/$c.log.rc" # detector exit recorded, never trusted
+    if ! grep -q "WARNING: ThreadSanitizer" "$WORK/$c.log"; then
+        echo "GATE FAIL: canary $c produced zero reports — a canary that stops" \
+            "firing is a dead detector (qwen)"
+        gate_fail
+    fi
+    if "${CLASSIFY[@]}" "$WORK/$c.log" >"$WORK/$c.verdict" 2>&1; then
+        echo "GATE FAIL: canary $c classified clean — the mixed/ours boundary died"
+        gate_fail
+    fi
+    grep -q "^blocks: ours=[1-9]" "$WORK/$c.verdict" || {
+        echo "GATE FAIL: canary $c failed without an OURS block"
+        cat "$WORK/$c.verdict"
+        gate_fail
+    }
+    echo "canary $c: fires + OURS/FAIL through the classifier — alive"
+done
+
+# canary 3 (foreign): if it fires, it must classify foreign-registered and
+# the crosscheck must agree. If it doesn't fire on this toolchain:
+# warn-and-continue (its fire rate is Qt's, not ours).
+"$BUILD/tsan_canary_foreign" >"$WORK/foreign.log" 2>&1
+echo "$?" >"$WORK/foreign.log.rc"
+if grep -q "WARNING: ThreadSanitizer" "$WORK/foreign.log"; then
+    if ! "${CLASSIFY[@]}" --dump-foreign "$WORK/foreign.blocks" "$WORK/foreign.log" \
+        >"$WORK/foreign.verdict" 2>&1; then
+        echo "GATE FAIL: the foreign canary did NOT classify clean — the" \
+            "register/attribution boundary moved"
+        cat "$WORK/foreign.verdict"
+        gate_fail
+    fi
+    grep -q "id=qt6-dbus-bus-bind-worker-startup" "$WORK/foreign.verdict" || {
+        echo "GATE FAIL: foreign canary classified but not as the registered" \
+            "bus-bind class"
+        cat "$WORK/foreign.verdict"
+        gate_fail
+    }
+    "$REPO/scripts/tsan-crosscheck.sh" "$WORK/foreign.blocks" || {
+        echo "GATE FAIL: crosscheck disagrees on the foreign canary"
+        gate_fail
+    }
+    echo "canary tsan_canary_foreign: fired + foreign-registered + crosscheck clean"
+else
+    echo "WARN: foreign canary silent on this toolchain — warn-and-continue" \
+        "(its fire rate is Qt's); the pure/mixed canaries carry detector liveness"
+fi
+
+# ---------- step 4: the real selection (C1-validated twelve) ----------
+step "12-test selection (${RUNS} run(s))"
+for n in $(seq 1 "$RUNS"); do
+    for spec in \
+        "test_adaptor testOwnerChangeDestroyDuringNotification" \
+        "test_adaptor testOwnerChangeStormImmediateDelete" \
+        "test_adaptor testOwnerChangeReentrantHandler" \
+        "test_adaptor testOwnerChangeAnchorSpyTiming" \
+        "test_adaptor testOwnerChangeForeignThreadAdaptor" \
+        "test_adaptor testHeldReplyTimeoutDisabledByDefault" \
+        "test_adaptor testHeldReplyTimeoutExpires" \
+        "test_adaptor testHeldReplyTimeoutNoReplySilent" \
+        "test_adaptor testHeldReplyTimeoutSettleCancels" \
+        "test_adaptor testCoLocatedSamePath" \
+        "test_dbus testLossProbeIdleTraffic" \
+        "test_dbus testConnectionLossHandling"; do
+        # intentional word split of the "binary test" spec pair:
+        # shellcheck disable=SC2086
+        set -- $spec
+        log="$WORK/run$n-$1-$2.log"
+        dbus-run-session -- "$BUILD/$1" "$2" >"$log" 2>&1
+        echo "$?" >"$log.rc"
+    done
+done
+
+# ---------- step 5: classifier verdict + crosscheck + census ----------
+step "classifier verdict + crosscheck"
+if ! "${CLASSIFY[@]}" --dump-foreign "$WORK/foreign.blocks" "$WORK"/run*.log; then
+    echo "GATE FAIL: classifier verdict FAIL on the real selection"
+    gate_fail
+fi
+"$REPO/scripts/tsan-crosscheck.sh" "$WORK/foreign.blocks" || {
+    echo "GATE FAIL: crosscheck disagrees with the classifier"
+    gate_fail
+}
+
+echo
+rm -rf "$WORK"
+echo "GATE GREEN (battery + $RUNS selection run(s) + crosscheck agree)"
+exit 0

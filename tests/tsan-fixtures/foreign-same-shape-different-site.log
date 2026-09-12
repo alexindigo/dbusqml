@@ -1,0 +1,33 @@
+# fixture-provenance: tests/tsan-fixtures/foreign-bus-bind-suite.log with the two site offsets edited (0x2ae895->0x2b1895, 0x2ae4aa->0x2b14aa) — same arrangement, different SITE (astra's demonstration; synthetic edit of a real block)
+********* Start testing of TestDBusAdaptor *********
+Config: Using QtTest library 6.11.2, Qt 6.11.2 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 16.2.1 20260810), arch unknown
+PASS   : TestDBusAdaptor::initTestCase()
+PASS   : TestDBusAdaptor::testHeldReplyTimeoutSettleCancels()
+PASS   : TestDBusAdaptor::cleanupTestCase()
+Totals: 3 passed, 0 failed, 0 skipped, 0 blacklisted, 3458ms
+********* Finished testing of TestDBusAdaptor *********
+==================
+WARNING: ThreadSanitizer: data race (pid=10112)
+  Write of size 8 at 0x72100000c9d0 by main thread:
+    #0 free <null> (libtsan.so.2+0x948ac) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 <null> <null> (libQt6Core.so.6+0x2b1895) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #2 <null> <null> (libQt6DBus.so.6+0x3b97e) (BuildId: bd573e32ad26630bc55f94feb1f5b625d74277f5)
+
+  Previous write of size 8 at 0x72100000c9d0 by thread T3:
+    #0 __tsan_memmove <null> (libtsan.so.2+0x97076) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 <null> <null> (libQt6Core.so.6+0x2b14aa) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+
+  Thread T3 'QDBusConnection' (tid=10117, finished) created by main thread at:
+    #0 pthread_create <null> (libtsan.so.2+0x616c9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 QThread::start(QThread::Priority) <null> (libQt6Core.so.6+0x36bb8c) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #2 QQmlPrivate::QQmlElement<DBusAdaptor>::QQmlElement() /usr/include/qt6/QtQml/qqmlprivate.h:108 (libdbusqml.so+0x2af91d) (BuildId: cd7148545d99ffcc1cd8af0af825911959e37780)
+    #3 void QQmlPrivate::createInto<DBusAdaptor>(void*, void*) /usr/include/qt6/QtQml/qqmlprivate.h:182 (libdbusqml.so+0x29706c) (BuildId: cd7148545d99ffcc1cd8af0af825911959e37780)
+    #4 QQmlType::create(void**, unsigned long) const <null> (libQt6Qml.so.6+0x39a738) (BuildId: 7e6a8ff65ae8e8ecace705a57a091174c045ecc9)
+    #5 TestDBusAdaptor::testHeldReplyTimeoutSettleCancels() /home/tester/dbusqml-tip/tests/test_dbusadaptor.cpp:2850 (test_adaptor+0x65770) (BuildId: c3944c64ce6fd0d5a9216625c444f758e2f8f7ef)
+    #6 TestDBusAdaptor::qt_static_metacall(QObject*, QMetaObject::Call, int, void**) /home/tester/build-tsan/test_adaptor_autogen/include/test_dbusadaptor.moc:1958 (test_adaptor+0xeba21) (BuildId: c3944c64ce6fd0d5a9216625c444f758e2f8f7ef)
+    #7 QMetaMethodInvoker::invokeImpl(QMetaMethod, void*, Qt::ConnectionType, long long, void const* const*, char const* const*, QtPrivate::QMetaTypeInterface const* const*) <null> (libQt6Core.so.6+0x19a840) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #8 <null> <null> (libc.so.6+0x27780) (BuildId: 503200d7fda94a5dc6058d7e0694e5d1dcb2e372)
+
+SUMMARY: ThreadSanitizer: data race (/usr/lib/libQt6Core.so.6+0x2b1895) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142) 
+==================
+ThreadSanitizer: reported 1 warnings

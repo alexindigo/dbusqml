@@ -212,6 +212,30 @@ if(BUILD_TEST_MODE)
     find_package(Threads REQUIRED)
     target_link_libraries(tsan_canary PRIVATE Threads::Threads)
 
+    # F-amended gate canary battery (tsan-classifier-gate cycle): the
+    # classifier owns the verdict; each canary asserts its EXPECTED
+    # verdict through it. All EXCLUDE_FROM_ALL — built on demand only.
+    #   tsan_canary_mixed:  instrumented TU races the helper DSO's
+    #     intercepted memmove (the spike's P2a shape — the race the
+    #     rejected ignore_noninstrumented_modules=1 flag swallowed).
+    #     Expected verdict: OURS -> FAIL.
+    #   tsan_canary_foreign: bare QDBusConnection::connectToBus
+    #     worker-spawn (the registered bus-bind class) on pure QtDBus —
+    #     NO libdbusqml, so no family variant can put our frames in an
+    #     attribution stack (question-1 ruling, tsan-register-tightening).
+    #     Expected verdict: FOREIGN-registered, counted, non-failing.
+    add_library(tsan_canary_uninst SHARED EXCLUDE_FROM_ALL tests/tsan_canary_uninst.cpp)
+    set_target_properties(tsan_canary_uninst PROPERTIES AUTOMOC OFF)
+    # The helper DSO plays the uninstrumented-Qt role: never instrument it,
+    # even inside sanitizer builds (same discipline as the wire oracle).
+    target_compile_options(tsan_canary_uninst PRIVATE -fno-sanitize=all)
+    target_link_options(tsan_canary_uninst PRIVATE -fno-sanitize=all)
+    add_executable(tsan_canary_mixed EXCLUDE_FROM_ALL tests/tsan_canary_mixed.cpp)
+    set_target_properties(tsan_canary_mixed PROPERTIES AUTOMOC OFF)
+    target_link_libraries(tsan_canary_mixed PRIVATE tsan_canary_uninst Threads::Threads)
+    add_executable(tsan_canary_foreign EXCLUDE_FROM_ALL tests/tsan_canary_foreign.cpp)
+    target_link_libraries(tsan_canary_foreign PRIVATE Qt6::Core Qt6::DBus Qt6::Test)
+
     # Wire oracle (council CF-7): the raw-libdbus peer the exactly-one-reply
     # pins assert through. Built only when libdbus-1 headers are present;
     # the pins QSKIP when the binary is absent (CI images carry

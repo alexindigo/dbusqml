@@ -1,0 +1,9 @@
+# fixture-provenance: SYNTHESIZED (plan E3.5 sanctions a synthesized novel-type block). "signal handler spoils errno" is a real TSan report type the gate has never characterized — it must fail closed as an anomaly. Block shape modeled on the real data-race fixtures.
+==================
+WARNING: ThreadSanitizer: signal handler spoils errno (pid=10199)
+  Read of size 4 at 0x7ffdaa1c2b10 by main thread:
+    #0 <null> <null> (libQt6Core.so.6+0x19a840) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+
+SUMMARY: ThreadSanitizer: signal handler spoils errno (/usr/lib/libQt6Core.so.6+0x19a840) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142) 
+==================
+ThreadSanitizer: reported 1 warnings

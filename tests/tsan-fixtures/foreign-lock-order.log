@@ -1,0 +1,26 @@
+WARNING: ThreadSanitizer: lock-order-inversion (potential deadlock) (pid=398278)
+  Cycle in lock order graph: M0 (0x720c000031e0) => M1 (0x720c00003210) => M2 (0x720c00003b40) => M0
+
+  Mutex M1 acquired here while holding mutex M0 in thread T2:
+    #0 pthread_mutex_lock <null> (libtsan.so.2+0x60bb1) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 dbus_bus_register <null> (libdbus-1.so.3+0x17f3b) (BuildId: 65f44f39f68b8f63de82c45fc6108bfc66c0247a)
+
+    Hint: use TSAN_OPTIONS=second_deadlock_stack=1 to get more informative warning message
+
+  Mutex M2 acquired here while holding mutex M1 in thread T2:
+    #0 pthread_mutex_lock <null> (libtsan.so.2+0x60bb1) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 dbus_connection_send_with_reply_and_block <null> (libdbus-1.so.3+0x17ce8) (BuildId: 65f44f39f68b8f63de82c45fc6108bfc66c0247a)
+
+  Mutex M0 acquired here while holding mutex M2 in thread T2:
+    #0 pthread_mutex_lock <null> (libtsan.so.2+0x60bb1) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 <null> <null> (libdbus-1.so.3+0x16644) (BuildId: 65f44f39f68b8f63de82c45fc6108bfc66c0247a)
+
+  Thread T2 'QDBusConnection' (tid=398282, running) created by main thread at:
+    #0 pthread_create <null> (libtsan.so.2+0x616c9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 QThread::start(QThread::Priority) <null> (libQt6Core.so.6+0x36bb8c) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #2 TestDBusConnection::initTestCase() /home/tester/dbusqml-tip/tests/test_dbusconnection.cpp:580 (test_dbus+0x723d0) (BuildId: e26a997d75f0faf2652852d0607ae357d6b90efc)
+    #3 TestDBusConnection::qt_static_metacall(QObject*, QMetaObject::Call, int, void**) /home/tester/build-tsan/test_dbus_autogen/include/test_dbusconnection.moc:1194 (test_dbus+0x63d46) (BuildId: e26a997d75f0faf2652852d0607ae357d6b90efc)
+    #4 QMetaMethodInvoker::invokeImpl(QMetaMethod, void*, Qt::ConnectionType, long long, void const* const*, char const* const*, QtPrivate::QMetaTypeInterface const* const*) <null> (libQt6Core.so.6+0x19a840) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #5 <null> <null> (libc.so.6+0x27780) (BuildId: 503200d7fda94a5dc6058d7e0694e5d1dcb2e372)
+
+SUMMARY: ThreadSanitizer: lock-order-inversion (potential deadlock) (/usr/lib/libdbus-1.so.3+0x17f3b) (BuildId: 65f44f39f68b8f63de82c45fc6108bfc66c0247a) in dbus_bus_register

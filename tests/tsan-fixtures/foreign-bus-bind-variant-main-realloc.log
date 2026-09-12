@@ -1,0 +1,19 @@
+==================
+WARNING: ThreadSanitizer: data race (pid=394566)
+  Write of size 8 at 0x721000000650 by main thread:
+    #0 realloc <null> (libtsan.so.2+0x9615f) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 <null> <null> (libQt6Core.so.6+0x2d1ab3) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #2 <null> <null> (libc.so.6+0x27780) (BuildId: 503200d7fda94a5dc6058d7e0694e5d1dcb2e372)
+
+  Previous write of size 8 at 0x721000000650 by thread T1:
+    #0 __tsan_memmove <null> (libtsan.so.2+0x97076) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 <null> <null> (libQt6Core.so.6+0x2ae4aa) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+
+  Thread T1 'QDBusConnection' (tid=394570, running) created by main thread at:
+    #0 pthread_create <null> (libtsan.so.2+0x616c9) (BuildId: fad1b3f53c846e11570baa72e153cca909e3f7d2)
+    #1 QThread::start(QThread::Priority) <null> (libQt6Core.so.6+0x36bb8c) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142)
+    #2 <null> <null> (libc.so.6+0x27780) (BuildId: 503200d7fda94a5dc6058d7e0694e5d1dcb2e372)
+
+SUMMARY: ThreadSanitizer: data race (/usr/lib/libQt6Core.so.6+0x2d1ab3) (BuildId: 3e89a2b2af7893db9e9a63269b878a94627e4142) 
+==================
+ThreadSanitizer: reported 1 warnings
