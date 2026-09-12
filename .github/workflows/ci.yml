@@ -121,53 +121,30 @@ jobs:
           # Ledger-zero L2/L3: checked-in suppressions for Qt-internal
           # exit-time (LSan) and race (TSan) noise; see
           # tests/lsan-suppressions.txt and tests/tsan-suppressions.txt.
-          # TSan gate = the targeted selection below (full-suite ctest
-          # wedges TSan's thread registry under churn — L3 wedge triage,
+          # TSan gate = the targeted selection (full-suite ctest wedges
+          # TSan's thread registry under churn — L3 wedge triage,
           # docs/PARITY.md §9; per-test processes).
           #
-          # C3 (road-to-one): TSAN_OPTIONS exitcode=0 — the pass condition
-          # is the grep for "WARNING: ThreadSanitizer" below, NOT the
-          # process exit code (the default 66 was red-by-noise; silencing
-          # it without the grep would be blind). Any report that matches
-          # no suppression prints a WARNING and fails the job.
+          # F-amended (tsan-classifier-gate, supersedes road-to-one C3's
+          # grep-gate): the detector records everything; the VERDICT comes
+          # from scripts/tsan-classify.py over the captured logs —
+          # OURS-attribution blocks (access/allocation stacks) FAIL;
+          # register-matched foreign blocks are counted, censused,
+          # non-failing; unregistered foreign FAILs (the knob). TSan's
+          # exitcode=0 stays: the classifier, not the detector's process
+          # exit, owns the verdict. The canary battery (pure + mixed +
+          # foreign) runs first through the real classifier — a canary
+          # that stops firing fails the job itself. The independent
+          # crosscheck (scripts/tsan-crosscheck.sh) re-greps the
+          # classifier's foreign blocks and must agree.
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan-suppressions.txt
           TSAN_OPTIONS: exitcode=0:suppressions=${{ github.workspace }}/tests/tsan-suppressions.txt
         run: |
           if [ "${{ matrix.sanitizer }}" = "thread" ]; then
-            # Canary FIRST: a deliberately-racy binary MUST trip the grep.
-            # If it doesn't, the detection pipeline (instrumentation,
-            # output capture, grep) is dead and the real run's silence
-            # proves nothing.
-            cmake --build build-san --target tsan_canary
-            ./build-san/tsan_canary > tsan-canary.log 2>&1 || true
-            if ! grep -q "WARNING: ThreadSanitizer" tsan-canary.log; then
-              echo "TSan detection pipeline DEAD: the racy canary produced no warning"
-              exit 1
-            fi
-            echo "canary caught its deliberate race — detection pipeline live"
-            fail=0
-            for spec in \
-              "test_adaptor testOwnerChangeDestroyDuringNotification" \
-              "test_adaptor testOwnerChangeStormImmediateDelete" \
-              "test_adaptor testOwnerChangeReentrantHandler" \
-              "test_adaptor testOwnerChangeAnchorSpyTiming" \
-              "test_adaptor testOwnerChangeForeignThreadAdaptor" \
-              "test_adaptor testHeldReplyTimeoutDisabledByDefault" \
-              "test_adaptor testHeldReplyTimeoutExpires" \
-              "test_adaptor testHeldReplyTimeoutNoReplySilent" \
-              "test_adaptor testHeldReplyTimeoutSettleCancels" \
-              "test_adaptor testCoLocatedSamePath" \
-              "test_dbus testLossProbeIdleTraffic" \
-              "test_dbus testConnectionLossHandling"; do
-              set -- $spec
-              dbus-run-session -- "./build-san/$1" "$2" > "tsan-$1-$2.log" 2>&1 || fail=1
-              if grep -q "WARNING: ThreadSanitizer" "tsan-$1-$2.log"; then
-                echo "UNSUPPRESSED TSan report in $1 $2 — failing (see tsan-$1-$2.log)"
-                cat "tsan-$1-$2.log"
-                fail=1
-              fi
-            done
-            [ "$fail" -eq 0 ] || exit 1
+            # One command, identical to the fork-side evidence flow
+            # (fixture self-tests → canary battery → the C1-validated
+            # 12-test selection → classifier + crosscheck + census).
+            ./scripts/tsan-gate --build build-san --runs 1
           else
             ctest --test-dir build-san --output-on-failure
           fi
