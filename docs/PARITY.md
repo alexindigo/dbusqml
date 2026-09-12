@@ -168,44 +168,182 @@ sync barriers on bus STATE, never fixed sleeps; stress shapes with
 wall-clock bounds convert hangs into loud failures. TSan in CI catches
 the thread class nobody had listed.
 
-**TSan gate (road-to-one C1/C3 rebuild).** The gate is a targeted
-selection of per-test processes (full-suite ctest wedges TSan's thread
-registry under churn geometries — L3 wedge triage: thread-count effect,
-not a program race), run with `tests/tsan-suppressions.txt`. Reality,
-as of the C1 rebuild:
+**TSan gate (F-amended, tsan-classifier-gate cycle — supersedes the
+road-to-one C3 grep-gate).** Two layers, each with its own job:
 
-- Suppressions are **typed** (`race:`/`thread:`/`deadlock:`) and
-  **symbol-or-module-named** — hex offsets never match (TSan needs a
-  runtime-visible symbol) and do not port across Qt versions. Every
-  register entry carries an evidence block (SUMMARY class, addr2line
-  symbol, isolation-probe mode, owning test, parent-tree parity,
-  upstream link).
-- Known classes (all Qt/libdbus-internal; zero dbusqml frames as
+- **Detector layer (recording).** The gate is a targeted selection of
+  per-test processes (full-suite ctest wedges TSan's thread registry
+  under churn geometries — L3 wedge triage: thread-count effect, not a
+  program race), run with `tests/tsan-suppressions.txt` — typed
+  (`race:`/`thread:`/`deadlock:`), symbol-or-module-named entries with
+  per-entry evidence blocks (C1; hex offsets never match and do not
+  port). `TSAN_OPTIONS=exitcode=0` throughout — the detector's process
+  exit is never the verdict (the classifier owns it). The detector
+  layer's known classes (all Qt/libdbus-internal; zero dbusqml frames as
   writer): thread-leak on `QThread::start` (per-test process teardown);
   two libdbus lock-order-inversions (`dbus_bus_register`,
-  `dbus_connection_preallocate_send` path); the QtDBus global bus-bind
-  allocator race (qDBusBindToApplication vs the QDBusConnection worker);
-  the proxy-teardown trio (`QObject::~QObject`,
+  `dbus_connection_preallocate_send` path); the QtDBus bus-bind ALLOCATOR
+  race (`qDBusBindToApplication` new-vs-delete vs the QDBusConnection
+  worker); the proxy-teardown trio (`QObject::~QObject`,
   `QCoreApplication::removePostedEvents`,
   `QDBusServiceWatcher::setConnection`-side delete — all via
   `DBusProxy::~DBusProxy` caller context) racing the bus worker; the
-  ledger-zero QML/QQmlThread churn classes.
-- **Accepted-risk register:** `0x2d1ab3` =
-  `QArrayData::reallocateUnaligned` (main-thread realloc of an
-  implicitly-shared container during meta-call argument churn vs the
-  worker's memmove) is suppressed as *accepted-unresolved-Qt-internal-risk
-  — NOT a proven false positive*: the block is allocated by main and
-  realloc'd by the worker with no intervening free, inside Qt's implicit
-  sharing. Falsifier: a TSan-instrumented Qt build would decide it —
-  standing offer, deliberately not executed.
-- **Pass condition (C3):** `TSAN_OPTIONS=exitcode=0:suppressions=…` and
-  the gate greps the captured output for `WARNING: ThreadSanitizer` —
-  ANY hit fails the job (a report that matches no suppression). A
-  deliberately-racy canary binary runs first and MUST trip the grep,
-  proving the detection pipeline is alive before the real run's silence
-  is trusted. (Pre-rebuild the file was 100% `race:` entries, the
-  thread-leak/deadlock classes never matched, exit was 66 on every run,
-  and "green" was QtTest PASS masking it — the hollow-gate origin story.)
+  ledger-zero QML/QQmlThread churn classes. Its accepted-risk register:
+  `0x2d1ab3` = `QArrayData::reallocateUnaligned` (main-thread realloc of
+  an implicitly-shared container during meta-call argument churn vs the
+  worker's memmove) — *accepted-unresolved-Qt-internal-risk, NOT a proven
+  false positive*; falsifier: a TSan-instrumented Qt build (the B run,
+  `~/Documents/dbusqml/todos/TODO.md`).
+- **Verdict layer (classification).** `tests/tsan-classify.py` parses
+  the captured per-test logs into complete TSan report blocks and rules
+  on each:
+  - any block with one of our artifacts (`libdbusqml`, the test/fuzzer/
+    canary binaries) in an ATTRIBUTION stack (either access stack, or
+    the allocation/Location stack) → **FAIL**. The attribution principle
+    (owner ruling on question-1): **participation attributes; provenance
+    doesn't.** Thread-CREATION stacks never attribute — Qt spawns its
+    worker once per process from whatever code first touches the bus,
+    which in this suite is our frames by construction; creation-stack
+    module basenames are recorded per census line (drift visibility).
+    (One type-scoped exception, `thread leak`, argued in the report-type
+    coverage paragraph below.)
+  - a block whose attribution stacks are all-foreign (Qt/libdbus/glibc/
+    libtsan modules, TSan interceptors) AND whose fingerprint matches an
+    entry in `tests/tsan-foreign-register.toml` under the THREE-layer
+    match (fingerprint v3, tsan-gate-edgecases) → counted, censused,
+    non-failing. The layers, all required:
+    1. **Version**: the log's Qt version (QtTest config line) is in the
+       entry's `qt_validated` list — else the entry is inert (below).
+    2. **Arrangement** (v2 — shape): the ordered per-stack record list,
+       one per attribution stack in appearance order: (role
+       [`access-first`/`access-second`/`alloc`], frame-#0 interceptor
+       name, first resolvable module basename below the interceptor, the
+       acting thread's context [`main` or the worker's name parsed from
+       the block's own creation header], access kind:size). A future,
+       distinct Qt race that merely shares the pooled ingredients (same
+       functions and libraries in a different arrangement) does NOT
+       match — it fails the knob and earns its own entry.
+    3. **Site anchors** (v3 — location) **+ binary identity** (v3.1,
+       tsan-buildid-fold): the ordered list of `module+0xoffset@buildid`
+       TRIPLES (the racing frame below each stack's interceptor), checked
+       only against the exact validated Qt version they were captured on —
+       module-relative offsets are ASLR-independent and stable per Qt
+       build, and the version gate already pays the cross-version
+       maintenance, so the old portability objection to offsets no longer
+       applies. A version string is not a binary identity — the same
+       "6.11.2" rebuilt differently must not match, so each anchor triple
+       carries the module's BuildId (the content-hash identity printed on
+       every frame line); a frame with no BuildId token cannot prove its
+       binary identity → fail-closed → FAIL. Same arrangement + different
+       site, same site + different build, or absent build identity: three
+       distinct near-misses, the census names which, the gate FAILs. (A
+       log with no parseable Qt version — probe binaries, the foreign
+       canary — never gates layer 1, and matches by TRIPLE against ANY
+       validated version's list: its binary must BE a validated build,
+       proven by content hash, not assumed.)
+
+       **The identity ladder is complete**: report type → arrangement
+       (shape) → site (location) → binary identity (content hash). Beyond
+       binary content identity, report content is run-variable (addresses,
+       pids, timestamps) — structurally unmatchable. No further identity
+       rung exists; the register's identity model is final by
+       construction.
+  - a foreign block with NO register match → **FAIL** (the knob, council
+    5–1; registering is cheap — the hitter adds the evidence-blocked
+    entry in the same change).
+  - any ambiguity (truncated/unparseable block, module-less frame in an
+    attribution stack, zero blocks with a WARNING present or a nonzero
+    recorded detector exit) → **FAIL**. Also fail-closed-anomaly: a
+    WARNING of an unknown/future report type, a `==N==ERROR:
+    ThreadSanitizer:` fatal-signal report (never foreign, never PASS), an
+    orphan SUMMARY line, and any register-schema malformation at load
+    (unknown keys, missing required fields, empty arrangement, anchors
+    absent for a validated version, anchors not `module+0xoffset@buildid`
+    triples, non-list `qt_validated`) — a
+    malformed register never silently weakens the gate.
+
+  **Report-type coverage.** Every type the detector can emit has a pinned
+  expected verdict, demonstrated by a permanent fixture: data race (the
+  register machinery), lock-order-inversion (parses; its mutex sections
+  are attribution-scanned under the same rules — our frame → OURS;
+  all-foreign → registrable shape; the known libdbus cycles are
+  detector-suppressed, so an unsuppressed one lands on the knob), thread
+  leak (type-scoped exception to creation-never-attributes: a leak's ONLY
+  stack is its creation stack, which is its participation evidence — so
+  for `thread leak` blocks the creation stack attributes; rationale: the
+  question-1 ruling exempts creation stacks because they record
+  provenance, but for a leak the creation IS the act), fatal-signal
+  reports (anomaly, never registrable), and unknown/future types
+  (fail-closed anomaly). A frame-less `Location is global`/`stack`
+  descriptor line is inert metadata, never a phantom alloc record.
+
+  The canary battery runs BEFORE the real selection in every job, each
+  canary asserting its EXPECTED verdict through the real classifier: the
+  pure canary (two instrumented threads, one unsynchronized int) must
+  FAIL ours; the mixed canary (instrumented writes racing an
+  uninstrumented helper DSO's intercepted `memmove` — the exact shape the
+  rejected `ignore_noninstrumented_modules=1` flag swallowed 0/20 in the
+  tsan-blanket-spike) must FAIL ours; the foreign canary (bare
+  `connectToBus` worker-spawn — the registered bus-bind class) must
+  classify foreign-registered (silent on a toolchain where Qt doesn't
+  fire it: warn-and-continue — its fire rate is Qt's, not ours). A canary
+  that produces zero reports fails the job itself (a dead detector proves
+  nothing). The foreign canary links no libdbusqml and calls
+  `QDBusConnection::connectToBus` directly, so every bus-bind-family fire
+  presents all-foreign attribution stacks by construction of the unwind
+  (question-1 ruling, tsan-register-tightening). The independent
+  cross-check (`scripts/tsan-crosscheck.sh` — no shared code) re-greps
+  the classifier's foreign blocks for our
+  basenames in their attribution sections and must agree.
+
+  The foreign register currently holds three classes, all the Qt bus-bind
+  family: `qt6-dbus-bus-bind-worker-startup` (the `0x2ae895` report:
+  main-thread `free()` inside `qDBusBindToApplication` — the
+  once-per-process bus bind spawning the QDBusConnection worker — racing
+  the just-spawned worker's `memmove`; both access stacks
+  runtime-symbol-less, hence structurally beyond TSan's suppression
+  matcher, hence the verdict layer) and the two captured `0x2d1ab3`
+  allocator-site variants (`qt6-dbus-bus-bind-realloc-{worker,main}` —
+  `QArrayData::reallocateUnaligned` racing the worker's `memmove`,
+  differing only in which thread reallocs; they reach the verdict layer
+  only in non-test binaries, where the detector layer's test-scoped
+  suppression anchors don't apply). Classification on all three:
+  *accepted-unresolved-Qt-internal-risk — NOT proven false positive*;
+  falsifier: the B run (one-shot TSan-instrumented Qt build —
+  `~/Documents/dbusqml/todos/TODO.md`), which now decides a three-entry
+  family wholesale.
+  Entries carry the suppression file's six-field evidence block plus
+  `qt_validated` — the list of Qt versions the entry was proven on. A log
+  whose Qt version (parsed from the QtTest config line) is absent from
+  the list renders the entry INERT: it does not match — the block is
+  unregistered-foreign, the gate FAILS, and the census names it
+  (`entry <id> inert: needs revalidation on Qt <ver>`). This is
+  invalidate-pending-revalidation, never a silent match. Revalidation
+  procedure: run `scripts/tsan-gate` on the new Qt, confirm the census
+  shows the same arrangement, capture the new build's site anchors AND
+  their BuildIds from the revalidation run's blocks (mechanical — both
+  are printed on every frame line), and append the version AND its
+  anchor triples to the entry together — a one-small-PR,
+  evidence-carrying change. Deliberate
+  consequence: the first CI run on an unvalidated Qt (the 6.8.2 cell)
+  FAILS red by design until its cells are validated — the
+  red→validate→green loop is the honest sequence for a genuinely
+  unvalidated surface (recorded in the register header so the first-push
+  red is expected, not alarming). (Distinct from suppression entry 2.1:
+  that entry anchors the bus-bind ALLOCATOR race — `new` vs `delete` —
+  via its symbolized dispatch frame; this register entry is the
+  task-teardown class the symbol matcher cannot see.)
+
+  The sweep procedure (the scheduled unblanketed census): run
+  `scripts/tsan-gate` on the fork and diff the census against the
+  register — the same command CI runs, so the census is reproducible
+  locally. The red-team falsifier (fable/gemini): attempts to construct a
+  real dbusqml-caused race whose attribution stacks present all-foreign —
+  the boundary held in every attempt shape this cycle (our frames always
+  appear as callers in the attribution stacks); the residual (a
+  dbusqml-caused race presenting all-foreign in principle) stays
+  documented and tripwired by the census, per the register entry's
+  honesty qualifier.
 
 ASan gate = full ctest with
 tests/lsan-suppressions.txt (Qt-internal exit-time noise only; zero ODR
