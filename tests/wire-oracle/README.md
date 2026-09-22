@@ -17,12 +17,17 @@ Caller mode: `CallAdaptor(service, path, iface, member) -> (serial,
 got)` invokes the named (no-arg) adaptor method synchronously and
 reports the outgoing serial; the harness then polls
 `ReceivedCount(serial)` — 1 = exactly-one-reply, 0 = swallow, 2 =
-double-reply. `DoubleSend(service, path, iface, member) -> (a, b)`
-makes two sequential calls for control legs. Sensitivity self-test: run
-`CallAdaptor` against a deliberately double-replying service (two
-METHOD_RETURNs for one serial) and assert `ReceivedCount == 2` — if the
-oracle cannot see a deliberate double-send, its `== 1` evidence is
-vacuous. Verified 2026-09-09: double-sender → 2, well-behaved Ping → 1.
+double-reply. Sensitivity self-test: run `CallAdaptor` against a
+deliberately double-replying QtDBus-side service (two METHOD_RETURNs
+for one serial) and assert `ReceivedCount == 2` — if the oracle cannot
+see a deliberate double-send, its `== 1` evidence is vacuous. Verified
+2026-09-09: double-sender → 2, well-behaved Ping → 1.
+
+`CallAdaptorNoReply(service, path, iface, member) -> serial` sends the
+same no-arg call with `NO_REPLY_EXPECTED` and no pending call. Any
+reply that arrives anyway is unsolicited; the filter tallies it by
+`reply_serial`. `ReceivedCount(serial)` is then whether the callee
+replied to a call that asked it not to (0 = B4-correct).
 
 Build: `cmake -S tests/wire-oracle -B build-oracle` (needs libdbus-1
 dev headers; NOT part of the default build — the main suite must stay

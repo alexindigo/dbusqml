@@ -36,9 +36,10 @@ infrastructure that materially affects consumer trust).
   timer.
 - **`captureSubtree`** — opt-in `SubPath` registration on `DBusAdaptor` so
   messages under the prefix are delivered to dbusqml in bus arrival order
-  and routed to child adaptors (portal `Request` objects). Absent paths
-  answer `UnknownObject` in order. Co-located adaptors at the path must
-  agree; a mismatching latecomer is refused.
+  and routed to child adaptors (portal `Request` objects), including a
+  capturing adaptor at `/`. Absent paths answer `UnknownObject` in order.
+  Co-located adaptors at the path must agree; a mismatching latecomer is
+  refused.
 
 ### Changed
 
@@ -178,6 +179,13 @@ infrastructure that materially affects consumer trust).
   axioms 6, 9b, 9c.
 - **Test hygiene** — late-joiner `nameAcquired` pin; per-test statics
   reset.
+- **Wire oracle counts error replies** — the exactly-one-reply referee's
+  caller mode used a blocking libdbus call that returns NULL for error
+  replies, so a single error read as 0 and a double as 1; replaced with a
+  pending call + steal, remote replies of either type counted once; error
+  sensitivity self-tests (1 → 1, 2 → 2, none → 0).
+- **Wire oracle gains `CallAdaptorNoReply`** — observes replies to calls
+  that asked for none.
 
 ### Docs
 

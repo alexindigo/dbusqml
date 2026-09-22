@@ -9,12 +9,12 @@
  *                             direction; tallied only in the Echo/Repr/Ping
  *                             handlers below)
  *   ReceivedCount(u) -> u    (replies RECEIVED by this oracle for outgoing
- *                             serial u — the caller direction; tallied by the
- *                             filter below whenever the ORACLE is the caller
- *                             and a METHOD_RETURN/METHOD_ERROR arrives whose
- *                             reply_serial matches. This is the direction that
- *                             observes an adaptor under test: the oracle
- *                             invokes the adaptor and counts what came back.)
+ *                             serial u — the caller direction. Remote replies
+ *                             of either type (METHOD_RETURN or METHOD_ERROR)
+ *                             are counted once each: the pending-call steal
+ *                             sees the first, the filter sees any later
+ *                             second. Local timeout/disconnect errors (no
+ *                             sender) are not replies and are not counted.)
  *   CallAdaptor(s, s, s, s) -> (uu) (caller mode: invokes the named
  *                             adaptor method (service, path, iface, member),
  *                             returns (outgoing_serial, replies_received).
@@ -24,15 +24,12 @@
  *                             carries a trailing a{sv} options dict
  *                             { key: variant-of-string value } — the R1
  *                             strict-typing pin's wrong-kind geometry.)
- *   DoubleSend(s, s, s, s) -> (uu) (sensitivity self-test: invokes the
- *                             named adaptor method TWICE on the same outgoing
- *                             serial is impossible on the bus — instead it
- *                             performs two sequential calls and returns both
- *                             serials; a harness asserting per-serial count
- *                             == 1 for each proves the counter is live, and
- *                             a deliberately double-replying service shows
- *                             count == 2 for one serial. MUST be flagged by
- *                             the self-test when pointed at a double-sender.)
+ *   CallAdaptorNoReply(s, s, s, s) -> u (send the call with
+ *                             NO_REPLY_EXPECTED and no pending call;
+ *                             return the outgoing serial. Any reply that
+ *                             arrives anyway is unsolicited and the filter
+ *                             tallies it by reply_serial. ReceivedCount
+ *                             is then "did the callee reply anyway".)
  *
  * D-Bus correlation semantics (no invention — this is the spec's own
  * model): a METHOD_RETURN/METHOD_ERROR carries a reply_serial header
@@ -42,9 +39,10 @@
  * serial from the call (dbus_message_get_serial). Counting replies
  * keyed by reply_serial on the CALLER side is therefore exactly "how
  * many replies did serial N produce" — the exactly-one-reply
- * observable. ReplyCount (callee side) and ReceivedCount (caller side)
- * are the same keying applied to the two directions; neither replaces
- * the other.
+ * observable. Remote replies of either type, counted once each; local
+ * timeout errors are not replies. ReplyCount (callee side) and
+ * ReceivedCount (caller side) are the same keying applied to the two
+ * directions; neither replaces the other.
  *
  * Build: cmake -S . -B build && cmake --build build
  * Needs libdbus-1 dev headers. Qt-free by design.
@@ -148,24 +146,32 @@ static DBusMessage *handle_received_count(DBusMessage *msg, DBusConnection *conn
     return reply;
 }
 
-/* Shared caller-mode tail: synchronously send `call`, tally the reply
- * (error replies included — an error reply is a completed round-trip;
- * NULL means timeout/no reply) and report (serial, replies-so-far). */
+/* Shared caller-mode tail: send `call` as a pending call, steal the
+ * reply (method return OR error), tally remote replies of either type,
+ * ignore libdbus-local timeout errors (no sender). The filter still
+ * tallies a second reply that arrives after the pending call is gone. */
 static DBusMessage *send_call_and_report(DBusMessage *msg, DBusConnection *conn,
                                          DBusMessage *call) {
     dbus_uint32_t outSerial = 0;
-    DBusError replyErr;
-    dbus_error_init(&replyErr);
-    DBusMessage *reply = dbus_connection_send_with_reply_and_block(conn, call, 5000, &replyErr);
+    DBusPendingCall *pc = NULL;
+    if (!dbus_connection_send_with_reply(conn, call, &pc, 5000) || !pc) {
+        DBusMessage *ret = dbus_message_new_method_return(msg);
+        dbus_uint32_t got = 0;
+        dbus_message_append_args(ret, DBUS_TYPE_UINT32, &outSerial, DBUS_TYPE_UINT32, &got,
+                                 DBUS_TYPE_INVALID);
+        dbus_message_unref(call);
+        return ret;
+    }
+    outSerial = dbus_message_get_serial(call);
+    dbus_pending_call_block(pc);
+    DBusMessage *reply = dbus_pending_call_steal_reply(pc);
+    dbus_pending_call_unref(pc);
     if (reply) {
-        outSerial = dbus_message_get_reply_serial(reply);
-        record_recv(dbus_message_get_reply_serial(reply));
+        int t = dbus_message_get_type(reply);
+        if ((t == DBUS_MESSAGE_TYPE_METHOD_RETURN || t == DBUS_MESSAGE_TYPE_ERROR) &&
+            dbus_message_get_sender(reply) != NULL)
+            record_recv(dbus_message_get_reply_serial(reply));
         dbus_message_unref(reply);
-    } else {
-        /* Timed out or errored with no reply message: still report the
-         * outgoing serial so ReceivedCount(serial)==0 pins the swallow. */
-        outSerial = dbus_message_get_serial(call);
-        dbus_error_free(&replyErr);
     }
     dbus_message_unref(call);
     DBusMessage *ret = dbus_message_new_method_return(msg);
@@ -244,12 +250,13 @@ static DBusMessage *handle_call_adaptor_options(DBusMessage *msg, DBusConnection
     return send_call_and_report(msg, conn, call);
 }
 
-/* Sensitivity self-test helper: two sequential calls at two serials.
- * Returns (serial_a, serial_b); the harness asserts ReceivedCount == 1
- * for each. When pointed at a deliberately double-replying service
- * (see below), one serial shows 2 — proving the counter is live and
- * would flag a real double-send instead of passing vacuously. */
-static DBusMessage *handle_double_send(DBusMessage *msg, DBusConnection *conn) {
+/* CallAdaptorNoReply(s,s,s,s) -> u: send the call with NO_REPLY_EXPECTED
+ * and NO pending call; return the outgoing serial. Any reply that arrives
+ * anyway is unsolicited, so libdbus dispatches it through oracle_filter,
+ * which tallies it by reply_serial exactly as it does late second replies.
+ * ReceivedCount(serial) is then "did the callee reply to a call that asked
+ * it not to" — 0 is the B4-correct answer. */
+static DBusMessage *handle_call_adaptor_noreply(DBusMessage *msg, DBusConnection *conn) {
     const char *service = "";
     const char *path = "";
     const char *iface = "";
@@ -264,27 +271,16 @@ static DBusMessage *handle_double_send(DBusMessage *msg, DBusConnection *conn) {
         return e;
     }
     dbus_error_free(&err);
-    dbus_uint32_t serials[2] = {0, 0};
-    for (int i = 0; i < 2; ++i) {
-        DBusMessage *call = dbus_message_new_method_call(service, path, iface, member);
-        if (!call)
-            break;
-        DBusError replyErr;
-        dbus_error_init(&replyErr);
-        DBusMessage *reply = dbus_connection_send_with_reply_and_block(conn, call, 5000, &replyErr);
-        if (reply) {
-            serials[i] = dbus_message_get_reply_serial(reply);
-            record_recv(dbus_message_get_reply_serial(reply));
-            dbus_message_unref(reply);
-        } else {
-            serials[i] = dbus_message_get_serial(call);
-            dbus_error_free(&replyErr);
-        }
-        dbus_message_unref(call);
-    }
+    DBusMessage *call = dbus_message_new_method_call(service, path, iface, member);
+    if (!call)
+        return dbus_message_new_error(msg, "org.dbusqml.Oracle.Error", "cannot build call");
+    dbus_message_set_no_reply(call, TRUE);
+    dbus_uint32_t serial = 0;
+    dbus_connection_send(conn, call, &serial);
+    dbus_connection_flush(conn);
+    dbus_message_unref(call);
     DBusMessage *ret = dbus_message_new_method_return(msg);
-    dbus_message_append_args(ret, DBUS_TYPE_UINT32, &serials[0], DBUS_TYPE_UINT32, &serials[1],
-                             DBUS_TYPE_INVALID);
+    dbus_message_append_args(ret, DBUS_TYPE_UINT32, &serial, DBUS_TYPE_INVALID);
     return ret;
 }
 
@@ -317,9 +313,9 @@ static DBusHandlerResult oracle_filter(DBusConnection *conn, DBusMessage *msg, v
     const int mtype = dbus_message_get_type(msg);
     if (mtype == DBUS_MESSAGE_TYPE_METHOD_RETURN || mtype == DBUS_MESSAGE_TYPE_ERROR) {
         record_recv(dbus_message_get_reply_serial(msg));
-        /* Replies to OUR calls are consumed by the blocking
-         * send_with_reply_and_block above, not by this filter — but the
-         * tally must happen regardless of who consumes them. */
+        /* Steal-then-filter: send_call_and_report steals the first remote
+         * reply (return or error) off the pending call; this filter still
+         * sees any later second for the same serial and tallies it. */
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     }
     if (mtype != DBUS_MESSAGE_TYPE_METHOD_CALL)
@@ -343,8 +339,8 @@ static DBusHandlerResult oracle_filter(DBusConnection *conn, DBusMessage *msg, v
             reply = handle_call_adaptor(msg, conn);
         else if (!strcmp(member, "CallAdaptorOptions"))
             reply = handle_call_adaptor_options(msg, conn);
-        else if (!strcmp(member, "DoubleSend"))
-            reply = handle_double_send(msg, conn);
+        else if (!strcmp(member, "CallAdaptorNoReply"))
+            reply = handle_call_adaptor_noreply(msg, conn);
         else
             reply = dbus_message_new_error(msg, "org.freedesktop.DBus.Error.UnknownMethod",
                                            "no such method");

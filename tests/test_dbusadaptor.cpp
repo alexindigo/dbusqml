@@ -1,6 +1,7 @@
 #include <QDBusArgument>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
+#include <QDBusError>
 #include <QDBusMessage>
 #include <QDBusObjectPath>
 #include <QDBusPendingCall>
@@ -368,6 +369,10 @@ private slots:
     // Oracle self-test: a deliberately double-sending service MUST be
     // flagged ReceivedCount == 2 (proves the ==1 pins are not vacuous).
     void testOracleSensitivityDoubleReply();
+    void testOracleSensitivitySingleError();
+    void testOracleSensitivityDoubleError();
+    void testOracleSensitivityErrorThenReturn();
+    void testOracleSensitivityNoReply();
     // CF-1: invalid dotted error name falls back to Failed (one reply);
     // CF-2: double holdReply() returns the same handle (one reply).
     void testHeldReplyInvalidErrorNameFallsBack();
@@ -1853,6 +1858,45 @@ public:
         conn.send(msg.createReply(QStringLiteral("two")));
         return true;
     }
+};
+
+class SingleErrorService : public QDBusVirtualObject {
+    Q_OBJECT
+public:
+    QString introspect(const QString &) const override { return {}; }
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        conn.send(msg.createErrorReply(QDBusError::Failed, QStringLiteral("one")));
+        return true;
+    }
+};
+
+class DoubleErrorService : public QDBusVirtualObject {
+    Q_OBJECT
+public:
+    QString introspect(const QString &) const override { return {}; }
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        conn.send(msg.createErrorReply(QDBusError::Failed, QStringLiteral("one")));
+        conn.send(msg.createErrorReply(QDBusError::Failed, QStringLiteral("two")));
+        return true;
+    }
+};
+
+class ErrorThenReturnService : public QDBusVirtualObject {
+    Q_OBJECT
+public:
+    QString introspect(const QString &) const override { return {}; }
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        conn.send(msg.createErrorReply(QDBusError::Failed, QStringLiteral("one")));
+        conn.send(msg.createReply(QStringLiteral("two")));
+        return true;
+    }
+};
+
+class NoReplyService : public QDBusVirtualObject {
+    Q_OBJECT
+public:
+    QString introspect(const QString &) const override { return {}; }
+    bool handleMessage(const QDBusMessage &, const QDBusConnection &) override { return true; }
 };
 
 static QObject *createQmlAdaptor(const QByteArray &qmlSrc) {
@@ -4315,6 +4359,13 @@ void TestDBusAdaptor::testCaptureSubtreeExactlyOneReply() {
     QVERIFY(serial2 != 0);
     QTest::qWait(200);
     QCOMPARE(oracleReceivedCount(serial2), 1u);
+
+    const quint32 serialNoCapAbsent = oracleCallAdaptor(
+        QStringLiteral("org.dbusqml.T10NoCap"), QStringLiteral("/T10nocap/absent"),
+        QStringLiteral("org.dbusqml.Child"), QStringLiteral("Ping"));
+    QVERIFY(serialNoCapAbsent != 0);
+    QTest::qWait(200);
+    QCOMPARE(oracleReceivedCount(serialNoCapAbsent), 1u);
 
     delete child;
     delete cap;
@@ -9373,6 +9424,83 @@ void TestDBusAdaptor::testOracleSensitivityDoubleReply() {
 
     QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.DoubleSend"));
     QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/DoubleSend"));
+}
+
+void TestDBusAdaptor::testOracleSensitivitySingleError() {
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+
+    SingleErrorService svc;
+    QVERIFY(
+        QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/SingleErr"), &svc));
+    QVERIFY(QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.SingleErr")));
+
+    const quint32 serial =
+        oracleCallAdaptor(QStringLiteral("org.dbusqml.SingleErr"), QStringLiteral("/SingleErr"),
+                          QStringLiteral("org.dbusqml.SingleErr"), QStringLiteral("Ping"));
+    QVERIFY(serial != 0);
+    QTest::qWait(500);
+    QCOMPARE(oracleReceivedCount(serial), 1u);
+
+    QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.SingleErr"));
+    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/SingleErr"));
+}
+
+void TestDBusAdaptor::testOracleSensitivityDoubleError() {
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+
+    DoubleErrorService svc;
+    QVERIFY(
+        QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/DoubleErr"), &svc));
+    QVERIFY(QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.DoubleErr")));
+
+    const quint32 serial =
+        oracleCallAdaptor(QStringLiteral("org.dbusqml.DoubleErr"), QStringLiteral("/DoubleErr"),
+                          QStringLiteral("org.dbusqml.DoubleErr"), QStringLiteral("Ping"));
+    QVERIFY(serial != 0);
+    QTest::qWait(500);
+    QCOMPARE(oracleReceivedCount(serial), 2u);
+
+    QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.DoubleErr"));
+    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/DoubleErr"));
+}
+
+void TestDBusAdaptor::testOracleSensitivityErrorThenReturn() {
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+
+    ErrorThenReturnService svc;
+    QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/ErrRet"), &svc));
+    QVERIFY(QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.ErrRet")));
+
+    const quint32 serial =
+        oracleCallAdaptor(QStringLiteral("org.dbusqml.ErrRet"), QStringLiteral("/ErrRet"),
+                          QStringLiteral("org.dbusqml.ErrRet"), QStringLiteral("Ping"));
+    QVERIFY(serial != 0);
+    QTest::qWait(500);
+    QCOMPARE(oracleReceivedCount(serial), 2u);
+
+    QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.ErrRet"));
+    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/ErrRet"));
+}
+
+void TestDBusAdaptor::testOracleSensitivityNoReply() {
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+
+    NoReplyService svc;
+    QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/NoReply"), &svc));
+    QVERIFY(QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.NoReply")));
+
+    const quint32 serial =
+        oracleCallAdaptor(QStringLiteral("org.dbusqml.NoReply"), QStringLiteral("/NoReply"),
+                          QStringLiteral("org.dbusqml.NoReply"), QStringLiteral("Ping"));
+    QVERIFY(serial != 0);
+    QCOMPARE(oracleReceivedCount(serial), 0u);
+
+    QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.NoReply"));
+    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/NoReply"));
 }
 
 void TestDBusAdaptor::testCaptureSubtreeRootCapture() {
