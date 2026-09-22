@@ -56,6 +56,8 @@ class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
     Q_PROPERTY(bool replaceExisting READ replaceExisting WRITE setReplaceExisting NOTIFY
                    replaceExistingChanged)
     Q_PROPERTY(bool queueOnBusy READ queueOnBusy WRITE setQueueOnBusy NOTIFY queueOnBusyChanged)
+    Q_PROPERTY(bool captureSubtree READ captureSubtree WRITE setCaptureSubtree NOTIFY
+                   captureSubtreeChanged FINAL)
 
 public:
     explicit DBusAdaptor(QObject *parent = nullptr);
@@ -102,6 +104,9 @@ public:
 
     bool queueOnBusy() const { return m_queueOnBusy; }
     void setQueueOnBusy(bool v);
+
+    bool captureSubtree() const { return m_captureSubtree; }
+    void setCaptureSubtree(bool v);
 
     // QQmlParserStatus
     void classBegin() override {}
@@ -161,6 +166,7 @@ Q_SIGNALS:
     void allowReplacementChanged();
     void replaceExistingChanged();
     void queueOnBusyChanged();
+    void captureSubtreeChanged();
     // Fired when the service name acquisition state changes (claimed, queued,
     // lost to another owner).
     void nameAcquired();
@@ -220,6 +226,7 @@ private:
     bool m_allowReplacement = false;
     bool m_replaceExisting = false;
     bool m_queueOnBusy = false;
+    bool m_captureSubtree = false;
     bool m_attached = false;
 
     // Dispatch context for holdReply(): the in-flight call's message,

@@ -138,6 +138,12 @@ infrastructure that materially affects consumer trust).
 - **Two real marshal leaks fixed, not suppressed** — the half-open struct
   branch and a `QVariant` string-literal retention, found when the ASan
   ODR mask was removed; tests now link the library.
+- **Interface-less `Introspect` / `GetAll` on captured children** —
+  Qt's internal filters serve these again (was: child fallback
+  `UnknownMethod`).
+- **Captured children now match plain adaptors for every Qt-handled shape**
+  (interface-less `Get`/`Set`, unknown `Properties` members); parity is
+  pinned table-wise.
 
 ### Quality
 

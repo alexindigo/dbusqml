@@ -5,6 +5,7 @@
 #include <QDBusVirtualObject>
 #include <QEvent>
 #include <QMetaObject>
+#include <QHash>
 #include <QList>
 #include <QPointer>
 #include <QString>
@@ -15,20 +16,24 @@ class DBusAdaptor;
 // thread; it needs the same private entry points as the dispatcher.
 class OwnerChangeRelay;
 
-// T1 watch context: the QObject that QtDBus's signal delivery targets
-// for one flagged claim's serviceOwnerChanged watch. It is created on
-// the consumer (attach) thread and deliberately NEVER moved — QtDBus
-// posts matched-signal delivery events to hook.obj's thread, and the
-// hook.obj here is the QDBusConnectionPrivate (manager thread), so the
-// lambda runs on the manager thread with this object as its context.
-// Using a library-owned context (instead of conn.interface()) keeps the
-// connect-time BlockingQueued metacall out of attach's registry-locked
-// path: with iface as context, QObject::connect blocks the attaching
-// thread on the manager thread while the manager thread may itself be
-// blocked delivering an earlier owner-change into handleServiceOwnerChange
-// under registryMutex — a self-deadlock through Qt internals, not our
-// lock. Owned by the claim record; destroyed via deleteLater on
-// teardown (its delivery affinity is the manager thread).
+// T1 watch context: QObject::connect context for
+// QDBusConnectionInterface::serviceOwnerChanged (not QtDBus's D-Bus
+// SignalHook). Created on the consumer (attach) thread and deliberately
+// NEVER moved. Verified against Qt 6.11 qdbusintegrator.cpp:815-833 and
+// :2711-2714: activateSignal DIRECT_DELIVERs when hook.obj is
+// QDBusConnectionPrivate (manager thread) and otherwise
+// QCoreApplication::postEvent(hook.obj) — i.e. hook.obj's thread
+// affinity. The NameOwnerChanged hook.obj is the private (direct, manager
+// thread); that emits serviceOwnerChanged on the interface (parented to
+// the private). AutoConnection then queues our lambda to this object's
+// attach-thread affinity. Using a library-owned context (instead of
+// conn.interface()) keeps the connect-time BlockingQueued metacall out of
+// attach's registry-locked path: with iface as context, QObject::connect
+// blocks the attaching thread on the manager thread while the manager
+// thread may itself be blocked delivering an earlier owner-change into
+// handleServiceOwnerChange under registryMutex — a self-deadlock through
+// Qt internals, not our lock. Owned by the claim record; destroyed via
+// deleteLater on teardown (delivery affinity is this object's thread).
 class OwnerChangeWatch : public QObject {
     Q_OBJECT
 
@@ -65,7 +70,7 @@ public:
     // (and warns) when the path cannot be registered.
     static bool attach(QDBusConnection conn, const QString &path, const QString &service,
                        DBusAdaptor *adaptor, bool allowReplacement, bool replaceExisting,
-                       bool queueOnBusy);
+                       bool queueOnBusy, bool captureSubtree);
 
     // Detach `adaptor`; drops the path and service name only when the last
     // attached adaptor / claim goes away.
@@ -101,11 +106,19 @@ private:
 
     void attachAdaptor(DBusAdaptor *adaptor);
     void detachAdaptor(DBusAdaptor *adaptor);
+    bool routeToAdaptors(const QList<QPointer<DBusAdaptor>> &adaptors, const QDBusMessage &message,
+                         const QDBusConnection &connection);
+    QString interfacesXml(const QList<QPointer<DBusAdaptor>> &adaptors) const;
+    void unregisterAndDelete();
 
     QString m_connName;
     QString m_path;
     QDBusConnection m_conn;
     QList<QPointer<DBusAdaptor>> m_adaptors;
+    bool m_captures = false;
+    bool m_requestedCapture = false; // first attacher's flag; == m_captures for roots
+    DBusPathDispatcher *m_capturedBy = nullptr;
+    QHash<QString, DBusPathDispatcher *> m_children;
 };
 
 // T1 (features train, Phase 2 — concilium-blessed candidate 4, the

@@ -4,6 +4,7 @@
 #include "dbusconnection.h" // wireMarshalable — shared marshal-boundary guard
 #include "dbusheldreply.h"
 #include "dbuspathdispatcher.h"
+#include "dbusutils.h"
 #include "dbustypes.h"
 
 #include <QDBusArgument>
@@ -676,6 +677,17 @@ void DBusAdaptor::setQueueOnBusy(bool v) {
     emit queueOnBusyChanged();
 }
 
+void DBusAdaptor::setCaptureSubtree(bool v) {
+    if (m_captureSubtree == v)
+        return;
+    if (m_attached) {
+        qmlWarning(this) << "captureSubtree is attach-time; change ignored";
+        return;
+    }
+    m_captureSubtree = v;
+    emit captureSubtreeChanged();
+}
+
 void DBusAdaptor::nameAcquiredInternal() {
     emit nameAcquired();
 }
@@ -719,7 +731,7 @@ void DBusAdaptor::componentComplete() {
     // attach connection.
     m_teardownConn = conn;
     m_attached = DBusPathDispatcher::attach(conn, m_path, m_service, this, m_allowReplacement,
-                                            m_replaceExisting, m_queueOnBusy);
+                                            m_replaceExisting, m_queueOnBusy, m_captureSubtree);
     if (!m_attached)
         return;
 
@@ -1405,7 +1417,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
     // one. All Properties-interface sends below go through this guard.
     auto sendReply = [&](const QDBusMessage &reply) {
         if (replyRequired)
-            conn.send(reply);
+            checkedSend(conn, reply, "adaptor reply");
     };
 
     // P10b: sender authorization (xdp-request.c:121-139) — methods AND
@@ -2052,9 +2064,7 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
     // the reply tail never did). A failed send is loud, never a silent
     // caller timeout.
     auto checkedSend = [&](const QDBusMessage &reply, const char *what) {
-        if (!conn.send(reply))
-            qWarning("dbusqml: %s for %s failed to send: %s", what, qPrintable(member),
-                     qPrintable(conn.lastError().message()));
+        ::checkedSend(conn, reply, what, member);
     };
     const QVariant value = toDbusVariant(retVal);
     if (value.isValid()) {

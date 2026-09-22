@@ -1,9 +1,15 @@
 #pragma once
 
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QJSValue>
 #include <QObject>
 #include <QQmlEngine>
+#include <QtGlobal>
+#include <QVariant>
 #include <qqmlregistration.h>
+
+class QDBusArgument;
 
 // QML singleton providing D-Bus value conversion utilities.
 // Primary use: converting ay (byte array, arrives as ArrayBuffer in QML)
@@ -67,3 +73,14 @@ private:
     QByteArray jsToBytes(const QJSValue &data);
     QJSValue makeArrayBuffer(const QByteArray &bytes);
 };
+
+// Library-internal (not QML API). Signature-driven demarshaller; never
+// operator>>(QDBusArgument, QVariant) inside a container.
+QVariant readBySignature(const QDBusArgument &arg, int depth = 0);
+
+inline void checkedSend(const QDBusConnection &c, const QDBusMessage &m, const char *what,
+                        const QString &member = {}) {
+    if (!c.send(m))
+        qWarning("dbusqml: %s%s%s failed to send: %s", what, member.isEmpty() ? "" : " for ",
+                 qPrintable(member), qPrintable(c.lastError().message()));
+}

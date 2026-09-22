@@ -386,6 +386,11 @@ reply with exactly that name; any other thrown value produces
 `nameAcquired`/`nameLost` signals report acquisition (including after
 queueing) and loss to another owner.
 
+A captured child answers every request exactly as an uncaptured adaptor
+would (same reply, same error name and text); the only difference capture
+makes is *when* — in arrival order. Sole exception: dbusqml never replies
+to NO_REPLY_EXPECTED calls, where stock Qt's fallback does (PARITY §3).
+
 **C++ typed returns:** a C++ `Q_INVOKABLE` whose return type is any
 default-constructible type (`QString`, `int`, `QByteArray`, …) round-trips
 into the D-Bus reply with its wire signature. Non-default-constructible

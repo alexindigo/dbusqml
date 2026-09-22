@@ -1,19 +1,25 @@
 #include "dbuspathdispatcher.h"
 
 #include "dbusadaptor.h"
+#include "dbusutils.h"
 
 #include <QDBusConnectionInterface>
 
 #include <QCoreApplication>
 #include <QDBusConnection>
+#include <QDBusError>
 #include <QDBusMessage>
 #include <QHash>
+#include <QLoggingCategory>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPair>
 #include <QQueue>
+#include <QSet>
 #include <atomic>
 #include <qqmlinfo.h>
+
+Q_LOGGING_CATEGORY(lcDbusqmlDispatch, "dbusqml.dispatch", QtWarningMsg)
 
 namespace {
 
@@ -288,14 +294,14 @@ inline void armClaimWatch(const QDBusConnection &conn, const QString &connName,
     // its name only on its own teardown, so it needs no watch.
     //
     // T1 (features train, Phase 2): the watch context is a heap
-    // OwnerChangeWatch object, NOT conn.interface(). QtDBus delivers
-    // matched signals by posting to hook.obj's thread; with iface as the
-    // context the delivery is a BlockingQueued metacall from the manager
-    // thread into armClaimWatch's QObject::connect (connectImpl blocks on
-    // the receiver's thread) — attach deadlocks against its own watch
-    // delivery. A dedicated context confines that coupling to a QObject
-    // the library owns; the manager thread invokes the lambda directly
-    // (same affinity), and the lambda only enqueues + wakes the relay.
+    // OwnerChangeWatch object, NOT conn.interface(). QtDBus's own
+    // NameOwnerChanged hook.obj is QDBusConnectionPrivate (direct
+    // delivery on the manager thread, qdbusintegrator.cpp:815-833);
+    // serviceOwnerChanged then AutoConnects to this watcher. With iface
+    // as the context the *connect* is a BlockingQueued metacall from the
+    // attach thread into the manager thread — attach deadlocks against
+    // its own watch delivery. A dedicated context confines that coupling
+    // to a QObject the library owns.
     if (claim.watch)
         return;
     auto *watcher = new OwnerChangeWatch(connName, service);
@@ -307,8 +313,9 @@ inline void armClaimWatch(const QDBusConnection &conn, const QString &connName,
                                      watcher->connName(), watcher->service(), newOwner);
                          });
     claim.watchContext = watcher;
-    // The watcher's thread IS the delivery thread: it must live where the
-    // manager thread invokes it (its own affinity), never moved.
+    // Never moved: AutoConnection queues the lambda to this object's
+    // attach-thread affinity (qdbusintegrator.cpp:2711-2714 posts to
+    // hook.obj; our watch is the QObject::connect context, not hook.obj).
 }
 
 inline void sendFlaggedRequest(const QDBusConnection &conn, DBusPathDispatcher *disp,
@@ -344,7 +351,7 @@ inline void sendFlaggedRequest(const QDBusConnection &conn, DBusPathDispatcher *
 
 bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const QString &service,
                                 DBusAdaptor *adaptor, bool allowReplacement, bool replaceExisting,
-                                bool queueOnBusy) {
+                                bool queueOnBusy, bool captureSubtree) {
     const QString connName = conn.name();
     const PathKey key{connName, path};
 
@@ -354,14 +361,61 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
         auto it = dispatchers().find(key);
         if (it != dispatchers().end()) {
             disp = it.value();
-        } else {
-            disp = new DBusPathDispatcher(connName, path, conn);
-            if (!conn.registerVirtualObject(path, disp)) {
-                qmlInfo(adaptor) << "Failed to register object at" << path;
-                delete disp;
+            if (captureSubtree != disp->m_requestedCapture) {
+                qmlWarning(adaptor)
+                    << "captureSubtree mismatch at" << path
+                    << ": the dispatcher was registered with requested captureSubtree="
+                    << disp->m_requestedCapture
+                    << "by the first adaptor; co-located adaptors must agree — this adaptor was "
+                       "NOT registered";
                 return false;
             }
-            dispatchers().insert(key, disp);
+        } else {
+            DBusPathDispatcher *root = nullptr;
+            QString parent = path;
+            for (;;) {
+                const int slash = parent.lastIndexOf(QLatin1Char('/'));
+                if (slash < 0)
+                    break;
+                parent = (slash == 0) ? QStringLiteral("/") : parent.left(slash);
+                auto anc = dispatchers().find({connName, parent});
+                if (anc != dispatchers().end() && anc.value()->m_captures) {
+                    root = anc.value();
+                    break;
+                }
+                if (slash == 0)
+                    break;
+            }
+            if (root) {
+                if (captureSubtree) {
+                    qmlWarning(adaptor) << "captureSubtree at" << path
+                                        << "ignored: already captured by" << root->m_path;
+                }
+                disp = new DBusPathDispatcher(connName, path, conn);
+                disp->m_capturedBy = root;
+                disp->m_requestedCapture = captureSubtree;
+                root->m_children.insert(path, disp);
+                dispatchers().insert(key, disp);
+            } else {
+                const auto mode =
+                    captureSubtree ? QDBusConnection::SubPath : QDBusConnection::SingleNode;
+                disp = new DBusPathDispatcher(connName, path, conn);
+                disp->m_captures = (mode == QDBusConnection::SubPath);
+                disp->m_requestedCapture = captureSubtree;
+                if (!conn.registerVirtualObject(path, disp, mode)) {
+                    if (disp->m_captures)
+                        qmlWarning(adaptor)
+                            << "captureSubtree at" << path
+                            << "refused: QtDBus rejected SubPath registration — most "
+                               "likely paths already registered beneath it; create the "
+                               "capturing adaptor before its children";
+                    else
+                        qmlInfo(adaptor) << "Failed to register object at" << path;
+                    delete disp;
+                    return false;
+                }
+                dispatchers().insert(key, disp);
+            }
         }
     }
 
@@ -446,7 +500,7 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
                 if (ok)
                     conn.unregisterService(service);
                 return attach(conn, path, service, adaptor, allowReplacement, replaceExisting,
-                              queueOnBusy);
+                              queueOnBusy, captureSubtree);
             }
             ServiceClaim &claim = it.value();
             claim.pending = false;
@@ -607,7 +661,26 @@ void DBusPathDispatcher::detachAdaptor(DBusAdaptor *adaptor) {
     if (!m_adaptors.isEmpty())
         return;
 
-    // Last adaptor gone — drop the path and tear down the dispatcher.
+    if (m_capturedBy) {
+        DBusPathDispatcher *root = m_capturedBy;
+        {
+            RegistryMutexGuard locker(registryMutex());
+            root->m_children.remove(m_path);
+            dispatchers().remove({m_connName, m_path});
+        }
+        deleteLater();
+        if (root->m_adaptors.isEmpty() && root->m_children.isEmpty())
+            root->unregisterAndDelete();
+        return;
+    }
+
+    if (!m_children.isEmpty())
+        return;
+
+    unregisterAndDelete();
+}
+
+void DBusPathDispatcher::unregisterAndDelete() {
     {
         RegistryMutexGuard locker(registryMutex());
         dispatchers().remove({m_connName, m_path});
@@ -616,7 +689,7 @@ void DBusPathDispatcher::detachAdaptor(DBusAdaptor *adaptor) {
     deleteLater();
 }
 
-QString DBusPathDispatcher::introspect(const QString &) const {
+QString DBusPathDispatcher::interfacesXml(const QList<QPointer<DBusAdaptor>> &adaptors) const {
     // Merge per-adaptor interface blocks cleanly: for co-located same-iface
     // adaptors, first-attached wins for dispatch — the advertised surface
     // mirrors that exactly. Naive concatenation would emit duplicate
@@ -624,7 +697,7 @@ QString DBusPathDispatcher::introspect(const QString &) const {
     QString xml;
     QSet<QString> servedIfaces;
     bool servedEmptyIface = false; // A17: empty ifaces dedupe too
-    for (const auto &a : m_adaptors) {
+    for (const auto &a : adaptors) {
         if (!a)
             continue;
         const QString iface = a->iface();
@@ -644,7 +717,41 @@ QString DBusPathDispatcher::introspect(const QString &) const {
     return xml;
 }
 
-bool DBusPathDispatcher::handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) {
+QString DBusPathDispatcher::introspect(const QString &path) const {
+    if (!m_captures)
+        return interfacesXml(m_adaptors);
+
+    const QList<QPointer<DBusAdaptor>> *adaptors = &m_adaptors;
+    if (path != m_path) {
+        DBusPathDispatcher *child = m_children.value(path);
+        if (child)
+            adaptors = &child->m_adaptors;
+        else
+            adaptors = nullptr;
+    }
+    QString xml;
+    if (adaptors)
+        xml += interfacesXml(*adaptors);
+
+    const QString prefix =
+        (path == QLatin1String("/")) ? QStringLiteral("/") : path + QLatin1Char('/');
+    QSet<QString> names;
+    for (auto it = m_children.cbegin(); it != m_children.cend(); ++it) {
+        if (!it.key().startsWith(prefix))
+            continue;
+        const QString rest = it.key().mid(prefix.size());
+        const int slash = rest.indexOf(QLatin1Char('/'));
+        const QString c = slash < 0 ? rest : rest.left(slash);
+        if (!c.isEmpty())
+            names.insert(c);
+    }
+    for (const QString &c : names)
+        xml += QStringLiteral("  <node name=\"%1\"/>\n").arg(c);
+    return xml;
+}
+
+bool DBusPathDispatcher::routeToAdaptors(const QList<QPointer<DBusAdaptor>> &adaptors,
+                                         const QDBusMessage &msg, const QDBusConnection &conn) {
     const QString interface = msg.interface();
 
     // QtDBus serves introspect() for the Introspectable interface.
@@ -652,23 +759,19 @@ bool DBusPathDispatcher::handleMessage(const QDBusMessage &msg, const QDBusConne
         return false;
 
     if (interface == QStringLiteral("org.freedesktop.DBus.Properties")) {
-        // Route by the interface ARGUMENT to the matching adaptor.
         QString reqIface;
         if (!msg.arguments().isEmpty())
             reqIface = msg.arguments().first().toString();
         if (!reqIface.isEmpty()) {
-            for (const auto &a : m_adaptors) {
+            for (const auto &a : adaptors) {
                 if (a && a->iface() == reqIface)
                     return a->handleMessage(msg, conn);
             }
-            // No matching adaptor — route to the first so it reports
-            // "No such interface" (preserves the single-adaptor error).
-            if (!m_adaptors.isEmpty() && m_adaptors.first())
-                return m_adaptors.first()->handleMessage(msg, conn);
+            if (!adaptors.isEmpty() && adaptors.first())
+                return adaptors.first()->handleMessage(msg, conn);
             return false;
         }
-        // Empty interface arg — try all in attach order, first that handles.
-        for (const auto &a : m_adaptors) {
+        for (const auto &a : adaptors) {
             if (a && a->handleMessage(msg, conn))
                 return true;
         }
@@ -676,17 +779,109 @@ bool DBusPathDispatcher::handleMessage(const QDBusMessage &msg, const QDBusConne
     }
 
     if (!interface.isEmpty()) {
-        for (const auto &a : m_adaptors) {
+        for (const auto &a : adaptors) {
             if (a && a->iface() == interface)
                 return a->handleMessage(msg, conn);
         }
         return false;
     }
 
-    // Empty interface — member-name dispatch across adaptors in attach order.
-    for (const auto &a : m_adaptors) {
+    for (const auto &a : adaptors) {
         if (a && a->handleMessage(msg, conn))
             return true;
     }
     return false;
+}
+
+// Qt's activateInternalFilters (QDBusConnectionPrivate, qtbase 6.11) answers
+// these shapes itself for ANY virtual-object node, before its leftover-path
+// branch:
+//   iface ∈ {"", Introspectable}: Introspect() sig ""            → XML
+//   iface == Introspectable, any other member                    → UnknownMethod
+//   iface ∈ {"", Properties}: Get(ss) | Set(ssv) | GetAll(s)      → property filter
+//   iface == Properties, any other member/signature              → UnknownMethod
+// For a captured child we return false on exactly these so Qt answers the
+// child as it answers a plain adaptor; everything else falls to the
+// exact-path bottom fallback we mirror below (empty iface → UnknownMethod,
+// named iface → UnknownInterface). This predicate IS the parity contract;
+// change it only together with the Qt source it mirrors. Cite Qt by
+// function name and version, never by line number.
+//
+// Two Qt facts the parity rests on (council-verified; keep them written down):
+//  * Qt's filters are guarded by `node.obj &&`. For dbusqml that is always
+//    true: registerVirtualObject stores the dispatcher as node.obj
+//    (obj/treeNode are one union member), for the child's root and for a
+//    plain adaptor alike. We omit the guard on purpose.
+//  * SubPath == 0x1 aliases the ExportAdaptors flag bit, so the capturing
+//    root's node enters Qt's adaptor branches that a SingleNode node skips.
+//    They are inert: qDBusFindAdaptorConnector(dispatcher) is null (a
+//    DBusPathDispatcher owns no QDBusAbstractAdaptor children), and
+//    ExportAllProperties is never set — so Get/Set/GetAll resolve to the same
+//    interface-not-found / empty-dict outcomes on both sides, path-only text
+//    differences. The parity pin asserts the observable consequence (both
+//    Introspect XMLs carry org.freedesktop.DBus.Properties; identical
+//    Get/Set/GetAll replies).
+static bool qtInternalFiltersHandle(const QDBusMessage &msg) {
+    const QString iface = msg.interface(), member = msg.member(), sig = msg.signature();
+    const bool introspectable = iface == QLatin1String("org.freedesktop.DBus.Introspectable");
+    const bool properties = iface == QLatin1String("org.freedesktop.DBus.Properties");
+    if (iface.isEmpty() || introspectable) {
+        if (member == QLatin1String("Introspect") && sig.isEmpty())
+            return true;
+        if (introspectable)
+            return true;
+    }
+    if (iface.isEmpty() || properties) {
+        if ((member == QLatin1String("Get") && sig == QLatin1String("ss")) ||
+            (member == QLatin1String("Set") && sig == QLatin1String("ssv")) ||
+            (member == QLatin1String("GetAll") && sig == QLatin1String("s")))
+            return true;
+        if (properties)
+            return true;
+    }
+    return false;
+}
+
+bool DBusPathDispatcher::handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) {
+    if (msg.path() == m_path)
+        return routeToAdaptors(m_adaptors, msg, conn);
+    if (!m_captures)
+        return false;
+    if (DBusPathDispatcher *child = m_children.value(msg.path())) {
+        if (child->routeToAdaptors(child->m_adaptors, msg, conn))
+            return true;
+        if (qtInternalFiltersHandle(msg))
+            return false; // Qt answers, same as a plain adaptor
+        const QString iface = msg.interface();
+        // Anything else would fall into Qt's leftover-path UnknownObject for a
+        // path that exists (qdbusintegrator.cpp activateObject, pathStartPos !=
+        // size). Mirror Qt's bottom fallback for the exact-path case instead —
+        // same split, same texts (qdbusintegrator.cpp sendError).
+        if (msg.isReplyRequired()) {
+            QDBusMessage err =
+                iface.isEmpty()
+                    ? msg.createErrorReply(
+                          QDBusError::UnknownMethod,
+                          QStringLiteral("No such method '%1' in any interface at object path "
+                                         "'%2' (signature '%3')")
+                              .arg(msg.member(), msg.path(), msg.signature()))
+                    : msg.createErrorReply(
+                          QDBusError::UnknownInterface,
+                          QStringLiteral("No such interface '%1' at object path '%2'")
+                              .arg(iface, msg.path()));
+            checkedSend(conn, err, "child fallback error");
+        }
+        return true;
+    }
+    if (msg.interface() == QStringLiteral("org.freedesktop.DBus.Introspectable"))
+        return false;
+    qCDebug(lcDbusqmlDispatch) << "no object at" << msg.path() << "for" << msg.interface()
+                               << msg.member() << "from" << msg.service();
+    if (msg.isReplyRequired())
+        checkedSend(
+            conn,
+            msg.createErrorReply(QDBusError::UnknownObject,
+                                 QStringLiteral("No such object path '%1'").arg(msg.path())),
+            "absent-path UnknownObject");
+    return true;
 }

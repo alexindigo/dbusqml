@@ -14,7 +14,9 @@
 #include <QProcess>
 #include <QFile>
 #include <QQmlComponent>
+#include <QQmlContext>
 #include <QQmlEngine>
+#include <QLoggingCategory>
 #include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTest>
@@ -436,6 +438,15 @@ private slots:
     void testCoLocatedTeardownPath();
     void testCoLocatedTeardownService();
     void testChildNodeIntrospection();
+    void testCaptureSubtreeOrderedDispatch();
+    void testCaptureSubtreeIntrospection();
+    void testCaptureSubtreePropertiesOnChild();
+    void testCaptureSubtreeAbsentPathUnknownObject();
+    void testCaptureSubtreeChildTeardown();
+    void testCaptureSubtreeRefusedExistingChildren();
+    void testCaptureSubtreeNestedIgnored();
+    void testCaptureSubtreeColocatedMismatchRefused();
+    void testCaptureSubtreeExactlyOneReply();
     void testNameOwnerChangedChurnSurvives();
     void testConcurrentAttachSurvives();
     // T1 relay gate (features train, Phase 2 — concilium-blessed
@@ -578,6 +589,7 @@ private slots:
     void testLifecycleUnregister();
     void testLifecycleUnregisterErrorsHeldReply();
     void testLifecycleLeakRegression();
+    void testCaptureSubtreeRootCapture();
 };
 
 QDBusMessage TestDBusAdaptor::callOnAdaptor(const QString &iface, const QString &member,
@@ -3778,6 +3790,534 @@ void TestDBusAdaptor::testChildNodeIntrospection() {
 
     delete b;
     delete c;
+}
+
+// Worker for T1: own connection on a side thread, spawn then ping with no
+// wait between the two async calls. Replies are collected on this thread.
+class SpawnThenPingWorker : public QThread {
+public:
+    QString addr;
+    QString connName;
+    QString service;
+    QString parentPath;
+    QString childName;
+    QString parentIface;
+    QString childIface;
+    QDBusMessage pingReply;
+
+    void run() override {
+        QDBusConnection c = QDBusConnection::connectToBus(addr, connName);
+        if (!c.isConnected())
+            return;
+        QDBusMessage spawn = QDBusMessage::createMethodCall(service, parentPath, parentIface,
+                                                            QStringLiteral("spawn"));
+        spawn.setArguments({childName});
+        QDBusMessage ping = QDBusMessage::createMethodCall(
+            service, parentPath + QLatin1Char('/') + childName, childIface, QStringLiteral("ping"));
+        QDBusPendingCall s = c.asyncCall(spawn, 8000);
+        QDBusPendingCall p = c.asyncCall(ping, 8000);
+        s.waitForFinished();
+        p.waitForFinished();
+        pingReply = p.reply();
+        QDBusConnection::disconnectFromBus(connName);
+    }
+};
+
+// T1 — the captureSubtree falsifier. Control (SingleNode) must produce
+// UnknownObject for a ping that races spawn; capture half must return pong.
+// Control runs first so a missing property still lets the control pin fire.
+void TestDBusAdaptor::testCaptureSubtreeOrderedDispatch() {
+    const QString addr = QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS"));
+    QVERIFY(!addr.isEmpty());
+
+    QObject *ctrl = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.NoCap'\n"
+        "  path: '/nocap'\n"
+        "  iface: 'org.dbusqml.Cap'\n"
+        "  function spawn(name) {\n"
+        "    Qt.createQmlObject(\"import DBus 1.0; DBusAdaptor { path: '/nocap/\" + name + \"'; "
+        "iface: 'org.dbusqml.Child'; function ping() { return 'pong' } }\", this)\n"
+        "  }\n"
+        "}");
+    QVERIFY(ctrl != nullptr);
+
+    SpawnThenPingWorker wctrl;
+    wctrl.addr = addr;
+    wctrl.connName = QStringLiteral("worker-nocap");
+    wctrl.service = QStringLiteral("org.dbusqml.NoCap");
+    wctrl.parentPath = QStringLiteral("/nocap");
+    wctrl.childName = QStringLiteral("r1");
+    wctrl.parentIface = QStringLiteral("org.dbusqml.Cap");
+    wctrl.childIface = QStringLiteral("org.dbusqml.Child");
+    wctrl.start();
+    QThread::msleep(200);
+    QElapsedTimer tctrl;
+    tctrl.start();
+    while (!wctrl.isFinished() && tctrl.elapsed() < 8000)
+        QTest::qWait(20);
+    QVERIFY(wctrl.wait(1000));
+    QCOMPARE(wctrl.pingReply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(wctrl.pingReply.errorName(),
+             QStringLiteral("org.freedesktop.DBus.Error.UnknownObject"));
+    delete ctrl;
+
+    QObject *cap = createQmlAdaptor(
+        "import DBus 1.0\n"
+        "import QtQml 2.15\n"
+        "DBusAdaptor {\n"
+        "  service: 'org.dbusqml.Cap'\n"
+        "  path: '/cap'\n"
+        "  iface: 'org.dbusqml.Cap'\n"
+        "  captureSubtree: true\n"
+        "  function spawn(name) {\n"
+        "    Qt.createQmlObject(\"import DBus 1.0; DBusAdaptor { path: '/cap/\" + name + \"'; "
+        "iface: 'org.dbusqml.Child'; function ping() { return 'pong' } }\", this)\n"
+        "  }\n"
+        "}");
+    QVERIFY2(cap != nullptr, "captureSubtree property must exist");
+
+    SpawnThenPingWorker wcap;
+    wcap.addr = addr;
+    wcap.connName = QStringLiteral("worker-cap");
+    wcap.service = QStringLiteral("org.dbusqml.Cap");
+    wcap.parentPath = QStringLiteral("/cap");
+    wcap.childName = QStringLiteral("r1");
+    wcap.parentIface = QStringLiteral("org.dbusqml.Cap");
+    wcap.childIface = QStringLiteral("org.dbusqml.Child");
+    wcap.start();
+    QThread::msleep(200);
+    QElapsedTimer tcap;
+    tcap.start();
+    while (!wcap.isFinished() && tcap.elapsed() < 8000)
+        QTest::qWait(20);
+    QVERIFY(wcap.wait(1000));
+    QCOMPARE(wcap.pingReply.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(!wcap.pingReply.arguments().isEmpty());
+    QCOMPARE(wcap.pingReply.arguments().first().toString(), QStringLiteral("pong"));
+    delete cap;
+}
+
+static QString introspectXml(const QString &service, const QString &path) {
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        service, path, QStringLiteral("org.freedesktop.DBus.Introspectable"),
+        QStringLiteral("Introspect"));
+    QDBusMessage r = QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+    if (r.type() != QDBusMessage::ReplyMessage || r.arguments().isEmpty())
+        return QString();
+    return r.arguments().first().toString();
+}
+
+void TestDBusAdaptor::testCaptureSubtreeIntrospection() {
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.T2Cap'\n"
+                                    "  path: '/T2cap'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "  function ping() { return 'root' }\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+    QObject *r1 = createQmlAdaptor("import DBus 1.0\n"
+                                   "DBusAdaptor {\n"
+                                   "  path: '/T2cap/r1'\n"
+                                   "  iface: 'org.dbusqml.Child'\n"
+                                   "  function ping() { return 'pong' }\n"
+                                   "}");
+    QVERIFY(r1 != nullptr);
+    QObject *xy = createQmlAdaptor("import DBus 1.0\n"
+                                   "DBusAdaptor {\n"
+                                   "  path: '/T2cap/x/y'\n"
+                                   "  iface: 'org.dbusqml.Deep'\n"
+                                   "  function ping() { return 'deep' }\n"
+                                   "}");
+    QVERIFY(xy != nullptr);
+
+    const QString rootXml =
+        introspectXml(QStringLiteral("org.dbusqml.T2Cap"), QStringLiteral("/T2cap"));
+    QVERIFY2(rootXml.contains(QStringLiteral("org.dbusqml.Cap")), qPrintable(rootXml));
+    QVERIFY2(rootXml.contains(QStringLiteral("<node name=\"r1\"/>")), qPrintable(rootXml));
+
+    const QString r1Xml =
+        introspectXml(QStringLiteral("org.dbusqml.T2Cap"), QStringLiteral("/T2cap/r1"));
+    QVERIFY2(r1Xml.contains(QStringLiteral("org.dbusqml.Child")), qPrintable(r1Xml));
+    QVERIFY2(!r1Xml.contains(QStringLiteral("org.dbusqml.Cap")), qPrintable(r1Xml));
+
+    const QString xXml =
+        introspectXml(QStringLiteral("org.dbusqml.T2Cap"), QStringLiteral("/T2cap/x"));
+    QVERIFY2(xXml.contains(QStringLiteral("<node name=\"y\"/>")), qPrintable(xXml));
+    QVERIFY2(!xXml.contains(QStringLiteral("<interface name=\"org.dbusqml")), qPrintable(xXml));
+
+    const QString noneXml =
+        introspectXml(QStringLiteral("org.dbusqml.T2Cap"), QStringLiteral("/T2cap/none"));
+    QVERIFY2(!noneXml.contains(QStringLiteral("<interface name=\"org.dbusqml")),
+             qPrintable(noneXml));
+
+    delete xy;
+    delete r1;
+    delete cap;
+}
+
+void TestDBusAdaptor::testCaptureSubtreePropertiesOnChild() {
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.T3Cap'\n"
+                                    "  path: '/T3cap'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+    QObject *r1 = createQmlAdaptor("import DBus 1.0\n"
+                                   "DBusAdaptor {\n"
+                                   "  path: '/T3cap/r1'\n"
+                                   "  iface: 'org.dbusqml.Child'\n"
+                                   "  property int n: 1\n"
+                                   "}");
+    QVERIFY(r1 != nullptr);
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage get = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.T3Cap"), QStringLiteral("/T3cap/r1"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    get.setArguments({QStringLiteral("org.dbusqml.Child"), QStringLiteral("n")});
+    QDBusMessage getReply = bus.call(get, QDBus::Block, 3000);
+    QCOMPARE(getReply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(getReply.arguments().first().value<QDBusVariant>().variant().toInt(), 1);
+
+    QDBusMessage set = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.T3Cap"), QStringLiteral("/T3cap/r1"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Set"));
+    set.setArguments({QStringLiteral("org.dbusqml.Child"), QStringLiteral("n"),
+                      QVariant::fromValue(QDBusVariant(7))});
+    QDBusMessage setReply = bus.call(set, QDBus::Block, 3000);
+    QCOMPARE(setReply.type(), QDBusMessage::ReplyMessage);
+
+    QDBusMessage getAll = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.T3Cap"), QStringLiteral("/T3cap/r1"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("GetAll"));
+    getAll.setArguments({QStringLiteral("org.dbusqml.Child")});
+    QDBusMessage allReply = bus.call(getAll, QDBus::Block, 3000);
+    QCOMPARE(allReply.type(), QDBusMessage::ReplyMessage);
+    const QVariantMap all = unwrapDbus(allReply.arguments().first()).toMap();
+    QCOMPARE(all.value(QStringLiteral("N")).toInt(), 7);
+
+    QDBusMessage get2 = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.T3Cap"), QStringLiteral("/T3cap/r1"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    get2.setArguments({QStringLiteral("org.dbusqml.Child"), QStringLiteral("n")});
+    QDBusMessage get2Reply = bus.call(get2, QDBus::Block, 3000);
+    QCOMPARE(get2Reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(get2Reply.arguments().first().value<QDBusVariant>().variant().toInt(), 7);
+
+    delete r1;
+    delete cap;
+}
+
+void TestDBusAdaptor::testCaptureSubtreeAbsentPathUnknownObject() {
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.T4Cap'\n"
+                                    "  path: '/T4cap'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "  function ping() { return 'root' }\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+
+    QLoggingCategory::setFilterRules(QStringLiteral("dbusqml.dispatch.debug=true"));
+    const QString unique = QDBusConnection::sessionBus().baseService();
+    static QStringList s_dispatchLogs;
+    static QtMessageHandler s_prevHandler;
+    s_dispatchLogs.clear();
+    s_prevHandler = qInstallMessageHandler(
+        [](QtMsgType type, const QMessageLogContext &ctx, const QString &msg) {
+            if (QLatin1String(ctx.category) == QLatin1String("dbusqml.dispatch"))
+                s_dispatchLogs.append(msg);
+            if (s_prevHandler)
+                s_prevHandler(type, ctx, msg);
+        });
+
+    QDBusMessage boom = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.T4Cap"), QStringLiteral("/T4cap/absent"),
+        QStringLiteral("org.dbusqml.Missing"), QStringLiteral("boom"));
+    QDBusMessage reply = QDBusConnection::sessionBus().call(boom, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.UnknownObject"));
+    QCOMPARE(reply.errorMessage(), QStringLiteral("No such object path '/T4cap/absent'"));
+
+    qInstallMessageHandler(s_prevHandler);
+    QLoggingCategory::setFilterRules(QString());
+    QCOMPARE(s_dispatchLogs.size(), 1);
+    QVERIFY2(s_dispatchLogs.first().contains(unique), qPrintable(s_dispatchLogs.first()));
+
+    delete cap;
+}
+
+void TestDBusAdaptor::testCaptureSubtreeChildTeardown() {
+    const int baseline = DBusPathDispatcher::liveCount();
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.T5Cap'\n"
+                                    "  path: '/T5cap'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "  function ping() { return 'root' }\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+    QObject *r1 = createQmlAdaptor("import DBus 1.0\n"
+                                   "DBusAdaptor {\n"
+                                   "  path: '/T5cap/r1'\n"
+                                   "  iface: 'org.dbusqml.Child'\n"
+                                   "  function ping() { return 'one' }\n"
+                                   "}");
+    QVERIFY(r1 != nullptr);
+    QObject *r2 = createQmlAdaptor("import DBus 1.0\n"
+                                   "DBusAdaptor {\n"
+                                   "  path: '/T5cap/r2'\n"
+                                   "  iface: 'org.dbusqml.Child'\n"
+                                   "  function ping() { return 'two' }\n"
+                                   "}");
+    QVERIFY(r2 != nullptr);
+
+    delete r1;
+    QDBusMessage c1 = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.T5Cap"), QStringLiteral("/T5cap/r1"),
+        QStringLiteral("org.dbusqml.Child"), QStringLiteral("ping"));
+    QDBusMessage r1reply = QDBusConnection::sessionBus().call(c1, QDBus::Block, 3000);
+    QCOMPARE(r1reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(r1reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.UnknownObject"));
+
+    delete cap;
+    const QString dest = QDBusConnection::sessionBus().baseService();
+    QDBusMessage c2 =
+        QDBusMessage::createMethodCall(dest, QStringLiteral("/T5cap/r2"),
+                                       QStringLiteral("org.dbusqml.Child"), QStringLiteral("ping"));
+    QDBusMessage r2reply = QDBusConnection::sessionBus().call(c2, QDBus::Block, 3000);
+    QCOMPARE(r2reply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r2reply.arguments().first().toString(), QStringLiteral("two"));
+
+    delete r2;
+    QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
+
+    QDBusMessage ix = QDBusMessage::createMethodCall(
+        dest, QStringLiteral("/T5cap"), QStringLiteral("org.freedesktop.DBus.Introspectable"),
+        QStringLiteral("Introspect"));
+    QDBusMessage ixr = QDBusConnection::sessionBus().call(ix, QDBus::Block, 3000);
+    QCOMPARE(ixr.type(), QDBusMessage::ErrorMessage);
+}
+
+void TestDBusAdaptor::testCaptureSubtreeRefusedExistingChildren() {
+    const int baseline = DBusPathDispatcher::liveCount();
+    QObject *child = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  service: 'org.dbusqml.T6Child'\n"
+                                      "  path: '/T6x/y'\n"
+                                      "  iface: 'org.dbusqml.Child'\n"
+                                      "  function ping() { return 'y' }\n"
+                                      "}");
+    QVERIFY(child != nullptr);
+    const int afterChild = DBusPathDispatcher::liveCount();
+    QVERIFY(afterChild > baseline);
+
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("captureSubtree at.*refused")));
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.T6Cap'\n"
+                                    "  path: '/T6x'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "  function ping() { return 'root' }\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+    QCOMPARE(DBusPathDispatcher::liveCount(), afterChild);
+
+    QDBusMessage c =
+        QDBusMessage::createMethodCall(QStringLiteral("org.dbusqml.T6Cap"), QStringLiteral("/T6x"),
+                                       QStringLiteral("org.dbusqml.Cap"), QStringLiteral("ping"));
+    QDBusMessage r = QDBusConnection::sessionBus().call(c, QDBus::Block, 3000);
+    QCOMPARE(r.type(), QDBusMessage::ErrorMessage);
+
+    delete cap;
+    delete child;
+}
+
+void TestDBusAdaptor::testCaptureSubtreeNestedIgnored() {
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.T7Cap'\n"
+                                    "  path: '/T7cap'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(
+                                           "captureSubtree at.*ignored: already captured by")));
+    QObject *a = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  path: '/T7cap/a'\n"
+                                  "  iface: 'org.dbusqml.Mid'\n"
+                                  "  captureSubtree: true\n"
+                                  "  function ping() { return 'a' }\n"
+                                  "}");
+    QVERIFY(a != nullptr);
+
+    QObject *b = createQmlAdaptor("import DBus 1.0\n"
+                                  "DBusAdaptor {\n"
+                                  "  path: '/T7cap/a/b'\n"
+                                  "  iface: 'org.dbusqml.Child'\n"
+                                  "  function ping() { return 'b' }\n"
+                                  "}");
+    QVERIFY(b != nullptr);
+
+    QDBusMessage ping = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.T7Cap"), QStringLiteral("/T7cap/a/b"),
+        QStringLiteral("org.dbusqml.Child"), QStringLiteral("ping"));
+    QDBusMessage pr = QDBusConnection::sessionBus().call(ping, QDBus::Block, 3000);
+    QCOMPARE(pr.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(pr.arguments().first().toString(), QStringLiteral("b"));
+
+    const QString aXml =
+        introspectXml(QStringLiteral("org.dbusqml.T7Cap"), QStringLiteral("/T7cap/a"));
+    QVERIFY2(aXml.contains(QStringLiteral("<node name=\"b\"/>")), qPrintable(aXml));
+
+    delete b;
+    delete a;
+    delete cap;
+}
+
+void TestDBusAdaptor::testCaptureSubtreeColocatedMismatchRefused() {
+    QObject *first = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  service: 'org.dbusqml.T8a'\n"
+                                      "  path: '/T8a'\n"
+                                      "  iface: 'org.dbusqml.CapFirst'\n"
+                                      "  function ping() { return 'first' }\n"
+                                      "}");
+    QVERIFY(first != nullptr);
+    const int afterFirst = DBusPathDispatcher::liveCount();
+
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("captureSubtree mismatch at")));
+    QObject *late = createQmlAdaptor("import DBus 1.0\n"
+                                     "DBusAdaptor {\n"
+                                     "  service: 'org.dbusqml.T8a'\n"
+                                     "  path: '/T8a'\n"
+                                     "  iface: 'org.dbusqml.CapLate'\n"
+                                     "  captureSubtree: true\n"
+                                     "  function ping() { return 'late' }\n"
+                                     "}");
+    QVERIFY(late != nullptr);
+    QCOMPARE(DBusPathDispatcher::liveCount(), afterFirst);
+
+    const QString xml = introspectXml(QStringLiteral("org.dbusqml.T8a"), QStringLiteral("/T8a"));
+    QVERIFY2(xml.contains(QStringLiteral("org.dbusqml.CapFirst")), qPrintable(xml));
+    QVERIFY2(!xml.contains(QStringLiteral("org.dbusqml.CapLate")), qPrintable(xml));
+
+    QDBusMessage lateCall = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.T8a"), QStringLiteral("/T8a"),
+        QStringLiteral("org.dbusqml.CapLate"), QStringLiteral("ping"));
+    QDBusMessage lateReply = QDBusConnection::sessionBus().call(lateCall, QDBus::Block, 3000);
+    QCOMPARE(lateReply.type(), QDBusMessage::ErrorMessage);
+
+    QDBusMessage firstCall = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.T8a"), QStringLiteral("/T8a"),
+        QStringLiteral("org.dbusqml.CapFirst"), QStringLiteral("ping"));
+    QDBusMessage firstReply = QDBusConnection::sessionBus().call(firstCall, QDBus::Block, 3000);
+    QCOMPARE(firstReply.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(firstReply.arguments().first().toString(), QStringLiteral("first"));
+
+    delete late;
+    delete first;
+
+    QObject *capFirst = createQmlAdaptor("import DBus 1.0\n"
+                                         "DBusAdaptor {\n"
+                                         "  service: 'org.dbusqml.T8b'\n"
+                                         "  path: '/T8b'\n"
+                                         "  iface: 'org.dbusqml.CapFirst'\n"
+                                         "  captureSubtree: true\n"
+                                         "  function ping() { return 'cap' }\n"
+                                         "}");
+    QVERIFY(capFirst != nullptr);
+    const int afterCap = DBusPathDispatcher::liveCount();
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("captureSubtree mismatch at")));
+    QObject *noCapLate = createQmlAdaptor("import DBus 1.0\n"
+                                          "DBusAdaptor {\n"
+                                          "  service: 'org.dbusqml.T8b'\n"
+                                          "  path: '/T8b'\n"
+                                          "  iface: 'org.dbusqml.CapLate'\n"
+                                          "  function ping() { return 'late' }\n"
+                                          "}");
+    QVERIFY(noCapLate != nullptr);
+    QCOMPARE(DBusPathDispatcher::liveCount(), afterCap);
+    const QString xmlb = introspectXml(QStringLiteral("org.dbusqml.T8b"), QStringLiteral("/T8b"));
+    QVERIFY2(xmlb.contains(QStringLiteral("org.dbusqml.CapFirst")), qPrintable(xmlb));
+    QVERIFY2(!xmlb.contains(QStringLiteral("org.dbusqml.CapLate")), qPrintable(xmlb));
+
+    delete noCapLate;
+    delete capFirst;
+}
+
+void TestDBusAdaptor::testCaptureSubtreeExactlyOneReply() {
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.T10Cap'\n"
+                                    "  path: '/T10cap'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+    QObject *child = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  path: '/T10cap/r1'\n"
+                                      "  iface: 'org.dbusqml.Child'\n"
+                                      "  function ping() { return 'pong' }\n"
+                                      "}");
+    QVERIFY(child != nullptr);
+    QDBusMessage direct = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.T10Cap"), QStringLiteral("/T10cap/r1"),
+        QStringLiteral("org.dbusqml.Child"), QStringLiteral("ping"));
+    QDBusMessage directReply = QDBusConnection::sessionBus().call(direct, QDBus::Block, 3000);
+    QCOMPARE(directReply.type(), QDBusMessage::ReplyMessage);
+    const quint32 serial =
+        oracleCallAdaptor(QStringLiteral("org.dbusqml.T10Cap"), QStringLiteral("/T10cap/r1"),
+                          QStringLiteral("org.dbusqml.Child"), QStringLiteral("Ping"));
+    QVERIFY(serial != 0);
+    QTest::qWait(200);
+    QCOMPARE(oracleReceivedCount(serial), 1u);
+
+    const quint32 serialAbsent =
+        oracleCallAdaptor(QStringLiteral("org.dbusqml.T10Cap"), QStringLiteral("/T10cap/absent"),
+                          QStringLiteral("org.dbusqml.Child"), QStringLiteral("Ping"));
+    QVERIFY(serialAbsent != 0);
+    QTest::qWait(200);
+    QCOMPARE(oracleReceivedCount(serialAbsent), 1u);
+
+    QObject *nocap = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  service: 'org.dbusqml.T10NoCap'\n"
+                                      "  path: '/T10nocap'\n"
+                                      "  iface: 'org.dbusqml.Cap'\n"
+                                      "  function ping() { return 'root' }\n"
+                                      "}");
+    QVERIFY(nocap != nullptr);
+    const quint32 serial2 =
+        oracleCallAdaptor(QStringLiteral("org.dbusqml.T10NoCap"), QStringLiteral("/T10nocap"),
+                          QStringLiteral("org.dbusqml.Cap"), QStringLiteral("Ping"));
+    QVERIFY(serial2 != 0);
+    QTest::qWait(200);
+    QCOMPARE(oracleReceivedCount(serial2), 1u);
+
+    delete child;
+    delete cap;
+    delete nocap;
 }
 
 // Commit 11 (dispatcher deadlock resolution) — deterministic stress for the
@@ -8802,6 +9342,74 @@ void TestDBusAdaptor::testOracleSensitivityDoubleReply() {
 
     QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.DoubleSend"));
     QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/DoubleSend"));
+}
+
+void TestDBusAdaptor::testCaptureSubtreeRootCapture() {
+    const QString addr = QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS"));
+    DBusConnection *dc = DBusConnection::connectToBus(addr);
+    QVERIFY(dc != nullptr);
+    QDBusConnection bus = *dc;
+    const int baseline = DBusPathDispatcher::liveCount();
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    engine.rootContext()->setContextProperty(QStringLiteral("rootConn"), dc);
+
+    QQmlComponent rootComp(&engine);
+    rootComp.setData("import DBus 1.0\n"
+                     "DBusAdaptor {\n"
+                     "  connection: rootConn\n"
+                     "  service: 'org.dbusqml.RootCap'\n"
+                     "  path: '/'\n"
+                     "  iface: 'org.dbusqml.RootCap'\n"
+                     "  captureSubtree: true\n"
+                     "}\n",
+                     QUrl());
+    QVERIFY2(rootComp.isReady(), qPrintable(rootComp.errorString()));
+    QObject *root = rootComp.create();
+    QVERIFY(root != nullptr);
+    QTest::qWait(300);
+
+    QQmlComponent childComp(&engine);
+    childComp.setData("import DBus 1.0\n"
+                      "DBusAdaptor {\n"
+                      "  connection: rootConn\n"
+                      "  path: '/x'\n"
+                      "  iface: 'org.dbusqml.RootChild'\n"
+                      "  function ping() { return 'pong' }\n"
+                      "}\n",
+                      QUrl());
+    QVERIFY2(childComp.isReady(), qPrintable(childComp.errorString()));
+    QObject *child = childComp.create();
+    QVERIFY(child != nullptr);
+    QTest::qWait(300);
+
+    QDBusMessage ping = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.RootCap"), QStringLiteral("/x"),
+        QStringLiteral("org.dbusqml.RootChild"), QStringLiteral("ping"));
+    QDBusMessage pr = bus.call(ping, QDBus::Block, 3000);
+    QVERIFY2(pr.type() == QDBusMessage::ReplyMessage,
+             qPrintable(pr.errorName() + QLatin1Char(' ') + pr.errorMessage()));
+    QCOMPARE(pr.arguments().first().toString(), QStringLiteral("pong"));
+
+    auto ix = [&](const QString &path) {
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.RootCap"), path,
+            QStringLiteral("org.freedesktop.DBus.Introspectable"), QStringLiteral("Introspect"));
+        QDBusMessage r = bus.call(m, QDBus::Block, 3000);
+        return r.type() == QDBusMessage::ReplyMessage ? r.arguments().first().toString()
+                                                      : QString();
+    };
+    const QString rootXml = ix(QStringLiteral("/"));
+    QVERIFY2(rootXml.contains(QStringLiteral("<node name=\"x\"/>")), qPrintable(rootXml));
+    const QString xXml = ix(QStringLiteral("/x"));
+    QVERIFY2(xXml.contains(QStringLiteral("org.dbusqml.RootChild")), qPrintable(xXml));
+
+    delete child;
+    delete root;
+    QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
 }
 
 #include "test_dbusadaptor.moc"
