@@ -23,6 +23,8 @@
 #include <QTest>
 #include <QThread>
 #include <QTimer>
+#include <QDateTime>
+#include <QSemaphore>
 
 #include <atomic>
 #include <memory>
@@ -452,6 +454,10 @@ private slots:
     void testCaptureSubtreeNestedIgnored();
     void testCaptureSubtreeColocatedMismatchRefused();
     void testCaptureSubtreeExactlyOneReply();
+    void testCaptureSubtreeChildFallbackErrors();
+    void testCaptureSubtreeInterfacelessIntrospect();
+    void testCaptureSubtreeChildParity();
+    void testCaptureSubtreeChildColocatedAgree();
     void testHeldReplyNullAdaptorLoud();
     void testNameOwnerChangedChurnSurvives();
     void testConcurrentAttachSurvives();
@@ -1801,6 +1807,21 @@ static QProcess *startOracle() {
     return proc;
 }
 
+// Call the oracle WITHOUT freezing the test thread: the oracle's inner
+// call targets an adaptor on THIS thread, so the reply can only flow if
+// we pump while waiting (capture-subtree-punch diagnostic: QDBus::Block
+// stalled every pin until the oracle's 5 s timeout).
+static qint64 s_lastOracleCallMs;
+
+static QDBusMessage oracleCall(const QDBusMessage &m, int timeoutMs = 10000) {
+    QDBusPendingCall pending = QDBusConnection::sessionBus().asyncCall(m, timeoutMs);
+    QDBusPendingCallWatcher w(pending);
+    QSignalSpy spy(&w, &QDBusPendingCallWatcher::finished);
+    if (!w.isFinished())
+        spy.wait(timeoutMs);
+    return w.reply();
+}
+
 // Oracle CallAdaptor(service, path, iface, member) -> (outgoing serial,
 // replies-so-far). The oracle invokes the no-arg method synchronously and
 // reports the call serial; ReceivedCount(serial) is the live tally.
@@ -1810,7 +1831,10 @@ static quint32 oracleCallAdaptor(const QString &service, const QString &path, co
         QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("/Oracle"),
         QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("CallAdaptor"));
     m.setArguments({service, path, iface, member});
-    const QDBusMessage r = QDBusConnection::sessionBus().call(m, QDBus::Block, 10000);
+    QElapsedTimer t;
+    t.start();
+    const QDBusMessage r = oracleCall(m);
+    s_lastOracleCallMs = t.elapsed();
     if (r.type() != QDBusMessage::ReplyMessage || r.arguments().size() < 2)
         return 0;
     return r.arguments().at(0).toUInt();
@@ -1827,6 +1851,31 @@ static quint32 oracleReceivedCount(quint32 serial) {
     return r.arguments().at(0).toUInt();
 }
 
+// Poll ReceivedCount until it reaches `expected` (bounded), then require
+// it unchanged across a quiet window. The window is the referee's declared
+// OBSERVATION BOUND for late duplicates — not a proof of finality
+// (PARITY §5). Silence pins do not use this: their evidence is the
+// timeout guard on the call itself.
+static quint32 oracleSettledCount(quint32 serial, quint32 expected, int boundMs = 2000,
+                                  int quietMs = 500) {
+    QElapsedTimer t;
+    t.start();
+    quint32 n = oracleReceivedCount(serial);
+    while (n < expected && t.elapsed() < boundMs) {
+        QTest::qWait(20);
+        n = oracleReceivedCount(serial);
+    }
+    QElapsedTimer quiet;
+    quiet.start();
+    while (quiet.elapsed() < quietMs) {
+        QTest::qWait(20);
+        const quint32 later = oracleReceivedCount(serial);
+        if (later != n)
+            return later;
+    }
+    return n;
+}
+
 // Oracle CallAdaptorOptions(service, path, iface, member, optKey, optString)
 // -> outgoing serial. Like CallAdaptor but the call carries a trailing
 // a{sv} options dict { optKey: variant-of-string optString } — the R1
@@ -1839,8 +1888,26 @@ static quint32 oracleCallAdaptorOptions(const QString &service, const QString &p
         QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("/Oracle"),
         QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("CallAdaptorOptions"));
     m.setArguments({service, path, iface, member, optKey, optValue});
-    const QDBusMessage r = QDBusConnection::sessionBus().call(m, QDBus::Block, 10000);
+    QElapsedTimer t;
+    t.start();
+    const QDBusMessage r = oracleCall(m);
+    s_lastOracleCallMs = t.elapsed();
     if (r.type() != QDBusMessage::ReplyMessage || r.arguments().size() < 2)
+        return 0;
+    return r.arguments().at(0).toUInt();
+}
+
+static quint32 oracleCallAdaptorNoReply(const QString &service, const QString &path,
+                                        const QString &iface, const QString &member) {
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("/Oracle"),
+        QStringLiteral("org.dbusqml.Oracle"), QStringLiteral("CallAdaptorNoReply"));
+    m.setArguments({service, path, iface, member});
+    QElapsedTimer t;
+    t.start();
+    const QDBusMessage r = oracleCall(m);
+    s_lastOracleCallMs = t.elapsed();
+    if (r.type() != QDBusMessage::ReplyMessage || r.arguments().isEmpty())
         return 0;
     return r.arguments().at(0).toUInt();
 }
@@ -2188,9 +2255,10 @@ void TestDBusAdaptor::testHeldReplyInvalidErrorNameFallsBack() {
     const quint32 serial = oracleCallAdaptor(
         QStringLiteral("org.dbusqml.CF1T"), QStringLiteral("/CF1T"),
         QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("Boom"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serial != 0);
-    QTest::qWait(500); // settle + quiet window
-    QCOMPARE(oracleReceivedCount(serial), 1u);
+    QCOMPARE(oracleSettledCount(serial, 1u), 1u);
 
     QDBusPendingCallWatcher *watcher = asyncCallDeferred(
         QStringLiteral("org.dbusqml.CF1T"), QStringLiteral("/CF1T"),
@@ -2260,9 +2328,10 @@ void TestDBusAdaptor::testHoldReplyIdempotentSameHandle() {
     const quint32 serial = oracleCallAdaptor(
         QStringLiteral("org.dbusqml.CF2T"), QStringLiteral("/CF2T"),
         QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("Boom"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serial != 0);
-    QTest::qWait(500); // settle + quiet window
-    QCOMPARE(oracleReceivedCount(serial), 1u);
+    QCOMPARE(oracleSettledCount(serial, 1u), 1u);
 
     QDBusPendingCallWatcher *watcher = asyncCallDeferred(
         QStringLiteral("org.dbusqml.CF2T"), QStringLiteral("/CF2T"),
@@ -2280,8 +2349,7 @@ void TestDBusAdaptor::testHoldReplyIdempotentSameHandle() {
 
     delete watcher;
     delete adaptor;
-    QTest::qWait(500); // teardown window — no teardown-error reply may land
-    QCOMPARE(oracleReceivedCount(serial), 1u);
+    QCOMPARE(oracleSettledCount(serial, 1u), 1u);
     QCOMPARE(sameHandle, true);
 }
 
@@ -2712,9 +2780,10 @@ void TestDBusAdaptor::testOptionsInvalidArgsExactlyOneReply() {
         oracleCallAdaptorOptions(QStringLiteral("org.dbusqml.OptWire"), QStringLiteral("/OptWire"),
                                  QStringLiteral("org.dbusqml.OptWire"), QStringLiteral("DoIt"),
                                  QStringLiteral("tags"), QStringLiteral("oops"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serial != 0);
-    QTest::qWait(500); // settle + quiet window
-    QCOMPARE(oracleReceivedCount(serial), 1u);
+    QCOMPARE(oracleSettledCount(serial, 1u), 1u);
 
     // The handler never ran, and the in-suite caller sees the InvalidArgs.
     QCOMPARE(adaptor->property("boomRan").toBool(), false);
@@ -3838,7 +3907,9 @@ void TestDBusAdaptor::testChildNodeIntrospection() {
 }
 
 // Worker for T1: own connection on a side thread, spawn then ping with no
-// wait between the two async calls. Replies are collected on this thread.
+// wait between the two async calls. A blocking Peer.Ping to the daemon on
+// the same connection then proves both calls were forwarded (message order
+// on one connection). Replies are collected on this thread.
 class SpawnThenPingWorker : public QThread {
 public:
     QString addr;
@@ -3849,11 +3920,17 @@ public:
     QString parentIface;
     QString childIface;
     QDBusMessage pingReply;
+    QDBusMessage daemonPingReply;
+    QSemaphore *sem = nullptr;
+    qint64 pingSentMs = 0;
 
     void run() override {
         QDBusConnection c = QDBusConnection::connectToBus(addr, connName);
-        if (!c.isConnected())
+        if (!c.isConnected()) {
+            if (sem)
+                sem->release();
             return;
+        }
         QDBusMessage spawn = QDBusMessage::createMethodCall(service, parentPath, parentIface,
                                                             QStringLiteral("spawn"));
         spawn.setArguments({childName});
@@ -3861,6 +3938,13 @@ public:
             service, parentPath + QLatin1Char('/') + childName, childIface, QStringLiteral("ping"));
         QDBusPendingCall s = c.asyncCall(spawn, 8000);
         QDBusPendingCall p = c.asyncCall(ping, 8000);
+        QDBusMessage daemonPing = QDBusMessage::createMethodCall(
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+            QStringLiteral("org.freedesktop.DBus.Peer"), QStringLiteral("Ping"));
+        daemonPingReply = c.call(daemonPing, QDBus::Block, 8000);
+        pingSentMs = QDateTime::currentMSecsSinceEpoch();
+        if (sem)
+            sem->release();
         s.waitForFinished();
         p.waitForFinished();
         pingReply = p.reply();
@@ -3882,13 +3966,16 @@ void TestDBusAdaptor::testCaptureSubtreeOrderedDispatch() {
         "  service: 'org.dbusqml.NoCap'\n"
         "  path: '/nocap'\n"
         "  iface: 'org.dbusqml.Cap'\n"
+        "  property var spawnRanMs: 0\n"
         "  function spawn(name) {\n"
+        "    spawnRanMs = Date.now()\n"
         "    Qt.createQmlObject(\"import DBus 1.0; DBusAdaptor { path: '/nocap/\" + name + \"'; "
         "iface: 'org.dbusqml.Child'; function ping() { return 'pong' } }\", this)\n"
         "  }\n"
         "}");
     QVERIFY(ctrl != nullptr);
 
+    QSemaphore semCtrl(0);
     SpawnThenPingWorker wctrl;
     wctrl.addr = addr;
     wctrl.connName = QStringLiteral("worker-nocap");
@@ -3897,16 +3984,25 @@ void TestDBusAdaptor::testCaptureSubtreeOrderedDispatch() {
     wctrl.childName = QStringLiteral("r1");
     wctrl.parentIface = QStringLiteral("org.dbusqml.Cap");
     wctrl.childIface = QStringLiteral("org.dbusqml.Child");
+    wctrl.sem = &semCtrl;
     wctrl.start();
-    QThread::msleep(200);
+    semCtrl.acquire();
+    // evidence, not proof — the barrier proves the daemon forwarded both
+    // calls before the handler ran; when the destination's manager thread
+    // performed the lookup is not observable from outside Qt; the control
+    // leg's UnknownObject is the observation that the race formed under
+    // this timing.
+    QThread::msleep(50);
     QElapsedTimer tctrl;
     tctrl.start();
     while (!wctrl.isFinished() && tctrl.elapsed() < 8000)
         QTest::qWait(20);
     QVERIFY(wctrl.wait(1000));
+    QCOMPARE(wctrl.daemonPingReply.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(wctrl.pingReply.type(), QDBusMessage::ErrorMessage);
     QCOMPARE(wctrl.pingReply.errorName(),
              QStringLiteral("org.freedesktop.DBus.Error.UnknownObject"));
+    QVERIFY(ctrl->property("spawnRanMs").toLongLong() >= wctrl.pingSentMs);
     delete ctrl;
 
     QObject *cap = createQmlAdaptor(
@@ -3917,13 +4013,16 @@ void TestDBusAdaptor::testCaptureSubtreeOrderedDispatch() {
         "  path: '/cap'\n"
         "  iface: 'org.dbusqml.Cap'\n"
         "  captureSubtree: true\n"
+        "  property var spawnRanMs: 0\n"
         "  function spawn(name) {\n"
+        "    spawnRanMs = Date.now()\n"
         "    Qt.createQmlObject(\"import DBus 1.0; DBusAdaptor { path: '/cap/\" + name + \"'; "
         "iface: 'org.dbusqml.Child'; function ping() { return 'pong' } }\", this)\n"
         "  }\n"
         "}");
     QVERIFY2(cap != nullptr, "captureSubtree property must exist");
 
+    QSemaphore semCap(0);
     SpawnThenPingWorker wcap;
     wcap.addr = addr;
     wcap.connName = QStringLiteral("worker-cap");
@@ -3932,16 +4031,25 @@ void TestDBusAdaptor::testCaptureSubtreeOrderedDispatch() {
     wcap.childName = QStringLiteral("r1");
     wcap.parentIface = QStringLiteral("org.dbusqml.Cap");
     wcap.childIface = QStringLiteral("org.dbusqml.Child");
+    wcap.sem = &semCap;
     wcap.start();
-    QThread::msleep(200);
+    semCap.acquire();
+    // evidence, not proof — the barrier proves the daemon forwarded both
+    // calls before the handler ran; when the destination's manager thread
+    // performed the lookup is not observable from outside Qt; the control
+    // leg's UnknownObject is the observation that the race formed under
+    // this timing.
+    QThread::msleep(50);
     QElapsedTimer tcap;
     tcap.start();
     while (!wcap.isFinished() && tcap.elapsed() < 8000)
         QTest::qWait(20);
     QVERIFY(wcap.wait(1000));
+    QCOMPARE(wcap.daemonPingReply.type(), QDBusMessage::ReplyMessage);
     QCOMPARE(wcap.pingReply.type(), QDBusMessage::ReplyMessage);
     QVERIFY(!wcap.pingReply.arguments().isEmpty());
     QCOMPARE(wcap.pingReply.arguments().first().toString(), QStringLiteral("pong"));
+    QVERIFY(cap->property("spawnRanMs").toLongLong() >= wcap.pingSentMs);
     delete cap;
 }
 
@@ -4060,6 +4168,37 @@ void TestDBusAdaptor::testCaptureSubtreePropertiesOnChild() {
     delete cap;
 }
 
+// Capture Qt messages (defined before first use). Messages are also
+// forwarded to stderr for debugging.
+class LifecycleMessageCapture {
+public:
+    LifecycleMessageCapture() : m_prior(qInstallMessageHandler(record)) { s_active = this; }
+    ~LifecycleMessageCapture() {
+        s_active = nullptr;
+        qInstallMessageHandler(m_prior);
+    }
+
+    bool contains(const QString &needle) const {
+        for (const QString &m : std::as_const(messages))
+            if (m.contains(needle))
+                return true;
+        return false;
+    }
+    void clear() { messages.clear(); }
+
+    QStringList messages;
+
+private:
+    static LifecycleMessageCapture *s_active;
+    QtMessageHandler m_prior;
+    static void record(QtMsgType, const QMessageLogContext &, const QString &msg) {
+        if (s_active)
+            s_active->messages.append(msg);
+        std::fprintf(stderr, "%s\n", qPrintable(msg));
+    }
+};
+LifecycleMessageCapture *LifecycleMessageCapture::s_active = nullptr;
+
 void TestDBusAdaptor::testCaptureSubtreeAbsentPathUnknownObject() {
     QObject *cap = createQmlAdaptor("import DBus 1.0\n"
                                     "DBusAdaptor {\n"
@@ -4073,16 +4212,7 @@ void TestDBusAdaptor::testCaptureSubtreeAbsentPathUnknownObject() {
 
     QLoggingCategory::setFilterRules(QStringLiteral("dbusqml.dispatch.debug=true"));
     const QString unique = QDBusConnection::sessionBus().baseService();
-    static QStringList s_dispatchLogs;
-    static QtMessageHandler s_prevHandler;
-    s_dispatchLogs.clear();
-    s_prevHandler = qInstallMessageHandler(
-        [](QtMsgType type, const QMessageLogContext &ctx, const QString &msg) {
-            if (QLatin1String(ctx.category) == QLatin1String("dbusqml.dispatch"))
-                s_dispatchLogs.append(msg);
-            if (s_prevHandler)
-                s_prevHandler(type, ctx, msg);
-        });
+    LifecycleMessageCapture capture;
 
     QDBusMessage boom = QDBusMessage::createMethodCall(
         QStringLiteral("org.dbusqml.T4Cap"), QStringLiteral("/T4cap/absent"),
@@ -4092,10 +4222,13 @@ void TestDBusAdaptor::testCaptureSubtreeAbsentPathUnknownObject() {
     QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.UnknownObject"));
     QCOMPARE(reply.errorMessage(), QStringLiteral("No such object path '/T4cap/absent'"));
 
-    qInstallMessageHandler(s_prevHandler);
     QLoggingCategory::setFilterRules(QString());
-    QCOMPARE(s_dispatchLogs.size(), 1);
-    QVERIFY2(s_dispatchLogs.first().contains(unique), qPrintable(s_dispatchLogs.first()));
+    int hits = 0;
+    for (const QString &m : std::as_const(capture.messages)) {
+        if (m.contains(QStringLiteral("no object at")) && m.contains(unique))
+            ++hits;
+    }
+    QCOMPARE(hits, 1);
 
     delete cap;
 }
@@ -4334,16 +4467,18 @@ void TestDBusAdaptor::testCaptureSubtreeExactlyOneReply() {
     const quint32 serial =
         oracleCallAdaptor(QStringLiteral("org.dbusqml.T10Cap"), QStringLiteral("/T10cap/r1"),
                           QStringLiteral("org.dbusqml.Child"), QStringLiteral("Ping"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serial != 0);
-    QTest::qWait(200);
-    QCOMPARE(oracleReceivedCount(serial), 1u);
+    QCOMPARE(oracleSettledCount(serial, 1u), 1u);
 
     const quint32 serialAbsent =
         oracleCallAdaptor(QStringLiteral("org.dbusqml.T10Cap"), QStringLiteral("/T10cap/absent"),
                           QStringLiteral("org.dbusqml.Child"), QStringLiteral("Ping"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serialAbsent != 0);
-    QTest::qWait(200);
-    QCOMPARE(oracleReceivedCount(serialAbsent), 1u);
+    QCOMPARE(oracleSettledCount(serialAbsent, 1u), 1u);
 
     QObject *nocap = createQmlAdaptor("import DBus 1.0\n"
                                       "DBusAdaptor {\n"
@@ -4356,50 +4491,444 @@ void TestDBusAdaptor::testCaptureSubtreeExactlyOneReply() {
     const quint32 serial2 =
         oracleCallAdaptor(QStringLiteral("org.dbusqml.T10NoCap"), QStringLiteral("/T10nocap"),
                           QStringLiteral("org.dbusqml.Cap"), QStringLiteral("Ping"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serial2 != 0);
-    QTest::qWait(200);
-    QCOMPARE(oracleReceivedCount(serial2), 1u);
+    QCOMPARE(oracleSettledCount(serial2, 1u), 1u);
 
     const quint32 serialNoCapAbsent = oracleCallAdaptor(
         QStringLiteral("org.dbusqml.T10NoCap"), QStringLiteral("/T10nocap/absent"),
         QStringLiteral("org.dbusqml.Child"), QStringLiteral("Ping"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serialNoCapAbsent != 0);
-    QTest::qWait(200);
-    QCOMPARE(oracleReceivedCount(serialNoCapAbsent), 1u);
+    QCOMPARE(oracleSettledCount(serialNoCapAbsent, 1u), 1u);
 
     delete child;
     delete cap;
     delete nocap;
 }
 
-// H6c — null-adaptor send() is unreachable through ~DBusAdaptor (that
-// path sendError's parented held replies before the QPointer nulls). Pin
-// the defensive loud path directly: an unparented DBusHeldReply whose
-// adaptor is deleted, then send().
+void TestDBusAdaptor::testCaptureSubtreeChildFallbackErrors() {
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.F1Cap'\n"
+                                    "  path: '/F1cap'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "  function ping() { return 'root' }\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+    QObject *child = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  path: '/F1cap/r1'\n"
+                                      "  iface: 'org.dbusqml.Child'\n"
+                                      "  function ping() { return 'pong' }\n"
+                                      "}");
+    QVERIFY(child != nullptr);
+
+    QDBusMessage noMethod = QDBusMessage::createMethodCall(QStringLiteral("org.dbusqml.F1Cap"),
+                                                           QStringLiteral("/F1cap/r1"), QString(),
+                                                           QStringLiteral("noSuchMethod"));
+    QDBusMessage noMethodReply = QDBusConnection::sessionBus().call(noMethod, QDBus::Block, 3000);
+    QCOMPARE(noMethodReply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(noMethodReply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.UnknownMethod"));
+    QCOMPARE(noMethodReply.errorMessage(),
+             QStringLiteral("No such method 'noSuchMethod' in any interface at object path "
+                            "'/F1cap/r1' (signature '')"));
+
+    QDBusMessage noIface = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.F1Cap"), QStringLiteral("/F1cap/r1"),
+        QStringLiteral("org.dbusqml.Missing"), QStringLiteral("boom"));
+    QDBusMessage noIfaceReply = QDBusConnection::sessionBus().call(noIface, QDBus::Block, 3000);
+    QCOMPARE(noIfaceReply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(noIfaceReply.errorName(),
+             QStringLiteral("org.freedesktop.DBus.Error.UnknownInterface"));
+    QCOMPARE(noIfaceReply.errorMessage(),
+             QStringLiteral("No such interface 'org.dbusqml.Missing' at object path '/F1cap/r1'"));
+
+    const QString xml =
+        introspectXml(QStringLiteral("org.dbusqml.F1Cap"), QStringLiteral("/F1cap/r1"));
+    QVERIFY2(xml.contains(QStringLiteral("org.dbusqml.Child")), qPrintable(xml));
+
+    delete child;
+    delete cap;
+}
+
+void TestDBusAdaptor::testCaptureSubtreeInterfacelessIntrospect() {
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.R1Cap'\n"
+                                    "  path: '/R1cap'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "  function ping() { return 'root' }\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+    QObject *child = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  path: '/R1cap/r1'\n"
+                                      "  iface: 'org.dbusqml.Child'\n"
+                                      "  property int n: 1\n"
+                                      "  function ping() { return 'pong' }\n"
+                                      "}");
+    QVERIFY(child != nullptr);
+    QObject *plain = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  service: 'org.dbusqml.R1Plain'\n"
+                                      "  path: '/R1plain'\n"
+                                      "  iface: 'org.dbusqml.Child'\n"
+                                      "  property int n: 1\n"
+                                      "}");
+    QVERIFY(plain != nullptr);
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage intro = QDBusMessage::createMethodCall(QStringLiteral("org.dbusqml.R1Cap"),
+                                                        QStringLiteral("/R1cap/r1"), QString(),
+                                                        QStringLiteral("Introspect"));
+    QDBusMessage introReply = bus.call(intro, QDBus::Block, 3000);
+    QCOMPARE(introReply.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(!introReply.arguments().isEmpty());
+    const QString xml = introReply.arguments().first().toString();
+    QVERIFY2(xml.contains(QStringLiteral("org.dbusqml.Child")), qPrintable(xml));
+
+    QDBusMessage gaChild = QDBusMessage::createMethodCall(QStringLiteral("org.dbusqml.R1Cap"),
+                                                          QStringLiteral("/R1cap/r1"), QString(),
+                                                          QStringLiteral("GetAll"));
+    gaChild.setArguments({QStringLiteral("org.dbusqml.Child")});
+    QDBusMessage gaChildReply = bus.call(gaChild, QDBus::Block, 3000);
+    QDBusMessage gaPlain = QDBusMessage::createMethodCall(QStringLiteral("org.dbusqml.R1Plain"),
+                                                          QStringLiteral("/R1plain"), QString(),
+                                                          QStringLiteral("GetAll"));
+    gaPlain.setArguments({QStringLiteral("org.dbusqml.Child")});
+    QDBusMessage gaPlainReply = bus.call(gaPlain, QDBus::Block, 3000);
+    QCOMPARE(gaChildReply.type(), gaPlainReply.type());
+
+    delete plain;
+    delete child;
+    delete cap;
+}
+
+static QString dumpParityReply(const QDBusMessage &m) {
+    return QStringLiteral("type=%1 errorName=%2 errorMessage=%3 nargs=%4")
+        .arg(int(m.type()))
+        .arg(m.errorName(), m.errorMessage())
+        .arg(m.arguments().size());
+}
+
+static QString normalizeParityPath(QString text, const QString &path) {
+    return text.replace(path, QStringLiteral("<P>"));
+}
+
+static QStringList xmlInterfaceNames(const QString &xml) {
+    QStringList names;
+    QRegularExpression re(QStringLiteral("<interface name=\"([^\"]+)\""));
+    QRegularExpressionMatchIterator it = re.globalMatch(xml);
+    while (it.hasNext())
+        names.append(it.next().captured(1));
+    names.sort();
+    names.removeDuplicates();
+    return names;
+}
+
+static QDBusMessage parityCall(const QString &service, const QString &path, const QString &iface,
+                               const QString &member, const QVariantList &args) {
+    QDBusMessage m = QDBusMessage::createMethodCall(service, path, iface, member);
+    if (!args.isEmpty())
+        m.setArguments(args);
+    return QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+}
+
+void TestDBusAdaptor::testCaptureSubtreeChildParity() {
+    QObject *plain = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  service: 'org.dbusqml.ParityPlain'\n"
+                                      "  path: '/parityPlain/obj'\n"
+                                      "  iface: 'org.dbusqml.Parity'\n"
+                                      "  property int prop: 7\n"
+                                      "  function ping() { return 'pong' }\n"
+                                      "}");
+    QVERIFY(plain != nullptr);
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.ParityCap'\n"
+                                    "  path: '/parityCap'\n"
+                                    "  iface: 'org.dbusqml.ParityRoot'\n"
+                                    "  captureSubtree: true\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+    QObject *child = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  path: '/parityCap/child'\n"
+                                      "  iface: 'org.dbusqml.Parity'\n"
+                                      "  property int prop: 7\n"
+                                      "  function ping() { return 'pong' }\n"
+                                      "}");
+    QVERIFY(child != nullptr);
+
+    const QString plainSvc = QStringLiteral("org.dbusqml.ParityPlain");
+    const QString plainPath = QStringLiteral("/parityPlain/obj");
+    const QString childSvc = QStringLiteral("org.dbusqml.ParityCap");
+    const QString childPath = QStringLiteral("/parityCap/child");
+    const QString introspectable = QStringLiteral("org.freedesktop.DBus.Introspectable");
+    const QString properties = QStringLiteral("org.freedesktop.DBus.Properties");
+    const QString parityIface = QStringLiteral("org.dbusqml.Parity");
+
+    enum RowKind { Compare, Xml };
+
+    const struct {
+        const char *id;
+        QString iface;
+        QString member;
+        QVariantList args;
+        RowKind kind;
+    } rows[] = {
+        {"1", parityIface, QStringLiteral("ping"), {}, Compare},
+        {"2", parityIface, QStringLiteral("nope"), {}, Compare},
+        {"3", QStringLiteral("org.dbusqml.Missing"), QStringLiteral("ping"), {}, Compare},
+        {"4", QString(), QStringLiteral("ping"), {}, Compare},
+        {"5", QString(), QStringLiteral("nope"), {}, Compare},
+        {"6", QString(), QStringLiteral("Introspect"), {}, Xml},
+        {"6b", QString(), QStringLiteral("Introspect"), {QStringLiteral("x")}, Compare},
+        {"7", introspectable, QStringLiteral("Introspect"), {}, Xml},
+        {"7b", introspectable, QStringLiteral("Introspect"), {QStringLiteral("x")}, Compare},
+        {"7c", introspectable, QStringLiteral("introspect"), {}, Compare},
+        {"8", introspectable, QStringLiteral("Bogus"), {}, Compare},
+        {"9", QString(), QStringLiteral("Get"), {parityIface, QStringLiteral("prop")}, Compare},
+        {"9b", QString(), QStringLiteral("Get"), {QStringLiteral("x")}, Compare},
+        {"10", QString(), QStringLiteral("GetAll"), {parityIface}, Compare},
+        {"10b", QString(), QStringLiteral("GetAll"), {QString()}, Compare},
+        {"11",
+         QString(),
+         QStringLiteral("Set"),
+         {parityIface, QStringLiteral("prop"), QVariant::fromValue(QDBusVariant(8))},
+         Compare},
+        {"11b",
+         QString(),
+         QStringLiteral("Set"),
+         {QStringLiteral("a"), QStringLiteral("b")},
+         Compare},
+        {"12", properties, QStringLiteral("Get"), {parityIface, QStringLiteral("prop")}, Compare},
+        {"13",
+         properties,
+         QStringLiteral("Get"),
+         {QStringLiteral("org.dbusqml.Missing"), QStringLiteral("prop")},
+         Compare},
+        {"14", properties, QStringLiteral("GetAll"), {parityIface}, Compare},
+        {"15", properties, QStringLiteral("Bogus"), {}, Compare},
+        {"16", properties, QStringLiteral("Get"), {parityIface}, Compare},
+    };
+
+    QStringList fails;
+    for (const auto &row : rows) {
+        const QDBusMessage pr = parityCall(plainSvc, plainPath, row.iface, row.member, row.args);
+        const QDBusMessage cr = parityCall(childSvc, childPath, row.iface, row.member, row.args);
+        const QString ctx =
+            QStringLiteral("row %1\n  plain: %2\n  child: %3")
+                .arg(QString::fromLatin1(row.id), dumpParityReply(pr), dumpParityReply(cr));
+        if (pr.type() != cr.type()) {
+            fails << ctx;
+            continue;
+        }
+        if (row.kind == Xml) {
+            if (pr.arguments().isEmpty() || cr.arguments().isEmpty()) {
+                fails << ctx;
+                continue;
+            }
+            const QString pxml = pr.arguments().first().toString();
+            const QString cxml = cr.arguments().first().toString();
+            const QStringList pif = xmlInterfaceNames(pxml);
+            const QStringList cif = xmlInterfaceNames(cxml);
+            if (pif != cif || !pif.contains(properties) || !cif.contains(properties) ||
+                cxml.contains(QStringLiteral("org.dbusqml.ParityRoot"))) {
+                fails << ctx + QStringLiteral("\n  pif=") + pif.join(',') +
+                             QStringLiteral(" cif=") + cif.join(',');
+            }
+            continue;
+        }
+        if (pr.type() == QDBusMessage::ErrorMessage) {
+            const QString ptext = normalizeParityPath(pr.errorMessage(), plainPath);
+            const QString ctext = normalizeParityPath(cr.errorMessage(), childPath);
+            if (pr.errorName() != cr.errorName() || ptext != ctext) {
+                fails << ctx + QStringLiteral("\n  ptext=") + ptext + QStringLiteral("\n  ctext=") +
+                             ctext;
+            }
+        } else {
+            QVariantList pa;
+            for (const QVariant &a : pr.arguments())
+                pa.append(unwrapDbus(a));
+            QVariantList ca;
+            for (const QVariant &a : cr.arguments())
+                ca.append(unwrapDbus(a));
+            if (pa != ca)
+                fails << ctx;
+        }
+    }
+    QVERIFY2(fails.isEmpty(), qPrintable(fails.join(QStringLiteral("\n---\n"))));
+
+    // Row 20: unknown-interface + NO_REPLY_EXPECTED. expected==0 returns
+    // immediately from the poll; the 500 ms quiet window is the declared
+    // observation bound (PARITY §5).
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+    const quint32 childSerial = oracleCallAdaptorNoReply(
+        childSvc, childPath, QStringLiteral("org.dbusqml.Missing"), QStringLiteral("ping"));
+    QCOMPARE(oracleSettledCount(childSerial, 0u), 0u);
+    const quint32 plainSerial = oracleCallAdaptorNoReply(
+        plainSvc, plainPath, QStringLiteral("org.dbusqml.Missing"), QStringLiteral("ping"));
+    const quint32 plainCount = oracleSettledCount(plainSerial, 1u);
+    qInfo("row 20 plain ReceivedCount=%u", plainCount);
+    QVERIFY2(plainCount == 1u,
+             "Qt's bottom fallback replied to a no-reply call, as documented in PARITY §3");
+
+    delete child;
+    delete cap;
+    delete plain;
+}
+
+void TestDBusAdaptor::testCaptureSubtreeChildColocatedAgree() {
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.B1Cap'\n"
+                                    "  path: '/B1cap'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "  function ping() { return 'root' }\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+
+    QObject *a1 = createQmlAdaptor("import DBus 1.0\n"
+                                   "DBusAdaptor {\n"
+                                   "  path: '/B1cap/a'\n"
+                                   "  iface: 'org.dbusqml.A1'\n"
+                                   "  captureSubtree: true\n"
+                                   "  function ping() { return 'a1' }\n"
+                                   "}");
+    QVERIFY(a1 != nullptr);
+    QObject *a2 = createQmlAdaptor("import DBus 1.0\n"
+                                   "DBusAdaptor {\n"
+                                   "  path: '/B1cap/a'\n"
+                                   "  iface: 'org.dbusqml.A2'\n"
+                                   "  captureSubtree: true\n"
+                                   "  function ping() { return 'a2' }\n"
+                                   "}");
+    QVERIFY(a2 != nullptr);
+
+    QDBusMessage c1 = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.B1Cap"), QStringLiteral("/B1cap/a"),
+        QStringLiteral("org.dbusqml.A1"), QStringLiteral("ping"));
+    QDBusMessage r1 = QDBusConnection::sessionBus().call(c1, QDBus::Block, 3000);
+    QCOMPARE(r1.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r1.arguments().first().toString(), QStringLiteral("a1"));
+
+    QDBusMessage c2 = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.B1Cap"), QStringLiteral("/B1cap/a"),
+        QStringLiteral("org.dbusqml.A2"), QStringLiteral("ping"));
+    QDBusMessage r2 = QDBusConnection::sessionBus().call(c2, QDBus::Block, 3000);
+    QCOMPARE(r2.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(r2.arguments().first().toString(), QStringLiteral("a2"));
+
+    QObject *b1 = createQmlAdaptor("import DBus 1.0\n"
+                                   "DBusAdaptor {\n"
+                                   "  path: '/B1cap/b'\n"
+                                   "  iface: 'org.dbusqml.B1'\n"
+                                   "  captureSubtree: true\n"
+                                   "  function ping() { return 'b1' }\n"
+                                   "}");
+    QVERIFY(b1 != nullptr);
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("captureSubtree mismatch at")));
+    QObject *b2 = createQmlAdaptor("import DBus 1.0\n"
+                                   "DBusAdaptor {\n"
+                                   "  path: '/B1cap/b'\n"
+                                   "  iface: 'org.dbusqml.B2'\n"
+                                   "  function ping() { return 'b2' }\n"
+                                   "}");
+    QVERIFY(b2 != nullptr);
+    const QString xmlb =
+        introspectXml(QStringLiteral("org.dbusqml.B1Cap"), QStringLiteral("/B1cap/b"));
+    QVERIFY2(xmlb.contains(QStringLiteral("org.dbusqml.B1")), qPrintable(xmlb));
+    QVERIFY2(!xmlb.contains(QStringLiteral("org.dbusqml.B2")), qPrintable(xmlb));
+
+    delete b2;
+    delete b1;
+    delete a2;
+    delete a1;
+    delete cap;
+}
+
+// H6c — unparenting is the only way to reach this branch; production always
+// parents. Name leg: real method-call so Failed is reply-required. Count
+// leg: the same shape through the oracle, ReceivedCount == 1.
 void TestDBusAdaptor::testHeldReplyNullAdaptorLoud() {
-    auto *adaptor = new TestAdaptor;
-    adaptor->setService(QStringLiteral("org.dbusqml.H6c"));
-    adaptor->setPath(QStringLiteral("/H6c"));
-    adaptor->setIface(QStringLiteral("org.dbusqml.H6c"));
-    adaptor->classBegin();
-    adaptor->componentComplete();
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.H6c'\n"
+                                        "  path: '/H6c'\n"
+                                        "  iface: 'org.dbusqml.H6c'\n"
+                                        "  property var saved: null\n"
+                                        "  function hold() { saved = holdReply(); }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
 
-    DBusHeldReply reply;
-    // A signal is not reply-required: createErrorReply on a never-sent
-    // method-call (serial 0) aborts in libdbus. Production send() sees
-    // real incoming calls; this pin is the warning + settle.
-    QDBusMessage msg = QDBusMessage::createSignal(
-        QStringLiteral("/H6c"), QStringLiteral("org.dbusqml.H6c"), QStringLiteral("Foo"));
-    reply.setContext(adaptor, msg, QDBusConnection::sessionBus(), QStringLiteral("Foo"));
-
+    QDBusPendingCallWatcher *watcher =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.H6c"), QStringLiteral("/H6c"),
+                          QStringLiteral("org.dbusqml.H6c"), QStringLiteral("hold"));
+    QTRY_VERIFY_WITH_TIMEOUT(adaptor->property("saved").value<QObject *>() != nullptr, 3000);
+    DBusHeldReply *reply =
+        qobject_cast<DBusHeldReply *>(adaptor->property("saved").value<QObject *>());
+    QVERIFY(reply != nullptr);
+    reply->setParent(nullptr);
     delete adaptor;
 
     QTest::ignoreMessage(QtWarningMsg,
                          QRegularExpression(QStringLiteral("adaptor destroyed before send")));
-    reply.send();
+    reply->send();
 
-    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("already settled")));
-    reply.send();
+    QSignalSpy spy(watcher, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    QDBusMessage nameReply = watcher->reply();
+    QCOMPARE(nameReply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(nameReply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+    QCOMPARE(nameReply.errorMessage(), QStringLiteral("adaptor destroyed before reply"));
+    delete reply;
+    delete watcher;
+
+    QProcess *oracle = startOracle();
+    QVERIFY2(oracle != nullptr, "oracle binary not built (libdbus-1-dev missing?)");
+    QObject *adaptor2 = createQmlAdaptor("import DBus 1.0\n"
+                                         "import QtQml 2.15\n"
+                                         "DBusAdaptor {\n"
+                                         "  service: 'org.dbusqml.H6c2'\n"
+                                         "  path: '/H6c2'\n"
+                                         "  iface: 'org.dbusqml.H6c'\n"
+                                         "  property var saved: null\n"
+                                         "  function hold() { saved = holdReply(); }\n"
+                                         "}");
+    QVERIFY(adaptor2 != nullptr);
+    auto *poll = new QTimer(this);
+    poll->setInterval(0);
+    QObject::connect(poll, &QTimer::timeout, this, [adaptor2, poll]() {
+        DBusHeldReply *r =
+            qobject_cast<DBusHeldReply *>(adaptor2->property("saved").value<QObject *>());
+        if (!r)
+            return;
+        poll->stop();
+        poll->deleteLater();
+        r->setParent(nullptr);
+        delete adaptor2;
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression(QStringLiteral("adaptor destroyed before send")));
+        r->send();
+        delete r;
+    });
+    poll->start();
+    const quint32 serial =
+        oracleCallAdaptor(QStringLiteral("org.dbusqml.H6c2"), QStringLiteral("/H6c2"),
+                          QStringLiteral("org.dbusqml.H6c"), QStringLiteral("Hold"));
+    QVERIFY(serial != 0);
+    QCOMPARE(oracleSettledCount(serial, 1u, 3000), 1u);
 }
 
 // Commit 11 (dispatcher deadlock resolution) — deterministic stress for the
@@ -4656,40 +5185,6 @@ void TestDBusAdaptor::testConcurrentAttachSurvives() {
     }
     QVERIFY(true);
 }
-
-// Capture Qt messages (defined before first use by the T1 relay G5
-// test): the QML destroy() refusal ("Invalid attempt to
-// destroy() an indestructible object") is a qmlError/qWarning, not a JS
-// exception — try/catch in QML cannot see it. Messages are also forwarded to
-// stderr for debugging.
-class LifecycleMessageCapture {
-public:
-    LifecycleMessageCapture() : m_prior(qInstallMessageHandler(record)) { s_active = this; }
-    ~LifecycleMessageCapture() {
-        s_active = nullptr;
-        qInstallMessageHandler(m_prior);
-    }
-
-    bool contains(const QString &needle) const {
-        for (const QString &m : std::as_const(messages))
-            if (m.contains(needle))
-                return true;
-        return false;
-    }
-    void clear() { messages.clear(); }
-
-    QStringList messages;
-
-private:
-    static LifecycleMessageCapture *s_active;
-    QtMessageHandler m_prior;
-    static void record(QtMsgType, const QMessageLogContext &, const QString &msg) {
-        if (s_active)
-            s_active->messages.append(msg);
-        std::fprintf(stderr, "%s\n", qPrintable(msg));
-    }
-};
-LifecycleMessageCapture *LifecycleMessageCapture::s_active = nullptr;
 
 // Foreign-thread T1 G5 holder (C++ DBusAdaptor: the delivery path
 // under test is nameAcquiredInternal emit, identical for QML holders).
@@ -9418,9 +9913,10 @@ void TestDBusAdaptor::testOracleSensitivityDoubleReply() {
     const quint32 serial =
         oracleCallAdaptor(QStringLiteral("org.dbusqml.DoubleSend"), QStringLiteral("/DoubleSend"),
                           QStringLiteral("org.dbusqml.DoubleSend"), QStringLiteral("Ping"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serial != 0);
-    QTest::qWait(500); // both replies flushed
-    QCOMPARE(oracleReceivedCount(serial), 2u);
+    QCOMPARE(oracleSettledCount(serial, 2u), 2u);
 
     QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.DoubleSend"));
     QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/DoubleSend"));
@@ -9438,9 +9934,10 @@ void TestDBusAdaptor::testOracleSensitivitySingleError() {
     const quint32 serial =
         oracleCallAdaptor(QStringLiteral("org.dbusqml.SingleErr"), QStringLiteral("/SingleErr"),
                           QStringLiteral("org.dbusqml.SingleErr"), QStringLiteral("Ping"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serial != 0);
-    QTest::qWait(500);
-    QCOMPARE(oracleReceivedCount(serial), 1u);
+    QCOMPARE(oracleSettledCount(serial, 1u), 1u);
 
     QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.SingleErr"));
     QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/SingleErr"));
@@ -9458,9 +9955,10 @@ void TestDBusAdaptor::testOracleSensitivityDoubleError() {
     const quint32 serial =
         oracleCallAdaptor(QStringLiteral("org.dbusqml.DoubleErr"), QStringLiteral("/DoubleErr"),
                           QStringLiteral("org.dbusqml.DoubleErr"), QStringLiteral("Ping"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serial != 0);
-    QTest::qWait(500);
-    QCOMPARE(oracleReceivedCount(serial), 2u);
+    QCOMPARE(oracleSettledCount(serial, 2u), 2u);
 
     QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.DoubleErr"));
     QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/DoubleErr"));
@@ -9477,9 +9975,10 @@ void TestDBusAdaptor::testOracleSensitivityErrorThenReturn() {
     const quint32 serial =
         oracleCallAdaptor(QStringLiteral("org.dbusqml.ErrRet"), QStringLiteral("/ErrRet"),
                           QStringLiteral("org.dbusqml.ErrRet"), QStringLiteral("Ping"));
+    QVERIFY2(s_lastOracleCallMs < 2000,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serial != 0);
-    QTest::qWait(500);
-    QCOMPARE(oracleReceivedCount(serial), 2u);
+    QCOMPARE(oracleSettledCount(serial, 2u), 2u);
 
     QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.ErrRet"));
     QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/ErrRet"));
@@ -9496,6 +9995,8 @@ void TestDBusAdaptor::testOracleSensitivityNoReply() {
     const quint32 serial =
         oracleCallAdaptor(QStringLiteral("org.dbusqml.NoReply"), QStringLiteral("/NoReply"),
                           QStringLiteral("org.dbusqml.NoReply"), QStringLiteral("Ping"));
+    QVERIFY2(s_lastOracleCallMs >= 4500,
+             qPrintable(QStringLiteral("oracle call took %1 ms").arg(s_lastOracleCallMs)));
     QVERIFY(serial != 0);
     QCOMPARE(oracleReceivedCount(serial), 0u);
 

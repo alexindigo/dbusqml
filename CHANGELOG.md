@@ -186,6 +186,11 @@ infrastructure that materially affects consumer trust).
   sensitivity self-tests (1 → 1, 2 → 2, none → 0).
 - **Wire oracle gains `CallAdaptorNoReply`** — observes replies to calls
   that asked for none.
+- **Oracle pins no longer stall** — the harness called the wire
+  oracle with a blocking `QDBus::Block` while the oracle called back into
+  the same thread; every pin waited out the oracle's 5 s timeout. Now async
+  with a pumped wait; each pin bounds its own wall time (< 2 s), the
+  deliberate no-reply case pins the timeout path.
 
 ### Docs
 
