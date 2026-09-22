@@ -33,3 +33,9 @@ checklist the executor runs BEFORE handing a candidate to the ceremony.
 - Version bump is the tip commit (`CMakeLists.txt` VERSION only),
   signed, monotone, real dates; push-time timeshift per the owner
   ruling on record (2026-09-07 = holiday = weekend).
+- Changelog bookkeeping in the same commit: the `[Unreleased]` section
+  header becomes the released version with the real date, its link
+  reference is repointed at the tag, a fresh empty `[Unreleased]`
+  section (with compare link) opens above it, and a `[x.y.z]` link
+  reference is added at the file bottom (canonical section order:
+  Added, Changed, Deprecated, Removed, Fixed, Security, Quality).

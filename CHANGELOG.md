@@ -1,140 +1,170 @@
 # Changelog
 
-## [VERSION-TBD]
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Sections per release, in canonical order: Added, Changed, Deprecated,
+Removed, Fixed, Security, Quality (project extension for test and CI
+infrastructure that materially affects consumer trust).
+
+## [Unreleased]
 
 ### Added
 
-- **T1 owner-change delivery via main-thread relay** (defect fix): the
-  manager thread no longer touches adaptors — value-only notes to a
-  process-lifetime relay, holders re-resolved on the main thread
-  (concilium-unanimous candidate 4; G1–G5 gate green).
-- **P5 bus connection-loss handling**: `connected` property +
-  `disconnected()` signal on connections; proxies flip `status=Error` +
+- **T1 owner-change delivery via main-thread relay** — the manager thread
+  no longer touches adaptors: value-only notes go to a process-lifetime
+  relay, and holders are re-resolved on the main thread.
+- **Bus connection-loss handling** — `connected` property and
+  `disconnected()` signal on connections; proxies flip `status=Error` and
   `serviceAvailable=false` with match teardown; adaptor claims emit
   `nameLost`. No automatic resubscribe (documented).
-- **Caller identification**: `callerService()` on adaptor (dispatch
-  only) + caller on `DBusHeldReply` (captured at hold time).
-- **P10a served option-whitelist**: `_options` per-method map, xdp
-  drop/error semantics; `InvalidArgs` on mistype.
-- **P10b sender authorization**: `allowedSender` adaptor property,
-  `AccessDenied` on mismatch (methods + Properties).
-- **P8 failed-Set handling**: `propertyWriteFailed(name, errorName,
-  message)` signal on rejected writes. (Superseded before release: see
-  the re-fetch entry under Changed.)
-- **P9 concurrent Get/Set dedupe**: in-flight Get coalesced (one wire
-  call); Set latest-wins queue. No new surface.
-- **Held-reply TTL**: `heldReplyTimeout` (ms, default 0=off); expiry
-  settles with `Failed` ("reply timed out") + warn; settle cancels.
+- **Caller identification** — `callerService()` on adaptor (dispatch only)
+  and caller on `DBusHeldReply` (captured at hold time).
+- **Served option whitelist** — `_options` per-method map with
+  xdg-desktop-portal drop/error semantics; `InvalidArgs` on mistype.
+- **Sender authorization** — `allowedSender` adaptor property;
+  `AccessDenied` on mismatch (methods and Properties).
+- **Failed-write notification** — `propertyWriteFailed(name, errorName,
+  message)` signal on rejected writes; the proxy then re-fetches the
+  property from the service (see Changed).
+- **Concurrent Get/Set dedupe** — in-flight Get coalesced into one wire
+  call; Set is latest-wins queued. No new surface.
+- **Held-reply TTL** — `heldReplyTimeout` (ms, default 0 = off); expiry
+  settles with `Failed` ("reply timed out") and warns; settle cancels the
+  timer.
 
 ### Changed
 
-- **Deferred-deletion window documented as defined behavior** (was:
-  tracked ambiguity): adaptor serves until its destructor runs (pin
-  test); API.md lifecycle note.
-- **Invalid-fd sentinel unified on `-1`** (was: single `h` → JS
-  `undefined`, `ah` element → `-1`): one consumer check covers both
-  (D4, owner-vetoable at V1).
-- **`holdReply()`/`callerService()` documented JS-handler-only** (D2):
-  the C++ `Q_INVOKABLE` fallback runs after the dispatch scope closes.
-- **Introspection stays public under `allowedSender`** (xdp posture,
-  D3): the dispatcher answers Introspectable before the adaptor gate;
-  a well-known `allowedSender` value now warns at attach (never matches
-  a unique name).
-- **Adaptor identity is attach-time-only**: post-attach
-  service/path/iface/connection mutation warns + ignored (was: silent
-  wire-identity split + registry leak).
-- **Declared top-level `v` wraps in `QDBusVariant`** (was: plain returns
-  marshaled as their own type while XML advertises `v`).
-- **`getProperty` sends the wire name** (was: QML name — split
-  `Version`/`version` failed where Set succeeded).
-- **Failed writes re-fetch from the service** (behavior change, supersedes
-  the P8 rollback design before release — owner Call 3): a rejected `Set`
-  issues a `Properties.Get` for the key once the write chain settles and
-  the server's value lands in the map — the proxy never invents a value
-  (no local rollback). `propertyWriteFailed` fires unchanged (consumer
-  hook for gesture policy); a failed re-fetch keeps the current value
-  with a loud warning.
-- **Strict signature gate at depth 32** (was: 64 while walkers cap at
-  32 — unmarshalable shapes burned process-global slots).
-- **Completed replies are handed to the JS GC** (behavior change): at
-  completion a `DBusPendingReply` is unparented and marked
-  `JavaScriptOwnership` — synchronously, in the completion's own stack
-  frame (the 27a5f72 posted-handoff attempt died in ccaade6; the
-  synchronous form survives the full engine-teardown matrix under ASan,
-  spike-proven before landing). Fire-and-forget calls no longer
-  accumulate reply objects on the connection; callers that keep a
-  reference keep the reply (late subscribers are safe by construction).
-  Pure C++ consumers (no engine) keep parented ownership. The
-  promise-style `asyncCall` overload manages its reply C++-side
-  (unchanged; it never crosses into JS and opts out of the handoff).
-- **Strict option typing** (behavior change): the `_options` filter
-  iterates the declared keys and delivers the **typed** (coerced) value;
-  a declared key with a wrong-kind (scalar-for-list, list-for-map,
-  container-for-scalar) or non-convertible value is rejected with
-  `InvalidArgs` and the handler never runs (was: a post-marshal
-  same-kind check that coerced almost anything through, delivering the
-  raw caller value).
-- **Empty option allow-list denies all keys** (behavior change):
-  `_options: { Method: {} }` filters with zero declared keys — every
-  caller key is dropped, the handler receives `{}` (was: collapsed to
+- **BREAKING: Strict option typing** — the `_options` filter iterates the
+  declared keys and delivers the typed (coerced) value; a declared key with
+  a wrong-kind or non-convertible value is rejected with `InvalidArgs` and
+  the handler never runs (was: a post-marshal same-kind check that coerced
+  almost anything through, delivering the raw caller value).
+- **BREAKING: Empty option allow-list denies all keys** —
+  `_options: { Method: {} }` filters with zero declared keys: every caller
+  key is dropped and the handler receives `{}` (was: collapsed to
   no-entry, allow-all).
+- **BREAKING: Failed writes re-fetch from the service** — a rejected `Set`
+  issues a `Properties.Get` for the key once the write chain settles, and
+  the server's value lands in the map; the proxy never invents a value
+  (was: local rollback inference). `propertyWriteFailed` fires unchanged as
+  the consumer hook for gesture policy; a failed re-fetch keeps the current
+  value with a loud warning.
+- **BREAKING: Completed replies are handed to the JS GC** — at completion
+  a `DBusPendingReply` is unparented and marked `JavaScriptOwnership`,
+  synchronously in the completion's own stack frame. Fire-and-forget calls
+  no longer accumulate reply objects on the connection; callers that keep
+  a reference keep the reply. Pure C++ consumers (no engine) keep parented
+  ownership; the promise-style `asyncCall` overload manages its reply
+  C++-side (unchanged; it never crosses into JS).
+- **Deferred-deletion window documented as defined behavior** (was:
+  tracked ambiguity) — an adaptor serves until its destructor runs (pinned
+  by test); API.md lifecycle note.
+- **Invalid-fd sentinel unified on `-1`** (was: single `h` → JS
+  `undefined`, `ah` element → `-1`) — one consumer check covers both.
+- **`holdReply()`/`callerService()` documented JS-handler-only** — the C++
+  `Q_INVOKABLE` fallback runs after the dispatch scope closes; C++ services
+  are pointed at `QDBusConnection::registerObject` + `QDBusContext`.
+- **Introspection stays public under `allowedSender`** (xdp posture) —
+  the dispatcher answers Introspectable before the adaptor gate; a
+  well-known `allowedSender` value now warns at attach (it can never match
+  a unique name).
+- **Adaptor identity is attach-time-only** — post-attach
+  service/path/iface/connection mutation warns and is ignored (was: silent
+  wire-identity split plus registry leak).
+- **Declared top-level `v` wraps in `QDBusVariant`** (was: plain returns
+  marshaled as their own type while XML advertised `v`).
+- **`getProperty` sends the wire name** (was: the QML name — split
+  `Version`/`version` failed where Set succeeded).
+- **Strict signature gate at depth 32** (was: 64 while the walkers cap at
+  32 — unmarshalable shapes burned process-global signature slots).
 
 ### Fixed
 
-- **Held-reply error-name validation shared** (CF-1): `sendError` runs
-  the B11 grammar + Failed fallback (was: invalid dotted name = zero
-  replies); send results checked loud; `send`/`expire` audited.
-- **Idempotent `holdReply()`** (CF-2): second hold in one dispatch
-  returns the same handle (was: second authority + TTL timer,
-  double-reply surface).
-- **Uncapped `firstCompleteType` `a`-recursion** (CF-3, remote crash):
-  depth-32 cap + strict re-check in `writeBySignature` (was: 200k `a`
-  prefix = SIGSEGV).
-- **Map/array container close-on-fail** (CF-9): probe-then-commit
-  staging (was: `return false` mid-`begin*`, half-open `QDBusArgument`).
-- **Loss-probe ping storm** (CF-5): 3000 ms single-shot re-arm gate on
-  both twins (was: 98 idle pings/s; proxy twin never re-armed).
-- **Promise-`asyncCall` reply leak** (CF-11): `deleteLater()` after
+- **Engine teardown errors held replies** (was: a shell live-reload with a
+  portal dialog open stranded the caller forever) — declarative adaptors
+  hook the engine's destruction and settle outstanding held replies with
+  `Failed` before the world disappears.
+- **Held-reply error-name validation shared** — `sendError` runs the same
+  grammar check and `Failed` fallback as the throw path (was: an invalid
+  dotted name produced zero replies for the serial); send results are
+  checked and loud; `send`/`expire` audited.
+- **Idempotent `holdReply()`** — a second hold in one dispatch returns the
+  same handle (was: a second settlement authority plus a second TTL timer —
+  a double-reply surface).
+- **Uncapped walker recursion** — `firstCompleteType` is depth-capped at
+  32 like every other walker, with a strict re-check in `writeBySignature`
+  (was: a 200k-deep `a…a` prefix in peer-supplied introspection XML
+  SIGSEGV'd the process — remotely triggerable).
+- **Map/array containers close on failure** — probe-then-commit staging
+  (was: early `return` mid-`begin*` left a half-open `QDBusArgument`).
+- **Loss-probe ping storm** — the connection probe re-arms through a
+  3000 ms single-shot timer on both the connection and proxy paths (was:
+  98 idle pings per second per connection; the proxy twin never re-armed
+  after startup).
+- **Promise-style `asyncCall` reply leak** — the reply is deleted after
   settle (was: unbounded growth on the immortal connection).
-- **Stale re-fetch overwrite** (CF-10): epoch + destination snapshot
-  (was: same-service repoint contaminated across iface/path).
-- **Queued-Set cross-fire** (CF-15): drain sends to the snapshot
-  destination (was: live members, new service got the old value).
-- **Declared `h`/`o`/`g` post-coercion guard** (CF-8): the marshaled
-  value is re-guarded before send (was: guard ran pre-marshal only).
-- **Second same-name holder `nameAcquired`** (CF-19): late joiner on an
-  owned claim notified directly (was: silent — no watch transition).
-- **Nested int64 precision** (CF-20): recursive converter (was:
-  nested > 2^53 rounded through double).
-- **Raw-dict PropertiesChanged** (CF-21): unwrap before cast (was:
-  `QDBusArgument`-shaped dict → empty map, stale UI).
-- **`emitSignal` claim per emission** (CF-26): once per service value
-  (was: blocking round-trip per signal).
-- **SignalRelay lifetime discipline** (CF-28): `QPointer` + checks
+- **Stale re-fetch overwrite** — an epoch plus destination snapshot guards
+  invalidated-property re-fetches (was: a same-service repoint could
+  contaminate across interface/path).
+- **Queued Set cross-fire** — the drain sends to the snapshot destination
+  (was: a repoint mid-queue redirected an earlier value at the new
+  service).
+- **Post-coercion reply guard for declared `h`/`o`/`g`** — the marshaled
+  value is re-guarded before send (was: the guard ran on the pre-marshal
+  value only).
+- **Second same-name holder `nameAcquired`** — a late joiner on an owned
+  claim is notified directly (was: silent — no watch transition).
+- **Nested int64 precision** — the dispatch-arg converter is recursive
+  (was: nested > 2^53 values rounded through double).
+- **Raw-dict `PropertiesChanged`** — the changed-dict is unwrapped before
+  the cast (was: a `QDBusArgument`-shaped dict produced an empty map and a
+  stale UI).
+- **`emitSignal` claims the service once per value** (was: a blocking
+  daemon round-trip per emission).
+- **`SignalRelay` lifetime discipline** — `QPointer` plus null checks
   (was: raw pointer, unchecked).
-- **Teardown on the attach connection** (CF-29): captured by value
-  (was: re-resolved — session-bus fallback leaked the claim).
-- **Dangling-pointer deref in option validation** (CF-6): copy by value
-  (was: `&loop-local` dereferenced after scope end).
-- **Dead `advertisedName` ternary** (CF-30): removed.
-- **Settle stops the TTL timer** (CF-27): stored on the reply (was:
-  comment promised, timer outlived its purpose).
+- **Teardown targets the attach-time connection** — captured by value
+  (was: re-resolved — a dead connection QML sibling made detach fall back
+  to the session bus, leaking the claim).
+- **Dangling pointer in option validation** — the meta-method is copied by
+  value (was: a loop-local's address dereferenced after scope end).
+- **Dead `advertisedName` ternary removed**.
+- **Settle stops the TTL timer** — the timer is stored on the reply (was:
+  the comment promised a cancel that never happened; the timer outlived
+  its purpose).
+- **Two real marshal leaks fixed, not suppressed** — the half-open struct
+  branch and a `QVariant` string-literal retention, found when the ASan
+  ODR mask was removed; tests now link the library.
 
 ### Quality
 
-- Four exploratory campaigns (engine-reload/hot-restart, GC pressure,
-  multi-connection aliasing, large-payload smoke) — all quiet except
-  one FD2b-tracked finding (QQmlEngine teardown with a hold
-  outstanding does not error the caller; raw adaptor delete does).
-- API.md current-state additions per shipped phase; PARITY.md gains
-  axioms 6 (rewritten), 9b, 9c.
+- **The TSan gate is a verdict-layer classifier** — complete-report
+  parsing with fail-closed ambiguity; an identity register for
+  investigated Qt-internal noise matched on four layers (report type →
+  stack arrangement → site offsets → binary BuildId), evidence-blocked,
+  inert pending revalidation on unvalidated Qt builds; a per-job canary
+  battery (pure race, mixed-instrumentation race, known-foreign class)
+  plus an independent cross-check; the CI verdict is owned by the
+  classifier, with a racy canary that must be caught before silence
+  counts.
+- **Sanitizer suppressions are typed, symbol-named, and evidence-blocked**
+  (LSan and TSan); the ASan ODR mask is gone (tests link the library).
+- **Wire oracle observes both directions** — its own `ReplyCount` plus a
+  caller-mode `ReceivedCount` driven in-suite through the held-reply pins,
+  with a deliberate double-send sensitivity self-test.
+- **Fuzzers exercise the real symbols** with megabyte-scale inputs and
+  hostile corpora (the remote-crash class is fuzzer-visible pre-fix).
+- **Zero `QEXPECT_FAIL` remain** — the engine-teardown expected-fail pin
+  became a real green test when the fix landed; the four exploratory
+  campaigns' one open finding is resolved. PARITY.md gained rewritten
+  axioms 6, 9b, 9c.
+- **Test hygiene** — late-joiner `nameAcquired` pin; per-test statics
+  reset.
 
-
-All notable changes to this project are documented here. Format loosely
-follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
-follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [0.9.1] — 2026-09-06
+## [0.9.1] - UNRELEASED
 
 ### Fixed
 
@@ -193,49 +223,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   empty-iface adaptors dedupe in merged introspection; dead residues
   removed; user-callback exceptions in asyncCall are logged.
 
-## [0.9.0] — 2026-09-02
+## [0.9.0] - 2026-09-02
 
 ### Added
 
-- **fd quartet + `fdUrl` on `DBusUtils`.** QML had no fd I/O — the `ay`
-  codec gap again, this time for file descriptors. `openFd`/`writeFd`/
-  `readFd`/`closeFd` make a received `h` usable from QML (receiver-closes
-  is now dischargeable via `closeFd`), and `fdUrl` maps a regular-file fd
-  to `file:///proc/self/fd/N` for path-based consumers. Documented caveats:
-  `fdUrl` is regular-file-only (streams use `readFd`/`writeFd`); the URL is
-  valid only while the fd stays open.
-
-### Changed
-
-- **Truthful served surface — the naming ladder.** Served introspection XML,
-  `GetAll` keys, `PropertiesChanged` names, and method in-arg types now
-  resolve through explicit (`_signals`, `_members`) → declared (catalog) →
-  stable inference (the deterministic first-character fold,
-  `readOne` ⇄ `ReadOne`). **Wire change:** undeclared QML members are
-  advertised wire-cased on the bus (`ReadOne`, not `readOne`), and
-  QML-declared plain signals broadcast under their folded wire names
-  (`SomethingHappened`, not `somethingHappened`). Subscribers matching the
-  old lowercase names must update their match rules.
-- **`PropertiesChanged` replaces the accidental notify-signal relays.**
-  Property changes now emit the standard
-  `org.freedesktop.DBus.Properties.PropertiesChanged`; the `fooChanged`
-  broadcast signals are gone (unmarshalable values report via
-  `invalidated_properties`). dbusqml clients (which always subscribed to
-  `PropertiesChanged`) now see dbusqml adaptors' property changes —
-  reactivity works end-to-end; consumers that polled as a workaround can
-  stop.
-- **Shadowing a built-in property errors at load.** `service`, `path`,
-  `iface`, `connection` are `FINAL` — a QML `property string path` on an
-  adaptor is a load-time error instead of a silently broken adaptor.
-- **64-bit values above 2^53 are delivered as full-precision decimal
-  strings.** QML's JS engine has no BigInt (spike-confirmed); a qint64/
-  quint64 that doesn't round-trip through a double would silently lose
-  precision as a JS number. Values within 2^53 stay plain numbers. The
-  send path accepts decimal strings with declared `x`/`t`, making the
-  round-trip lossless end-to-end.
-
-### Added
-
+- **fd quartet + `fdUrl` on `DBusUtils`** — QML had no fd I/O:
+  `openFd`/`writeFd`/`readFd`/`closeFd` make a received `h` usable from
+  QML (receiver-closes is now dischargeable via `closeFd`), and `fdUrl`
+  maps a regular-file fd to `file:///proc/self/fd/N` for path-based
+  consumers. Caveats: `fdUrl` is regular-file-only (streams use
+  `readFd`/`writeFd`); the URL is valid only while the fd stays open.
 - **`_signals` / `_members`** — explicit wire-name declarations:
   `_signals` maps wire signal names to concatenated arg signatures (served
   in introspection; `emitSignal` remains the send path); `_members` aliases
@@ -271,6 +268,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (dbus-next + Nemo shape) with the receiver-closes lifetime; send via a
   plain int fd + declared `h`; container positions (`ah`) covered.
 
+### Changed
+
+- **Truthful served surface — the naming ladder** — served introspection
+  XML, `GetAll` keys, `PropertiesChanged` names, and method in-arg types
+  now resolve through explicit (`_signals`, `_members`) → declared
+  (catalog) → stable inference (the deterministic first-character fold,
+  `readOne` ⇄ `ReadOne`). **Wire change:** undeclared QML members are
+  advertised wire-cased on the bus (`ReadOne`, not `readOne`), and
+  QML-declared plain signals broadcast under their folded wire names
+  (`SomethingHappened`, not `somethingHappened`). Subscribers matching the
+  old lowercase names must update their match rules.
+- **`PropertiesChanged` replaces the accidental notify-signal relays** —
+  property changes now emit the standard
+  `org.freedesktop.DBus.Properties.PropertiesChanged`; the `fooChanged`
+  broadcast signals are gone (unmarshalable values report via
+  `invalidated_properties`). dbusqml clients (which always subscribed to
+  `PropertiesChanged`) now see dbusqml adaptors' property changes —
+  reactivity works end-to-end; consumers that polled as a workaround can
+  stop.
+- **Shadowing a built-in property errors at load** — `service`, `path`,
+  `iface`, `connection` are `FINAL`: a QML `property string path` on an
+  adaptor is a load-time error instead of a silently broken adaptor.
+- **64-bit values above 2^53 are delivered as full-precision decimal
+  strings** — QML's JS engine has no BigInt (spike-confirmed); a qint64/
+  quint64 that doesn't round-trip through a double would silently lose
+  precision as a JS number. Values within 2^53 stay plain numbers. The
+  send path accepts decimal strings with declared `x`/`t`, making the
+  round-trip lossless end-to-end.
+
 ### Fixed
 
 - **Spec-cased property dispatch** — `Properties.Get`/`Set` accept the
@@ -285,7 +311,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`signaturesChanged` no longer leaks into served introspection** (nor
   the new `_signalsChanged`/`_membersChanged`).
 
-## [0.8.0] — 2026-08-29
+## [0.8.0] - 2026-08-29
 
 ### Changed
 
@@ -308,7 +334,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   settle notification) is deleted; GC-rooting of the adaptor during its own
   dispatch is spike-verified (the dispatch's `QJSValue` is a GC root).
 
-## [0.7.0] — 2026-08-28
+## [0.7.0] - 2026-08-28
+
+### Added
+
+- **`DBusAdaptor.unregister()`** — deterministic retirement of a dynamically
+  created adaptor, independent of GC timing: frees the object path and
+  releases the service reference immediately, errors out outstanding held
+  replies (same code the destructor runs), and leaves the QObject alive for
+  QML to drop whenever. One-way: re-registration after `unregister()` is not
+  supported; a second call warns and does nothing. Covers the "free the bus
+  path NOW, collect the object later" case — e.g. a caller-side `Close` on a
+  portal Request object.
 
 ### Fixed
 
@@ -328,18 +365,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   held-reply interplay, declarative pin, `unregister()`, leak-count
   regression) now pins this dimension permanently.
 
-### Added
-
-- **`DBusAdaptor.unregister()`** — deterministic retirement of a dynamically
-  created adaptor, independent of GC timing: frees the object path and
-  releases the service reference immediately, errors out outstanding held
-  replies (same code the destructor runs), and leaves the QObject alive for
-  QML to drop whenever. One-way: re-registration after `unregister()` is not
-  supported; a second call warns and does nothing. Covers the "free the bus
-  path NOW, collect the object later" case — e.g. a caller-side `Close` on a
-  portal Request object.
-
-## [0.6.0] — 2026-08-28
+## [0.6.0] - 2026-08-28
 
 ### Changed
 
@@ -374,14 +400,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and loud-fail to inference; unparseable `_signatures` values warn instead
   of being silently inert.
 
-### Added
+### Quality
 
 - **Adversarial input matrix** — hostile value classes (null, objects,
   functions, NaN/±Infinity, embedded-NUL and 1 MB strings, empty and deeply
   nested containers, cyclic objects/arrays, malformed signatures) swept
   across every marshal exit and pinned as permanent regression tests.
 
-## [0.5.2] — 2026-08-28
+## [0.5.2] - 2026-08-28
 
 ### Fixed
 
@@ -404,7 +430,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a healthy, still-serving adaptor. The destructor now only detaches
   registrations that were actually attached.
 
-## [0.5.1] — 2026-08-27
+## [0.5.1] - 2026-08-27
+
+### Changed
+
+- **Interface-scoped method routing** — calls that carry an interface name
+  now route only to an adaptor declaring that interface (and
+  `Properties.Get/GetAll/Set` route by the interface argument), whereas
+  interface-less calls keep the member-name dispatch across adaptors. On
+  0.5.0 a single adaptor served members of *several* interfaces by ignoring
+  the message interface; that workaround must be split into co-located
+  adaptors (the pattern 0.5.1 enables), or its foreign-interface members
+  become unreachable when called with the interface name set. (Documented
+  retroactively in 0.5.2.)
 
 ### Fixed
 
@@ -420,19 +458,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the survivors. Introspection of a shared path merges every attached
   adaptor's interface block.
 
-### Changed (documented retroactively in 0.5.2)
-
-- **Method calls that carry an interface name now route only to an adaptor
-  declaring that interface** — the multi-adaptor dispatcher routes
-  interface-scoped calls by interface match (and `Properties.Get/GetAll/Set`
-  by the interface argument), whereas interface-less calls keep the
-  member-name dispatch across adaptors. On 0.5.0 a single adaptor served
-  members of *several* interfaces by ignoring the message interface; that
-  workaround must be split into co-located adaptors (the pattern 0.5.1
-  enables), or its foreign-interface members become unreachable when called
-  with the interface name set.
-
-## [0.5.0] — 2026-08-25
+## [0.5.0] - 2026-08-25
 
 ### Added
 
@@ -470,7 +496,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `variant(variant(x))` still produces an explicit inner variant. Fixes 0.4.0
   behavior.
 
-## [0.4.0] — 2026-08-25
+## [0.4.0] - 2026-08-25
 
 ### Added
 
@@ -517,7 +543,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   silently dropping the bus connection. Unmarshalable signal args are warned
   and skipped.
 
-## [0.3.1] — 2026-08-12
+## [0.3.1] - 2026-08-12
+
+### Added
+
+- **`DBus::Struct` value type** (`struct_` in QML) — wraps a
+  `QVariantList` and marshals via `beginStructure`/`endStructure`.
+  Enables struct-typed D-Bus values like `(ddd)` accent-color and
+  `(uu)` StateReason. In method replies and signal args the struct is
+  emitted through a writable `QDBusArgument` (QtDBus can't register a
+  fixed signature for a variable-member struct).
+- **Nested gadget unwrap in plain maps** — `toDbusVariant` recurses
+  into `QVariantMap` values, so QML object literals returned from
+  adaptor methods (`{ ns: { key: new DBusQML.variant(1) } }`) marshal
+  as proper `a{sa{sv}}` with variant payloads.
 
 ### Fixed
 
@@ -537,33 +576,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   longer leak into the served XML. Signal args typed from
   `parameterTypes()` instead of hardcoded `v`.
 
-### Added
-
-- **`DBus::Struct` value type** (`struct_` in QML) — wraps a
-  `QVariantList` and marshals via `beginStructure`/`endStructure`.
-  Enables struct-typed D-Bus values like `(ddd)` accent-color and
-  `(uu)` StateReason. In method replies and signal args the struct is
-  emitted through a writable `QDBusArgument` (QtDBus can't register a
-  fixed signature for a variable-member struct).
-- **Nested gadget unwrap in plain maps** — `toDbusVariant` recurses
-  into `QVariantMap` values, so QML object literals returned from
-  adaptor methods (`{ ns: { key: new DBusQML.variant(1) } }`) marshal
-  as proper `a{sa{sv}}` with variant payloads.
-
-## [0.3.0] — 2026-08-12
-
-### Breaking
-
-- **Reactive bindings always on** — `DBUSQML_REACTIVE_BINDINGS` CMake
-  option removed. Catalog/introspection pre-population of `null`
-  placeholders is unconditional. Properties known from catalog or
-  introspection read as `null` (not `undefined`) before the real D-Bus
-  value arrives. `reactiveBindingsSupported` is hardwired `true`.
-  `qt6-dbusqml-reactive` AUR package is obsolete — use `qt6-dbusqml`.
-- **`ay` reads as `ArrayBuffer`** — byte arrays consistently arrive as
-  JS `ArrayBuffer` (was inconsistent: string or array-like depending on
-  the code path). Use `DBusUtils.textFromBytes(buf)` for UTF-8 text
-  (e.g. SSIDs), or index via `new Uint8Array(buf)`.
+## [0.3.0] - 2026-08-12
 
 ### Added
 
@@ -587,6 +600,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `AccessPoint`, `Settings`, `Settings.Connection`. Synchronous
   placeholder pre-population and typed signatures for NM sub-objects.
 
+### Changed
+
+- **BREAKING: Reactive bindings always on** — `DBUSQML_REACTIVE_BINDINGS`
+  CMake option removed. Catalog/introspection pre-population of `null`
+  placeholders is unconditional. Properties known from catalog or
+  introspection read as `null` (not `undefined`) before the real D-Bus
+  value arrives. `reactiveBindingsSupported` is hardwired `true`.
+  The `qt6-dbusqml-reactive` AUR package is obsolete — use `qt6-dbusqml`.
+- **BREAKING: `ay` reads as `ArrayBuffer`** — byte arrays consistently
+  arrive as JS `ArrayBuffer` (was inconsistent: string or array-like
+  depending on the code path). Use `DBusUtils.textFromBytes(buf)` for UTF-8
+  text (e.g. SSIDs), or index via `new Uint8Array(buf)`.
+
 ### Fixed
 
 - **`aa{...}` demarshaling** — arrays of dicts (NM `Ip4Config.AddressData`)
@@ -600,7 +626,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   eliminated from all nested paths — the libdbus crash vector is
   eliminated structurally.
 
-## [0.2.5] — 2026-08-10
+## [0.2.5] - 2026-08-10
+
+### Changed
+
+- **Reply values are real JS values** — `DBusPendingReply::value`/`values`
+  return `QJSValue` with real JS `Array`/`Object` instances (working
+  `Array.isArray`, `.map`, `.filter`). C++ consumers use
+  `valueVariant()`/`valuesVariant()` for raw data.
 
 ### Fixed
 
@@ -634,13 +667,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Method name injection** — dynamic methods installed via shared JS
   factory, not string-interpolated evaluate.
 
-### Changed
-
-- `DBusPendingReply::value`/`values` return `QJSValue` with real JS
-  `Array`/`Object` instances (working `Array.isArray`, `.map`, `.filter`).
-  C++ consumers use `valueVariant()`/`valuesVariant()` for raw data.
-
-## [0.2.4] — 2026-08-10
+## [0.2.4] - 2026-08-10
 
 ### Fixed
 
@@ -656,7 +683,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Qt::QueuedConnection` so synchronous `reply.finished.connect()` after
   `call()` always lands before the signal fires.
 
-## [0.2.3] — 2026-08-09
+## [0.2.3] - 2026-08-09
 
 ### Fixed
 
@@ -667,7 +694,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fixes fcitx5 `AvailableInputMethods` (`a(ssssssb)`) and
   `CurrentInputMethodInfo` (`sssssssbsa{sv}`) crashes.
 
-## [0.2.2] — 2026-08-09
+## [0.2.2] - 2026-08-09
 
 ### Fixed
 
@@ -681,7 +708,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ag`, `av`) now handled via template dispatch. Removes
   "unsupported signature au" warnings from NetworkManager properties.
 
-## [0.2.1] — 2026-08-09
+## [0.2.1] - 2026-08-09
 
 ### Fixed
 
@@ -695,30 +722,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `onFinished()` and clears the watcher pointer, preventing SIGSEGV when
   QML accesses the reply after the watcher is deleted.
 
-## [0.2.0] — 2026-07-25
+## [0.2.0] - 2026-07-25
 
 ### Added
 
-- `DBUSQML_REACTIVE_BINDINGS` CMake option (default `OFF`). When enabled,
-  DBusProxy pre-populates `null` placeholders for catalog-declared
+- **`DBUSQML_REACTIVE_BINDINGS` CMake option** (default `OFF`) — when
+  enabled, DBusProxy pre-populates `null` placeholders for catalog-declared
   properties BEFORE QML bindings evaluate, so `QQmlPropertyMap`'s
   built-in reactivity handles subsequent D-Bus value updates. Fixes the
   long-standing bug where intermediate `readonly property` layers
   wrapping DBusProxy properties resolved to `false` forever.
-- `reactiveBindingsSupported` QML property on every `DBus` element
-  (`bool`, read-only, constant). Returns `true` when the build includes
+- **`reactiveBindingsSupported` QML property** on every `DBus` element
+  (`bool`, read-only, constant) — returns `true` when the build includes
   the reactive-bindings fix.
-- `types/org.freedesktop.NetworkManager.xml` catalog descriptor with 26
-  property declarations.
+- **`types/org.freedesktop.NetworkManager.xml` catalog descriptor** with
+  26 property declarations.
 
 ### Changed
 
-- `DBusCatalog::InterfaceSpec` gains `properties` (`QStringList`) field.
-  Catalog XML parser now extracts `<property name="..."/>` elements.
-- `dbusqmlConfig.cmake.in` exposes `dbusqml_REACTIVE_BINDINGS` variable
-  to downstream CMake consumers.
+- **`DBusCatalog::InterfaceSpec` gains `properties`** (`QStringList`
+  field) — the catalog XML parser now extracts `<property name="..."/>`
+  elements.
+- **`dbusqmlConfig.cmake.in` exposes `dbusqml_REACTIVE_BINDINGS`** to
+  downstream CMake consumers.
 
-## [0.1.0] — 2026-07-18
+## [0.1.0] - 2026-07-18
 
 Initial release. Requires Qt 6.8 or newer. See
 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) for two upstream Qt bugs users
@@ -726,67 +754,86 @@ on older Qt should be aware of.
 
 ### Added
 
-- `DBus` proxy element with dynamic method dispatch. D-Bus methods
+- **`DBus` proxy element with dynamic method dispatch** — D-Bus methods
   discovered via `Introspect()` are exposed on the element under
   camelCased names and forward through a per-proxy helper.
-- Automatic property discovery via `Properties.GetAll` and
-  `PropertiesChanged` subscription. Nested `a{sv}` / `a{ss}` containers
+- **Automatic property discovery** via `Properties.GetAll` and
+  `PropertiesChanged` subscription — nested `a{sv}` / `a{ss}` containers
   arrive at QML as `QVariantMap` / `QVariantList` (not opaque
   `QDBusArgument`).
-- `DBusAdaptor` (server-side): expose a QML component as a D-Bus object.
-  Method dispatch goes through `QJSValue::callWithInstance` so container
-  arguments round-trip natively.
-- User-land type catalog. Drop XML descriptors into
+- **`DBusAdaptor` (server-side)** — expose a QML component as a D-Bus
+  object; method dispatch goes through `QJSValue::callWithInstance` so
+  container arguments round-trip natively.
+- **User-land type catalog** — drop XML descriptors into
   `$XDG_CONFIG_HOME/dbusqml/types/` (or use bundled defaults for MPRIS,
   Notifications, ScreenSaver, login1.Manager, portal.Settings,
   portal.NetworkMonitor, UPower) so proxies can call methods on services
   that return empty `Introspect()` (e.g., Chromium-based MPRIS players).
   Documented in [`docs/TYPES.md`](docs/TYPES.md).
-- Promise-style `asyncCall(message, resolve, reject)`. `resolve` receives
-  the reply value as a native JS value (`Array.isArray` returns `true` for
-  array replies; objects for `a{sv}`); `reject` receives a single
-  `{ name, message }` error object.
-- `SessionBus` and `SystemBus` singletons; `connectToBus(address)` for
-  peer / custom connections. Each call produces a distinct QtDBus
-  connection name — no more silent handle reuse.
-- Value types (`import DBus 1.0 as DBusQML`): `uint32`, `int32`, `uint64`,
-  `int64`, `uint16`, `int16`, `bool`, `double`, `byte`, `string`,
+- **Promise-style `asyncCall(message, resolve, reject)`** — `resolve`
+  receives the reply value as a native JS value (`Array.isArray` returns
+  `true` for array replies; objects for `a{sv}`); `reject` receives a
+  single `{ name, message }` error object.
+- **`SessionBus` and `SystemBus` singletons; `connectToBus(address)`** for
+  peer / custom connections — each call produces a distinct QtDBus
+  connection name, no silent handle reuse.
+- **Value types** (`import DBus 1.0 as DBusQML`): `uint32`, `int32`,
+  `uint64`, `int64`, `uint16`, `int16`, `bool`, `double`, `byte`, `string`,
   `objectPath`, `signature`, `dict`, `variant`.
-- 13 runnable examples (`simple/*`, `intermediate/*`, `advanced/*`) with a
-  shared `CloseButton` and click-to-copy error messages.
-- CMake package config: downstream projects can now
-  `find_package(dbusqml 0.1 REQUIRED)` and link to
-  `dbusqml::dbusqml`.
-- GitHub Actions CI: matrix build on Qt 6.5.3 and 6.8.2, running C++
+- **13 runnable examples** (`simple/*`, `intermediate/*`, `advanced/*`)
+  with a shared `CloseButton` and click-to-copy error messages.
+- **CMake package config** — downstream projects can
+  `find_package(dbusqml 0.1 REQUIRED)` and link to `dbusqml::dbusqml`.
+- **GitHub Actions CI** — matrix build on Qt 6.5.3 and 6.8.2, running C++
   tests and QML tests on every push and PR.
 
 ### Fixed
 
-- `unwrapDbus` no longer crashes on concrete-type D-Bus arrays. `ao`
+- **`unwrapDbus` no longer crashes on concrete-type D-Bus arrays** — `ao`
   (object-path arrays returned by UPower `EnumerateDevices`, logind
   `ListSessions`, etc.) previously segfaulted inside libdbus. Common
   array signatures (`a{s*}`, `av`, `ao`, `as`, `ay`) are demarshaled
   through their proper C++ target types and flattened for JS.
-- Re-introspection no longer leaks stale method callables. Switching a
-  proxy's `iface` at runtime removes the previous iface's method keys
+- **Re-introspection no longer leaks stale method callables** — switching
+  a proxy's `iface` at runtime removes the previous iface's method keys
   from the property map, clears cached `QJSValue`s, and drops the old
   helper QObject from the engine global.
-- `BatteryMonitor` example delegate widths are bound to the enclosing
+- **`BatteryMonitor` example delegate widths** are bound to the enclosing
   `ListView` explicitly instead of `parent.width`, avoiding the Qt 6
   ListView-delegate `parent`-during-creation footgun.
-- `DBusAdaptor::handleMessage` no longer builds a JS source string to
+- **`DBusAdaptor::handleMessage` no longer builds a JS source string** to
   dispatch to QML methods (container arguments would arrive stringified,
   the global name collided across instances).
 
-### Docs
+### Quality
 
-- `README.md` with tagline, feature bullets, quick-start snippet, and
+- **README.md** — tagline, feature bullets, quick-start snippet, and
   build instructions.
-- `API.md` full API reference, including a "Known Limitations" section
+- **API.md** — full API reference, including a Known Limitations section
   covering the C++-context signal-handler pitfall and the
   runtime-configured proxy async pattern.
-- `DESIGN.md` architecture rewrite: describes the actual dispatch
+- **DESIGN.md** — architecture rewrite: describes the actual dispatch
   (JS closures in `QQmlPropertyMap`, per-proxy `DbusMethodHelper`,
   catalog fallback) and the trade-offs behind the design.
-- `docs/TYPES.md` documenting the user-land catalog.
-- `FutureDevelopment.md` (replaces legacy `DBUS_w_QML.md` scratch notes).
+- **docs/TYPES.md** — documents the user-land catalog.
+- **FutureDevelopment.md** — replaced legacy `DBUS_w_QML.md` scratch
+  notes (later removed when its content was fully absorbed).
+
+[Unreleased]: https://github.com/alexindigo/dbusqml/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/alexindigo/dbusqml/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/alexindigo/dbusqml/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/alexindigo/dbusqml/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/alexindigo/dbusqml/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/alexindigo/dbusqml/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/alexindigo/dbusqml/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/alexindigo/dbusqml/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/alexindigo/dbusqml/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/alexindigo/dbusqml/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/alexindigo/dbusqml/compare/v0.2.5...v0.3.0
+[0.2.5]: https://github.com/alexindigo/dbusqml/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/alexindigo/dbusqml/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/alexindigo/dbusqml/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/alexindigo/dbusqml/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/alexindigo/dbusqml/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/alexindigo/dbusqml/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/alexindigo/dbusqml/releases/tag/v0.1.0
