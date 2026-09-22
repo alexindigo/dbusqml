@@ -447,6 +447,7 @@ private slots:
     void testCaptureSubtreeNestedIgnored();
     void testCaptureSubtreeColocatedMismatchRefused();
     void testCaptureSubtreeExactlyOneReply();
+    void testHeldReplyNullAdaptorLoud();
     void testNameOwnerChangedChurnSurvives();
     void testConcurrentAttachSurvives();
     // T1 relay gate (features train, Phase 2 — concilium-blessed
@@ -4318,6 +4319,36 @@ void TestDBusAdaptor::testCaptureSubtreeExactlyOneReply() {
     delete child;
     delete cap;
     delete nocap;
+}
+
+// H6c — null-adaptor send() is unreachable through ~DBusAdaptor (that
+// path sendError's parented held replies before the QPointer nulls). Pin
+// the defensive loud path directly: an unparented DBusHeldReply whose
+// adaptor is deleted, then send().
+void TestDBusAdaptor::testHeldReplyNullAdaptorLoud() {
+    auto *adaptor = new TestAdaptor;
+    adaptor->setService(QStringLiteral("org.dbusqml.H6c"));
+    adaptor->setPath(QStringLiteral("/H6c"));
+    adaptor->setIface(QStringLiteral("org.dbusqml.H6c"));
+    adaptor->classBegin();
+    adaptor->componentComplete();
+
+    DBusHeldReply reply;
+    // A signal is not reply-required: createErrorReply on a never-sent
+    // method-call (serial 0) aborts in libdbus. Production send() sees
+    // real incoming calls; this pin is the warning + settle.
+    QDBusMessage msg = QDBusMessage::createSignal(
+        QStringLiteral("/H6c"), QStringLiteral("org.dbusqml.H6c"), QStringLiteral("Foo"));
+    reply.setContext(adaptor, msg, QDBusConnection::sessionBus(), QStringLiteral("Foo"));
+
+    delete adaptor;
+
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("adaptor destroyed before send")));
+    reply.send();
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("already settled")));
+    reply.send();
 }
 
 // Commit 11 (dispatcher deadlock resolution) — deterministic stress for the

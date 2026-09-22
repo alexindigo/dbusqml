@@ -2,7 +2,9 @@
 
 #include "dbusadaptor.h"
 #include "dbusconnection.h" // CF-1: wireMarshalable — shared marshal-boundary guard
+#include "dbusutils.h"
 
+#include <QDBusError>
 #include <QQmlEngine>
 
 DBusHeldReply::DBusHeldReply(QObject *parent)
@@ -24,8 +26,19 @@ void DBusHeldReply::send(const QJSValue &value) {
         qWarning("dbusqml: DBusHeldReply already settled - ignoring send");
         return;
     }
+    if (!m_adaptor) {
+        qWarning("dbusqml: held reply for %s: adaptor destroyed before send — replying Failed",
+                 qPrintable(m_member));
+        if (m_msg.isReplyRequired())
+            checkedSend(m_conn,
+                        m_msg.createErrorReply(QDBusError::Failed,
+                                               QStringLiteral("adaptor destroyed before reply")),
+                        "held Failed reply", m_member);
+        settle();
+        return;
+    }
     const QVariant v = value.isUndefined() ? QVariant() : qjsValueToVariant(value);
-    if (m_adaptor && m_msg.isReplyRequired()) // B4: NO_REPLY_EXPECTED — send nothing
+    if (m_msg.isReplyRequired()) // B4: NO_REPLY_EXPECTED — send nothing
         m_adaptor->sendMethodReply(m_conn, m_msg, m_member, v);
     settle();
 }
@@ -42,9 +55,8 @@ void DBusHeldReply::sendError(const QString &name, const QString &message) {
     // unconditional so exactly-one-reply holds either way.
     const auto norm = DBusAdaptor::normalizeErrorName(name, message, false);
     if (m_msg.isReplyRequired()) { // B4: NO_REPLY_EXPECTED — send nothing
-        if (!m_conn.send(m_msg.createErrorReply(norm.first, norm.second)))
-            qWarning("dbusqml: held error reply for %s failed to send: %s", qPrintable(m_member),
-                     qPrintable(m_conn.lastError().message()));
+        checkedSend(m_conn, m_msg.createErrorReply(norm.first, norm.second), "held error reply",
+                    m_member);
     }
     settle();
 }
@@ -73,7 +85,9 @@ void DBusHeldReply::expire() {
         return;
     qWarning("dbusqml: held reply for %s timed out — replying Failed", qPrintable(m_member));
     if (m_msg.isReplyRequired()) // B4: NO_REPLY_EXPECTED — send nothing
-        m_conn.send(m_msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
-                                           QStringLiteral("reply timed out")));
+        checkedSend(m_conn,
+                    m_msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                                           QStringLiteral("reply timed out")),
+                    "held expire", m_member);
     settle();
 }
