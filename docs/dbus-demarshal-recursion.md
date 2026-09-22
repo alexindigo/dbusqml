@@ -10,8 +10,13 @@ v0.3.0 replaced the special-case approach with a fully signature-driven
 recursive demarshaller. `readBySignature` handles all nested containers
 (dicts, struct arrays, arrays of arrays, tuples) via
 `beginStructure`/`beginMap`/`beginMapEntry`/`beginArray` recursion.
-`operator>>(QDBusArgument, QVariant&)` — the libdbus crash path — is
-eliminated from all nested contexts. `unwrapDbus` keeps only top-level
+Typed elements are read by signature
+(`readBySignature`); a `v` element is read as `QVariant` — that is the one
+legitimate `arg >> QVariant` (`dbusutils.cpp:443-445`) because the wire
+element IS a variant; `DBus::Struct`'s demarshaller was the last typed
+context using `QVariant` extraction; `DBusAsArray` previously read a
+`QStringList` (not the crash class) and now shares the walker for
+uniformity. `unwrapDbus` keeps only top-level
 concrete-type fast paths and delegates everything else.
 
 ## The Problem (historical)

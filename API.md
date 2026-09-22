@@ -318,6 +318,7 @@ DBusAdaptor {
     service: "org.freedesktop.impl.portal.atmosphera"
     path: "/org/freedesktop/portal/desktop"
     iface: "org.freedesktop.impl.portal.Settings"
+    captureSubtree: true
 
     // QML properties become D-Bus properties (readable via Properties.Get/GetAll)
     property int colorScheme: 0
@@ -386,10 +387,37 @@ reply with exactly that name; any other thrown value produces
 `nameAcquired`/`nameLost` signals report acquisition (including after
 queueing) and loss to another owner.
 
+**`captureSubtree`:** attach-time (later writes warn and are ignored). Registers the path with QtDBus as `SubPath` so every
+message under the prefix is delivered to dbusqml in bus arrival order.
+Child adaptors are written as today (`DBusAdaptor { path: handle }`) and
+are auto-routed when their path lies under a capturing prefix on the same
+connection. Use it whenever handlers create child adaptors that callers
+may address immediately — portal `Request` objects are the canonical case.
 A captured child answers every request exactly as an uncaptured adaptor
 would (same reply, same error name and text); the only difference capture
 makes is *when* — in arrival order. Sole exception: dbusqml never replies
 to NO_REPLY_EXPECTED calls, where stock Qt's fallback does (PARITY §3).
+
+Rules:
+
+- All co-located adaptors at the path must agree. A mismatching latecomer
+  is refused and not registered (no `nameAcquired`; its iface is absent
+  from Introspect).
+- Refused if paths are already registered beneath the prefix — create the
+  capturing adaptor before its children.
+- Nested capture (`captureSubtree` on a path already under a capturing
+  ancestor) is ignored with a warning; routing stays with the ancestor.
+- Absent paths under a captured prefix answer
+  `org.freedesktop.DBus.Error.UnknownObject` with Qt's exact text
+  (`No such object path '…'`), in arrival order. Debug logging:
+  `QT_LOGGING_RULES="dbusqml.dispatch.debug=true"`.
+
+**Peer:** `org.freedesktop.DBus.Peer` (`Ping`, `GetMachineId`) is answered
+by the D-Bus transport library (libdbus) for every path on every
+connection, before Qt dispatch — as GDBus and sd-bus do in their
+libraries. dbusqml neither serves nor shadows it. Callers on the same
+connection as the adaptor (in-process loopback) bypass the transport and
+receive Qt's `UnknownInterface`; see KNOWN_ISSUES.
 
 **C++ typed returns:** a C++ `Q_INVOKABLE` whose return type is any
 default-constructible type (`QString`, `int`, `QByteArray`, …) round-trips
@@ -412,6 +440,7 @@ DBusAdaptor {
     service: "org.freedesktop.impl.portal.MyShell"
     path: "/org/freedesktop/portal/desktop"
     iface: "org.freedesktop.impl.portal.Settings"
+    captureSubtree: true
 
     // D-Bus ReadOne(ss) → v — called by xdg-desktop-portal as "ReadOne"
     function readOne(ns, key) {
@@ -624,19 +653,27 @@ unique object path, the shape portal backends need (a Request object per
 portal call):
 
 ```qml
-// The Request pattern: create per call, retire per call.
+// The Request pattern: the portal prefix captures its subtree so a
+// Close arriving before the child adaptor finishes attaching is
+// delivered in order (not UnknownObject from QtDBus). Set the flag on
+// EVERY co-located adaptor at this path — first-attached decides.
+DBusAdaptor {
+    service: "org.freedesktop.impl.portal.MyShell"
+    path: "/org/freedesktop/portal/desktop"
+    iface: "org.freedesktop.impl.portal.FileChooser"
+    captureSubtree: true
+    function openFile(handle, appId, parentWindow, title, options) {
+        return requestComp.createObject(null, {
+            path: handle,
+            iface: "org.freedesktop.impl.portal.Request"
+        })
+    }
+}
+
 property Component requestComp: Component {
     DBusAdaptor {
         function close() { destroy(); /* caller cancelled */ }
     }
-}
-
-function newRequest(handle) {
-    return requestComp.createObject(null, {
-        service: "org.freedesktop.impl.portal.MyShell",
-        path: handle,
-        iface: "org.freedesktop.impl.portal.Request"
-    })
 }
 ```
 

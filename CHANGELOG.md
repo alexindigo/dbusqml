@@ -34,6 +34,11 @@ infrastructure that materially affects consumer trust).
 - **Held-reply TTL** — `heldReplyTimeout` (ms, default 0 = off); expiry
   settles with `Failed` ("reply timed out") and warns; settle cancels the
   timer.
+- **`captureSubtree`** — opt-in `SubPath` registration on `DBusAdaptor` so
+  messages under the prefix are delivered to dbusqml in bus arrival order
+  and routed to child adaptors (portal `Request` objects). Absent paths
+  answer `UnknownObject` in order. Co-located adaptors at the path must
+  agree; a mismatching latecomer is refused.
 
 ### Changed
 
@@ -144,6 +149,10 @@ infrastructure that materially affects consumer trust).
 - **Captured children now match plain adaptors for every Qt-handled shape**
   (interface-less `Get`/`Set`, unknown `Properties` members); parity is
   pinned table-wise.
+- **Held reply warns and replies `Failed` when the adaptor is gone at
+  `send()`** (was: silent skip, then settle — a swallowed reply if the
+  path were reached). Unreachable through `~DBusAdaptor` (that path
+  already `sendError`s parented held replies); pinned directly.
 
 ### Quality
 
@@ -169,6 +178,14 @@ infrastructure that materially affects consumer trust).
   axioms 6, 9b, 9c.
 - **Test hygiene** — late-joiner `nameAcquired` pin; per-test statics
   reset.
+
+### Docs
+
+- **The two child-path races** — QtDBus manager-thread lookup vs
+  main-thread registration (remedy: `captureSubtree`) is distinct from
+  the settle race (Close after the Request is destroyed: ecosystem
+  behavior, GTK and KDE both destroy on completion). API.md, KNOWN_ISSUES,
+  PARITY threading contract, README portal snippet.
 
 ## [0.9.1] - UNRELEASED
 

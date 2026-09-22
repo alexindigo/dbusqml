@@ -36,6 +36,18 @@ Button {
 }
 ```
 
+Portal backends whose handlers spawn per-call `Request` adaptors capture
+the subtree so a Close racing attach is delivered in order:
+
+```qml
+DBusAdaptor {
+    service: "org.freedesktop.impl.portal.MyShell"
+    path: "/org/freedesktop/portal/desktop"
+    iface: "org.freedesktop.impl.portal.FileChooser"
+    captureSubtree: true   // on EVERY co-located adaptor at this path
+}
+```
+
 ## Features
 
 - **`DBus {}` proxy element** — methods and properties appear on the object as
@@ -48,13 +60,16 @@ Button {
 - **`DBusAdaptor`** — export QML objects onto the bus with methods, properties,
   and signals declared inline. PascalCase D-Bus members dispatch to camelCase
   QML functions; variant/struct return types marshal correctly (portal-grade
-  serving — e.g. `org.freedesktop.impl.portal.Settings`).
+  serving — e.g. `org.freedesktop.impl.portal.Settings`). Set
+  `captureSubtree: true` on a prefix whose handlers create child adaptors
+  that callers may address immediately (portal `Request` objects).
 - **Deferred replies** — `holdReply()` defers the reply; the returned
   `DBusHeldReply` settles later with `send(value)` / `sendError(name, msg)`.
   A throw after `holdReply()` settles the held reply with the error (never
   silent, never a double reply — sole exception: thrown `undefined`, see
   Known issues). Per-call `Request` adaptors + `unregister()` cover the
-  portal cancel lifecycle.
+  portal cancel lifecycle. Portal backends: `captureSubtree: true` on every
+  co-located adaptor at `/org/freedesktop/portal/desktop`.
 - **Co-location** — multiple adaptors share one path/service; `_signals`
   declares signal arg types, `_members` aliases wire↔QML names, catalog XML
   fills in services with poor introspection (both scan paths: bundled +

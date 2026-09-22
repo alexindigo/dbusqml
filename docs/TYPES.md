@@ -108,3 +108,10 @@ literal, with no per-app override. Explicit `_signatures` overrides beat the
 catalog; only malformed signatures, invalid values, or pool exhaustion warn
 and fall back to inference (every well-formed element signature is
 producible via the signature-slot pool).
+
+## `DBus::Struct` demarshal
+
+`qdbus_cast<DBus::Struct>` yields the same normalized members QML sees
+(object paths and signatures as strings, nested structs as lists —
+whatever `readBySignature` produces). `DBusAsArray` demarshals via the
+same walker.

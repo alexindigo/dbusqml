@@ -56,6 +56,14 @@ held reply, error reply) must apply the SAME guards with the SAME flags:
   timeboxed-subprocess probes for kill-class values).
 - Precedent: C0 (relay guard), A6/A10/D1 (emission types, skip lists),
   B7/B11 (invoke loud-fail, error-name validation).
+- NO_REPLY_EXPECTED is honored at every dbusqml send site (the code tags
+  this B4). Under `captureSubtree`, dbusqml's mirrored fallback on a
+  captured child honors it while Qt's own bottom fallback on a plain
+  adaptor replies anyway — the one documented asymmetry between a captured
+  child and a plain adaptor; pinned by the parity table's row 20.
+- A method miss on a served interface answers `UnknownMethod` (Qt's text)
+  at every dbusqml path, B4-guarded; only an interface no adaptor serves
+  answers `UnknownInterface`.
 
 ## 4. Completion-gated lifecycle for every element
 
@@ -114,18 +122,28 @@ evidence is live:
 - Held-path skips are loud (member named in the warning).
 - Precedent: P0 (for-all-times Phase 0 fix + hold+throw matrix).
 
+The referee counts remote replies of both kinds once each; doubles are
+detected within a declared 500 ms quiet window after the expected count
+(`oracleSettledCount`). Beyond that bound the gate is silent by
+construction — an observation bound, not a proof of finality.
+
 ## 6. No emission from foreign threads
 
 Ownership notifications (`nameAcquired`/`nameLost`) are delivered on the
 main thread via the process-lifetime `OwnerChangeRelay` — no adaptor
-pointer ever crosses a thread (features train, Phase 2). The manager
-thread only records the claim transition and marshals a value-only note;
-the relay re-resolves holders under the lock on the main thread, drops
-the lock, then delivers. Never a `QPointer` check-then-deref on the
+pointer ever crosses a thread (features train, Phase 2). The queued
+lambda records the claim transition on the attach thread and marshals a
+value-only note; the relay re-resolves holders under the lock on the
+main thread, drops the lock, then delivers. Never a `QPointer` check-then-deref on the
 manager thread; queued `invokeMethod` on a raw pointer is NOT
 teardown-safe (still check-then-post). Precedent: T1 (notifier corpse
 067aa01, postEvent corpse t1-spike-findings.md F3, concilium-unanimous
 candidate 4).
+
+Under a captured prefix (`captureSubtree: true`), messages are delivered
+to handlers in bus arrival order. A handler that spins a nested event
+loop can reorder its successors — unsupported, same as today's contract
+(no nested event loops in handlers).
 
 ## 7. No future-work files in-repo (D12)
 
@@ -359,3 +377,8 @@ unsupported: the registry mutex guards the manager thread, not concurrent
 consumer threads. Ownership notifications arrive on the main thread (the
 T1 relay); adaptors on foreign threads get main-thread delivery + a loud
 warning (unsupported, T2 contract).
+
+Under a captured prefix (`captureSubtree: true`), messages under that
+path are delivered to handlers in bus arrival order on the object's
+thread. Nested event loops inside those handlers are unsupported: they
+can reorder successors. Same contract as today's single-node dispatch.

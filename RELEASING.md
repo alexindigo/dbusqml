@@ -14,9 +14,13 @@ checklist the executor runs BEFORE handing a candidate to the ceremony.
 ## Gate 2 — VM gate incl. consumer legs
 
 - The plan's `gate/` harness re-run ×2 (VM reverted before and between).
-- **Tag criterion for 0.9.1: the consumer gate's FileChooser cancel leg
-  is green** (`gate/gate-run.sh` — `cancel-leg-settles`). A red cancel
-  leg blocks the tag unconditionally (council-unanimous).
+- **Tag criterion for 1.0.0 (cancel contract, owner D2):** impl settle by
+  `reply_serial`, no frontend Response, client connection held. A red
+  cancel leg blocks the tag unconditionally.
+- **Tag criterion for 1.0.0 (rapid open/close, owner ruling 2):** the
+  consumer's rapid open/close stress (`filechooser-verify.py stress 20`)
+  is green with `captureSubtree` enabled on the portal prefix — 20/20
+  settles, every Close answered, zero `UnknownObject`. Unconditional.
 
 ## Gate 3 — docs current
 
