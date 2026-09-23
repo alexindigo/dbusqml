@@ -159,20 +159,15 @@ option(BUILD_TEST_MODE "Build the C++ test executables" ON)
 # target while ALSO linking libdbusqml.so produces duplicate
 # staticMetaObject definitions (ASan ODR-violation, previously masked
 # with detect_odr_violation=0). Tests therefore link the library and
-# include only headers; the single exception is test_types, which
-# exercises header-adjacent marshal helpers without the QML module.
+# include only headers.
 if(BUILD_TEST_MODE)
     find_package(Qt6 6.8 REQUIRED COMPONENTS Test)
 
     add_executable(test_types
         tests/test_dbustypes.cpp
-        dbusmessage.cpp
-        dbuserror.h
-        dbustypes.h
-        dbustypes.cpp
     )
     target_include_directories(test_types PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(test_types PRIVATE Qt6::Core Qt6::Qml Qt6::Test Qt6::DBus)
+    target_link_libraries(test_types PRIVATE Qt6::Core Qt6::Qml Qt6::Test Qt6::DBus dbusqml)
 
     add_executable(test_dbus
         tests/test_dbusconnection.cpp
@@ -256,7 +251,7 @@ if(BUILD_TEST_MODE)
         endif()
     endif()
 
-    add_test(NAME test_types COMMAND test_types)
+    add_test(NAME test_types COMMAND dbus-run-session -- $<TARGET_FILE:test_types>)
     add_test(NAME test_introspect COMMAND test_introspect)
     add_test(NAME test_adaptor COMMAND dbus-run-session -- $<TARGET_FILE:test_adaptor>)
     add_test(NAME test_dbus COMMAND dbus-run-session -- $<TARGET_FILE:test_dbus>)

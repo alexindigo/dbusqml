@@ -1,9 +1,36 @@
 #include <QTest>
 #include <QDebug>
+#include <QDBusArgument>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusMetaType>
+#include <QDBusVirtualObject>
 
 #include "../dbustypes.h"
 #include "../dbuserror.h"
 #include "../dbusmessage.h"
+#include "../dbusconnection.h"
+
+class EchoObject : public QDBusVirtualObject {
+public:
+    QString introspect(const QString &) const override { return {}; }
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        conn.send(msg.createReply(msg.arguments()));
+        return true;
+    }
+};
+
+static QDBusMessage echoArg(const QString &path, const QVariant &arg) {
+    EchoObject echo;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    bus.registerVirtualObject(path, &echo);
+    QDBusMessage m =
+        QDBusMessage::createMethodCall(bus.baseService(), path, QString(), QStringLiteral("Echo"));
+    m.setArguments({arg});
+    QDBusMessage r = bus.call(m, QDBus::Block, 3000);
+    bus.unregisterObject(path);
+    return r;
+}
 
 class TestDBusTypes : public QObject {
     Q_OBJECT
@@ -208,6 +235,63 @@ private slots:
         QCOMPARE(wrapped.isValid(), true);
         QCOMPARE(wrapped.name(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
         QCOMPARE(wrapped.message(), QStringLiteral("permission denied"));
+    }
+
+    void testStructDemarshalNested() {
+        if (!QDBusConnection::sessionBus().isConnected())
+            QSKIP("no session bus");
+        QVariantMap dict;
+        dict.insert(QStringLiteral("k"), QStringLiteral("v"));
+        const QVariantList payload = {QVariantList{1, QStringLiteral("x")}, dict,
+                                      QStringList{QStringLiteral("a"), QStringLiteral("b")}};
+        const QVariant wire = writeBySignature(QStringLiteral("((is)a{sv}as)"), payload);
+        QVERIFY(wire.isValid());
+
+        const QDBusMessage r = echoArg(QStringLiteral("/G2struct"), wire);
+        QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+        QVERIFY(!r.arguments().isEmpty());
+        const QDBusArgument reader = qvariant_cast<QDBusArgument>(r.arguments().first());
+        DBus::Struct back;
+        reader >> back;
+        QCOMPARE(back.value.size(), 3);
+        const QVariantList nested = back.value.at(0).toList();
+        QCOMPARE(nested.size(), 2);
+        QCOMPARE(nested.at(0).toInt(), 1);
+        QCOMPARE(nested.at(1).toString(), QStringLiteral("x"));
+        QCOMPARE(back.value.at(1).toMap().value(QStringLiteral("k")).toString(),
+                 QStringLiteral("v"));
+        QCOMPARE(back.value.at(2).toStringList(),
+                 (QStringList{QStringLiteral("a"), QStringLiteral("b")}));
+
+        const DBus::Struct casted =
+            qdbus_cast<DBus::Struct>(qvariant_cast<QDBusArgument>(r.arguments().first()));
+        QCOMPARE(casted.value.size(), back.value.size());
+    }
+
+    void testAsArrayDemarshal() {
+        if (!QDBusConnection::sessionBus().isConnected())
+            QSKIP("no session bus");
+        const QVariant wire = writeBySignature(
+            QStringLiteral("as"), QStringList{QStringLiteral("one"), QStringLiteral("two")});
+        QVERIFY(wire.isValid());
+        const QDBusMessage r = echoArg(QStringLiteral("/G2array"), wire);
+        QCOMPARE(r.type(), QDBusMessage::ReplyMessage);
+        QVERIFY(!r.arguments().isEmpty());
+        QVariant first = r.arguments().first();
+        if (first.userType() != qMetaTypeId<QDBusArgument>()) {
+            const QVariant nested =
+                writeBySignature(QStringLiteral("(as)"), QVariantList{first.toStringList()});
+            QVERIFY(nested.isValid());
+            const QDBusMessage r2 = echoArg(QStringLiteral("/G2array2"), nested);
+            QCOMPARE(r2.type(), QDBusMessage::ReplyMessage);
+            first = r2.arguments().first();
+        }
+        const QDBusArgument reader = qvariant_cast<QDBusArgument>(first);
+        if (reader.currentSignature() == QLatin1String("(as)"))
+            reader.beginStructure();
+        qInfo("AsArray pin executing qdbus_cast<DBusAsArray>");
+        const DBusAsArray back = qdbus_cast<DBusAsArray>(reader);
+        QCOMPARE(back.value, (QStringList{QStringLiteral("one"), QStringLiteral("two")}));
     }
 };
 

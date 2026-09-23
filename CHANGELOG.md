@@ -153,7 +153,18 @@ infrastructure that materially affects consumer trust).
 - **Held reply warns and replies `Failed` when the adaptor is gone at
   `send()`** (was: silent skip, then settle — a swallowed reply if the
   path were reached). Unreachable through `~DBusAdaptor` (that path
-  already `sendError`s parented held replies); pinned directly.
+  already `sendError`s parented held replies); pinned on the wire.
+- **Child-path fallback under `captureSubtree`** — an unhandled call on a
+  live child answers `UnknownMethod` / `UnknownInterface` (was: Qt's
+  leftover-path `UnknownObject` for a path that exists).
+- **Co-located children agreeing on `captureSubtree`** — mismatch compares
+  the first attacher's request, not the applied mode (was: two children
+  both requesting capture under a capturing root refused the second).
+- **Every reply/error send is checked** — `checkedSend` at remaining
+  adaptor, held-reply, and dispatcher sites (was: four unchecked `send`s).
+- **`DBus::Struct` / `DBusAsArray` demarshal via the signature walker**
+  (was: `operator>>(QDBusArgument, QVariant)` inside the container — the
+  libdbus crash class).
 
 ### Quality
 
@@ -191,6 +202,15 @@ infrastructure that materially affects consumer trust).
   the same thread; every pin waited out the oracle's 5 s timeout. Now async
   with a pumped wait; each pin bounds its own wall time (< 2 s), the
   deliberate no-reply case pins the timeout path.
+- **Referee poll-to-expected with a declared bound** — `oracleSettledCount`
+  waits for the expected count then a 500 ms quiet window (PARITY §5);
+  not a proof of finality.
+- **T1 spawn/ping barrier** — a blocking `Peer.Ping` on the worker
+  connection replaces the blind 200 ms sleep; both legs assert handler
+  time vs ping-sent.
+- **Dead oracle `DoubleSend` member removed** — the suite's double-send
+  service is QtDBus-side.
+- **H6c `Failed` is wire-pinned** — real method-call, name + count legs.
 
 ### Docs
 

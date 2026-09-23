@@ -1,4 +1,5 @@
 #include "dbustypes.h"
+#include "dbusutils.h"
 
 #include <QDBusArgument>
 
@@ -8,7 +9,14 @@ QDBusArgument &operator<<(QDBusArgument &arg, const DBusAsArray &a) {
 }
 
 const QDBusArgument &operator>>(const QDBusArgument &arg, DBusAsArray &a) {
-    arg >> a.value;
+    const QVariant got = readBySignature(arg);
+    if (got.userType() == QMetaType::QStringList)
+        a.value = got.toStringList();
+    else {
+        a.value.clear();
+        for (const QVariant &item : got.toList())
+            a.value.append(item.toString());
+    }
     return arg;
 }
 
@@ -78,11 +86,8 @@ QDBusArgument &operator<<(QDBusArgument &arg, const DBus::Struct &s) {
 const QDBusArgument &operator>>(const QDBusArgument &arg, DBus::Struct &s) {
     arg.beginStructure();
     s.value.clear();
-    while (!arg.atEnd()) {
-        QVariant m;
-        arg >> m;
-        s.value.append(m);
-    }
+    while (!arg.atEnd())
+        s.value.append(readBySignature(arg));
     arg.endStructure();
     return arg;
 }
