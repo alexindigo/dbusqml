@@ -10325,6 +10325,7 @@ void TestDBusAdaptor::testCaptureSubtreeRootCapture() {
 
     delete child;
     delete root;
+    delete dc;
     QCOMPARE(DBusPathDispatcher::liveCount(), baseline);
 }
 
