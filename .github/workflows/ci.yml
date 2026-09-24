@@ -69,7 +69,7 @@ jobs:
 
       - name: Examples compile (qmlimportscan smoke)
         run: |
-          QMLIMPORTSCAN=$(find "$QT_ROOT_DIR" -name qmlimportscan -type f | head -n1)
+          QMLIMPORTSCAN=$(find "$QT_ROOT_DIR" -name qmlimportscanner -type f | head -n1)
           test -n "$QMLIMPORTSCAN" || { echo "qmlimportscan not found"; exit 1; }
           for f in $(find examples -name '*.qml'); do
             QML_IMPORT_PATH=${{ github.workspace }}/build "$QMLIMPORTSCAN" -importPath examples -importPath build "$f" > /dev/null || exit 1
