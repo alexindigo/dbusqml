@@ -383,17 +383,38 @@ static QVariant echoPayload(const QString &sig, const QVariant &value) {
     return reply.arguments().first();
 }
 
+// Release-teardown registry (1.0 gate, lsan-ruling §2): every named
+// connection this suite opens is recorded here and disconnected at the end
+// of main(); the static engine and the shared TestService are destroyed
+// there too, so the process exits with nothing of ours alive.
+static QStringList &openedConnectionNames() {
+    static QStringList names;
+    return names;
+}
+
+static void recordConnectionName(const QString &name) {
+    if (!openedConnectionNames().contains(name))
+        openedConnectionNames().append(name);
+}
+
+static DBusConnection *trackedConnectToBus(const QString &addr) {
+    DBusConnection *dc = DBusConnection::connectToBus(addr);
+    if (dc)
+        recordConnectionName(QDBusConnection(*dc).name());
+    return dc;
+}
+
 // Organic QML adaptor helper (adaptor↔proxy E2E) — local twin of
 // test_dbusadaptor.cpp's createQmlAdaptor.
+static QQmlEngine *s_pcQmlEngine = nullptr; // destroyed in main()'s teardown
 static QObject *createPcQmlAdaptor(const QByteArray &qmlSrc) {
-    static QQmlEngine *engine = nullptr;
-    if (!engine) {
-        engine = new QQmlEngine;
+    if (!s_pcQmlEngine) {
+        s_pcQmlEngine = new QQmlEngine;
         QDir binDir(QCoreApplication::applicationDirPath());
-        engine->addImportPath(binDir.path());
-        engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        s_pcQmlEngine->addImportPath(binDir.path());
+        s_pcQmlEngine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
     }
-    QQmlComponent component(engine);
+    QQmlComponent component(s_pcQmlEngine);
     component.setData(qmlSrc, QUrl());
     if (!component.isReady()) {
         qWarning() << "component errors:" << component.errorString();
@@ -462,6 +483,8 @@ static void stopPrivateBus() {
         qputenv("DBUS_SESSION_BUS_ADDRESS", s_originalAddress.toLocal8Bit());
 }
 
+static TestService *s_testService = nullptr; // deleted in main()'s teardown
+
 static bool registerTestService() {
     QDBusConnection bus = QDBusConnection::sessionBus();
     if (!bus.isConnected())
@@ -473,6 +496,7 @@ static bool registerTestService() {
     if (!bus.registerService("org.dbusqml.TestService"))
         return false;
 
+    s_testService = service;
     return true;
 }
 
@@ -902,7 +926,7 @@ private slots:
         obj.setWatchServiceStatus(true);                           // watcher exists pre-fix
         QTRY_COMPARE_WITH_TIMEOUT(obj.serviceAvailable(), true, 5000);
 
-        DBusConnection *bus2 = DBusConnection::connectToBus(addr2);
+        DBusConnection *bus2 = trackedConnectToBus(addr2);
         QVERIFY(bus2 != nullptr);
         obj.setConnection(bus2);
         QTRY_COMPARE_WITH_TIMEOUT(obj.serviceAvailable(), false, 5000);
@@ -1723,6 +1747,7 @@ private slots:
         if (!s_privateBusAddress.isEmpty()) {
             auto *conn = DBusProxy::connectToBus(s_privateBusAddress);
             QVERIFY(conn != nullptr);
+            recordConnectionName(QDBusConnection(*conn).name());
             delete conn;
         }
     }
@@ -1734,8 +1759,8 @@ private slots:
         if (s_privateBusAddress.isEmpty())
             QSKIP("no private bus address available");
 
-        auto *a = DBusConnection::connectToBus(s_privateBusAddress);
-        auto *b = DBusConnection::connectToBus(s_privateBusAddress);
+        auto *a = trackedConnectToBus(s_privateBusAddress);
+        auto *b = trackedConnectToBus(s_privateBusAddress);
         QVERIFY(a != nullptr);
         QVERIFY(b != nullptr);
 
@@ -3169,7 +3194,7 @@ private slots:
             QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
         auto *engine = new QQmlEngine;
         DBusConnection *conn =
-            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
         QVERIFY(conn != nullptr);
         r4ExposeConn(engine, conn);
         R4MsgFactory factory;
@@ -3202,7 +3227,7 @@ private slots:
             QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
         auto *engine = new QQmlEngine;
         DBusConnection *conn =
-            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
         QVERIFY(conn != nullptr);
         r4ExposeConn(engine, conn);
         R4MsgFactory factory;
@@ -3237,7 +3262,7 @@ private slots:
             QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
         auto *engine = new QQmlEngine;
         DBusConnection *conn =
-            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
         QVERIFY(conn != nullptr);
         r4ExposeConn(engine, conn);
         R4MsgFactory factory;
@@ -3271,7 +3296,7 @@ private slots:
             QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
         auto *engine = new QQmlEngine;
         DBusConnection *conn =
-            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
         QVERIFY(conn != nullptr);
         r4ExposeConn(engine, conn);
         R4MsgFactory factory;
@@ -3307,7 +3332,7 @@ private slots:
                                                              QDBusConnection::ExportAllSlots));
         auto *engine = new QQmlEngine;
         DBusConnection *conn =
-            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
         QVERIFY(conn != nullptr);
         r4ExposeConn(engine, conn);
         R4MsgFactory factory;
@@ -3344,7 +3369,7 @@ private slots:
             QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
         auto *engine = new QQmlEngine;
         DBusConnection *conn =
-            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
         QVERIFY(conn != nullptr);
         R4ConnKiller killer;
         killer.conn = conn;
@@ -3379,7 +3404,7 @@ private slots:
             QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
         auto *engine = new QQmlEngine;
         DBusConnection *conn =
-            DBusConnection::connectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
         QVERIFY(conn != nullptr);
         r4ExposeConn(engine, conn);
         R4MsgFactory factory;
@@ -3434,7 +3459,7 @@ private slots:
         QVERIFY(!victimAddr.isEmpty());
 
         // A connection on the victim bus: connected + no signal yet.
-        DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(victimAddr));
+        DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(victimAddr));
         QVERIFY(conn != nullptr);
         QVERIFY(conn->isConnected());
         QSignalSpy connLost(conn, &DBusConnection::disconnected);
@@ -3533,6 +3558,23 @@ int main(int argc, char *argv[]) {
         app.sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QThread::msleep(1);
     }
+
+    // Release teardown (1.0 gate, lsan-ruling §2): disconnect every named
+    // connection the suite opened, delete the shared TestService and the
+    // static engine; the QCoreApplication on the stack destroys last.
+    for (const QString &name : openedConnectionNames())
+        QDBusConnection::disconnectFromBus(name);
+    if (s_testService) {
+        QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/TestService"));
+        delete s_testService;
+        s_testService = nullptr;
+    }
+    QCoreApplication::processEvents();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    delete s_pcQmlEngine;
+    s_pcQmlEngine = nullptr;
+    QCoreApplication::processEvents();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 
     return rc;
 }

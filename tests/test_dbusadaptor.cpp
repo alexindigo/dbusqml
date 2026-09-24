@@ -280,6 +280,30 @@ static void stopPrivateBus() {
         qputenv("DBUS_SESSION_BUS_ADDRESS", s_originalAddress.toLocal8Bit());
 }
 
+// ==================== Release-teardown registry (1.0 gate) ====================
+//
+// Every named connection this suite opens is recorded here and disconnected
+// at the end of main(); the static engines and the oracle process are
+// destroyed there too, so the process exits with nothing of ours alive when
+// LeakSanitizer takes its snapshot.
+
+static QStringList &openedConnectionNames() {
+    static QStringList names;
+    return names;
+}
+
+static void recordConnectionName(const QString &name) {
+    if (!openedConnectionNames().contains(name))
+        openedConnectionNames().append(name);
+}
+
+static DBusConnection *trackedConnectToBus(const QString &addr) {
+    DBusConnection *dc = DBusConnection::connectToBus(addr);
+    if (dc)
+        recordConnectionName(QDBusConnection(*dc).name());
+    return dc;
+}
+
 // ==================== Signal Catcher ====================
 
 class SignalCatcher : public QObject {
@@ -1119,18 +1143,18 @@ static QObject *createQmlAdaptor(const QByteArray &qmlSrc);
 
 // Helper: spin up a QML adaptor from inline source, invoke one method,
 // return the raw reply message.
+static QQmlEngine *s_callQmlEngine = nullptr; // destroyed in main()'s teardown
 static QDBusMessage callQmlAdaptorMethod(const QString &service, const QString &path,
                                          const QString &iface, const QString &member,
                                          const QVariantList &args, const QByteArray &qmlSrc) {
-    static QQmlEngine *engine = nullptr;
-    if (!engine) {
-        engine = new QQmlEngine;
+    if (!s_callQmlEngine) {
+        s_callQmlEngine = new QQmlEngine;
         QDir binDir(QCoreApplication::applicationDirPath());
-        engine->addImportPath(binDir.path());
-        engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        s_callQmlEngine->addImportPath(binDir.path());
+        s_callQmlEngine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
     }
 
-    QQmlComponent component(engine);
+    QQmlComponent component(s_callQmlEngine);
     component.setData(qmlSrc, QUrl());
     if (!component.isReady()) {
         qWarning() << "component errors:" << component.errorString();
@@ -1754,14 +1778,16 @@ void TestDBusAdaptor::testUnmarshalableReplySurvival() {
 // deliver a reply sent after handleMessage returns ("local-loop message
 // cannot have delayed replies"). See spike-findings.md.
 
+static std::unique_ptr<QDBusConnection>
+    s_deferredCallerConn; // disconnected last in main()'s teardown
 static QDBusConnection deferredCaller() {
-    static std::unique_ptr<QDBusConnection> conn;
-    if (!conn || !conn->isConnected()) {
+    if (!s_deferredCallerConn || !s_deferredCallerConn->isConnected()) {
         const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-        conn = std::make_unique<QDBusConnection>(QDBusConnection::connectToBus(
+        s_deferredCallerConn = std::make_unique<QDBusConnection>(QDBusConnection::connectToBus(
             QString::fromLocal8Bit(addr), QStringLiteral("test-deferred-caller")));
+        recordConnectionName(QStringLiteral("test-deferred-caller"));
     }
-    return *conn;
+    return *s_deferredCallerConn;
 }
 
 static QDBusPendingCallWatcher *asyncCallDeferred(const QString &service, const QString &path,
@@ -1782,32 +1808,32 @@ static QDBusPendingCallWatcher *asyncCallDeferred(const QString &service, const 
 // spy count. The oracle binary is built alongside the test binaries when
 // libdbus-1 headers are present; pins QSKIP when it is absent.
 
+static QProcess *s_oracleProcess = nullptr; // stopped in main()'s teardown
 static QProcess *startOracle() {
-    static QProcess *proc = nullptr;
-    if (proc && proc->state() == QProcess::Running)
-        return proc;
+    if (s_oracleProcess && s_oracleProcess->state() == QProcess::Running)
+        return s_oracleProcess;
     const QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/oracle");
     if (!QFile::exists(path))
         return nullptr;
-    proc = new QProcess();
-    proc->setProgram(path);
-    proc->start();
-    if (!proc->waitForStarted(3000)) {
-        delete proc;
-        proc = nullptr;
+    s_oracleProcess = new QProcess();
+    s_oracleProcess->setProgram(path);
+    s_oracleProcess->start();
+    if (!s_oracleProcess->waitForStarted(3000)) {
+        delete s_oracleProcess;
+        s_oracleProcess = nullptr;
         return nullptr;
     }
     QByteArray banner;
     for (int i = 0; i < 40 && !banner.contains("ORACLE-READY"); ++i) {
-        if (proc->waitForReadyRead(250))
-            banner += proc->readAll();
+        if (s_oracleProcess->waitForReadyRead(250))
+            banner += s_oracleProcess->readAll();
     }
     if (!banner.contains("ORACLE-READY")) {
-        delete proc;
-        proc = nullptr;
+        delete s_oracleProcess;
+        s_oracleProcess = nullptr;
         return nullptr;
     }
-    return proc;
+    return s_oracleProcess;
 }
 
 // Call the oracle WITHOUT freezing the test thread: the oracle's inner
@@ -1969,15 +1995,15 @@ public:
     bool handleMessage(const QDBusMessage &, const QDBusConnection &) override { return true; }
 };
 
+static QQmlEngine *s_createQmlEngine = nullptr; // destroyed in main()'s teardown
 static QObject *createQmlAdaptor(const QByteArray &qmlSrc) {
-    static QQmlEngine *engine = nullptr;
-    if (!engine) {
-        engine = new QQmlEngine;
+    if (!s_createQmlEngine) {
+        s_createQmlEngine = new QQmlEngine;
         QDir binDir(QCoreApplication::applicationDirPath());
-        engine->addImportPath(binDir.path());
-        engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        s_createQmlEngine->addImportPath(binDir.path());
+        s_createQmlEngine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
     }
-    QQmlComponent component(engine);
+    QQmlComponent component(s_createQmlEngine);
     component.setData(qmlSrc, QUrl());
     if (!component.isReady()) {
         qWarning() << "component errors:" << component.errorString();
@@ -2439,7 +2465,7 @@ void TestDBusAdaptor::testCallerServiceHeldReply() {
     // — the wire oracle for "who called me" — which is also what the
     // plan's test requires).
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *callerConn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *callerConn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(callerConn != nullptr);
     QDBusConnection callerBus = *callerConn;
     QDBusMessage m = QDBusMessage::createMethodCall(
@@ -5249,9 +5275,9 @@ void TestDBusAdaptor::testNameOwnerChangedChurnSurvives() {
                  qPrintable(QStringLiteral("stress exceeded 55s at iteration %1").arg(i)));
 
         // (1) Re-arm fresh contender connections every iteration.
-        DBusConnection *connA = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+        DBusConnection *connA = trackedConnectToBus(QString::fromLocal8Bit(addr));
         QVERIFY(connA != nullptr);
-        DBusConnection *connB = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+        DBusConnection *connB = trackedConnectToBus(QString::fromLocal8Bit(addr));
         QVERIFY(connB != nullptr);
         QDBusConnection qa = *connA;
         QDBusConnection qb = *connB;
@@ -5398,7 +5424,7 @@ void TestDBusAdaptor::testConcurrentAttachSurvives() {
         // Arm: a flagged watch adaptor on a SECOND connection for a
         // watched name, so its serviceOwnerChanged lambda lives on the
         // manager thread for the whole iteration.
-        DBusConnection *connW = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+        DBusConnection *connW = trackedConnectToBus(QString::fromLocal8Bit(addr));
         QVERIFY(connW != nullptr);
         QObject *watcher = comp.beginCreate(engine.rootContext());
         QVERIFY(watcher != nullptr);
@@ -5480,7 +5506,7 @@ void TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() {
     QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *churnConn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *churnConn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(churnConn != nullptr);
     QDBusConnection churn = *churnConn;
     const QString name = QStringLiteral("org.dbusqml.T1G1");
@@ -5560,7 +5586,7 @@ void TestDBusAdaptor::testOwnerChangeStormImmediateDelete() {
     QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *churnConn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *churnConn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(churnConn != nullptr);
     QDBusConnection churn = *churnConn;
     const QString name = QStringLiteral("org.dbusqml.T1G2");
@@ -5804,7 +5830,7 @@ void TestDBusAdaptor::testOwnerChangeReentrantHandler() {
     QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *churnConn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *churnConn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(churnConn != nullptr);
     QDBusConnection churn = *churnConn;
     const QString name = QStringLiteral("org.dbusqml.T1G3");
@@ -6086,7 +6112,7 @@ void TestDBusAdaptor::testOwnerChangeForeignThreadAdaptor() {
     // the takeover-delivery evidence; the warning assertion (above) is
     // the foreign-thread evidence.
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *connB = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *connB = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(connB != nullptr);
     QDBusConnection qb = *connB;
     QDBusMessage steal = QDBusMessage::createMethodCall(
@@ -6229,7 +6255,7 @@ void TestDBusAdaptor::testCoLocatedSeparateBuses() {
     session->componentComplete();
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *custom = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *custom = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(custom != nullptr);
 
     auto *other = new VariantEchoAdaptor;
@@ -7988,7 +8014,7 @@ void TestDBusAdaptor::testCallTimeout() {
     QVERIFY(adaptor != nullptr);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(conn != nullptr);
 
     DBusMessage m;
@@ -8026,7 +8052,7 @@ void TestDBusAdaptor::testFireAndForgetSend() {
     QVERIFY(adaptor != nullptr);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(conn != nullptr);
 
     DBusMessage m;
@@ -8068,7 +8094,7 @@ void TestDBusAdaptor::testMessageGadgetCallOptions() {
     QVERIFY(adaptor != nullptr);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(conn != nullptr);
     DBusMessage msg;
     msg.setService(QStringLiteral("org.dbusqml.MsgFlags"));
@@ -8097,7 +8123,7 @@ void TestDBusAdaptor::testNestedContainerRoundTrip() {
     QVERIFY(adaptor != nullptr);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(conn != nullptr);
 
     // N3 pin — aa{sv} with two elements (caller-side note: pass the outer
@@ -8269,7 +8295,7 @@ void TestDBusAdaptor::testServiceAcquisitionTakeover() {
 
     // B: custom connection, takes the name over.
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *connB = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *connB = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(connB != nullptr);
 
     QQmlComponent compB(&engine);
@@ -8605,7 +8631,7 @@ void TestDBusAdaptor::testInt64StringRoundTrip() {
     QVERIFY(adaptor != nullptr);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(conn != nullptr);
 
     const QString maxI64 = QStringLiteral("9223372036854775807");
@@ -8641,7 +8667,7 @@ void TestDBusAdaptor::testInt64SmallValueStaysNumber() {
     QVERIFY(adaptor != nullptr);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(conn != nullptr);
 
     DBusMessage m;
@@ -8745,7 +8771,7 @@ void TestDBusAdaptor::testFdRoundTripSend() {
     m.setTimeout(3000);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(conn != nullptr);
     DBusPendingReply *reply = conn->asyncCall(m);
     QSignalSpy spy(reply, &DBusPendingReply::finished);
@@ -8792,7 +8818,7 @@ void TestDBusAdaptor::testFdRoundTripReceive() {
     m.setTimeout(3000);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(conn != nullptr);
     DBusPendingReply *reply = conn->asyncCall(m);
     QSignalSpy spy(reply, &DBusPendingReply::finished);
@@ -8838,7 +8864,7 @@ void TestDBusAdaptor::testFdContainerPosition() {
     m.setTimeout(3000);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(conn != nullptr);
     DBusPendingReply *reply = conn->asyncCall(m);
     QSignalSpy spy(reply, &DBusPendingReply::finished);
@@ -8915,7 +8941,7 @@ void TestDBusAdaptor::testFdCrossProcess() {
     m.setTimeout(5000);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *conn = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(conn != nullptr);
     DBusPendingReply *reply = conn->asyncCall(m);
     QSignalSpy spy(reply, &DBusPendingReply::finished);
@@ -9806,8 +9832,8 @@ void TestDBusAdaptor::testExploreMultiConnectionAliasing() {
     // bus): (conn,path)/(conn,service) registry keys must not collide.
     // Each connection serves its own path; calls route per-connection.
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
-    DBusConnection *connA = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
-    DBusConnection *connB = DBusConnection::connectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *connA = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *connB = trackedConnectToBus(QString::fromLocal8Bit(addr));
     QVERIFY(connA != nullptr);
     QVERIFY(connB != nullptr);
     QQmlEngine engine;
@@ -9948,20 +9974,20 @@ QtObject {
 }
 )QML";
 
-static QObject *matrixStage = nullptr;
+static QObject *matrixStage = nullptr; // deleted in main()'s teardown
 static QObject *matrixAdaptor = nullptr;
+static QQmlEngine *s_matrixEngine = nullptr; // destroyed in main()'s teardown
 
 static void ensureMatrixStage() {
     if (matrixStage)
         return;
-    static QQmlEngine *engine = nullptr;
-    if (!engine) {
-        engine = new QQmlEngine;
+    if (!s_matrixEngine) {
+        s_matrixEngine = new QQmlEngine;
         QDir binDir(QCoreApplication::applicationDirPath());
-        engine->addImportPath(binDir.path());
-        engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        s_matrixEngine->addImportPath(binDir.path());
+        s_matrixEngine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
     }
-    QQmlComponent component(engine);
+    QQmlComponent component(s_matrixEngine);
     component.setData(QByteArray(kMatrixStage), QUrl());
     if (!component.isReady())
         QFAIL(qPrintable(component.errorString()));
@@ -10124,6 +10150,37 @@ void TestDBusAdaptor::testMatrixSignalValues() {
 
 int TestDBusAdaptor::s_stressIterations = 0;
 
+// Release teardown (1.0 gate, lsan-ruling §2): stop the oracle, delete the
+// static engines, and disconnect every named connection the suite opened, so
+// the process exits with nothing of ours alive when LeakSanitizer looks.
+static void stopOracle() {
+    if (!s_oracleProcess)
+        return;
+    s_oracleProcess->terminate();
+    if (!s_oracleProcess->waitForFinished(3000))
+        s_oracleProcess->kill();
+    delete s_oracleProcess;
+    s_oracleProcess = nullptr;
+}
+
+static void destroyStaticEngines() {
+    // Pump first so QML objects with pending DeferredDelete are gone before
+    // their engines; then pump once more for what the deletes post.
+    QCoreApplication::processEvents();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    delete matrixStage; // parents matrixAdaptor
+    matrixStage = nullptr;
+    matrixAdaptor = nullptr;
+    delete s_matrixEngine;
+    s_matrixEngine = nullptr;
+    delete s_createQmlEngine;
+    s_createQmlEngine = nullptr;
+    delete s_callQmlEngine;
+    s_callQmlEngine = nullptr;
+    QCoreApplication::processEvents();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
     // Optional: -stress N overrides the churn test's iteration count.
@@ -10151,6 +10208,17 @@ int main(int argc, char *argv[]) {
         app.sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QThread::msleep(1);
     }
+    // Named connections first (the deferred caller last), then the oracle,
+    // then the engines; the QCoreApplication on the stack destroys last.
+    for (const QString &name : openedConnectionNames()) {
+        if (name == QLatin1String("test-deferred-caller"))
+            continue;
+        QDBusConnection::disconnectFromBus(name);
+    }
+    s_deferredCallerConn.reset();
+    QDBusConnection::disconnectFromBus(QStringLiteral("test-deferred-caller"));
+    stopOracle();
+    destroyStaticEngines();
     return rc;
 }
 // Council CF-7 self-test: a deliberately double-sending service MUST be
@@ -10262,7 +10330,7 @@ void TestDBusAdaptor::testOracleSensitivityNoReply() {
 
 void TestDBusAdaptor::testCaptureSubtreeRootCapture() {
     const QString addr = QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS"));
-    DBusConnection *dc = DBusConnection::connectToBus(addr);
+    DBusConnection *dc = trackedConnectToBus(addr);
     QVERIFY(dc != nullptr);
     QDBusConnection bus = *dc;
     const int baseline = DBusPathDispatcher::liveCount();
