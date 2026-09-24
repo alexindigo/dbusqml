@@ -806,6 +806,13 @@ bool DBusPathDispatcher::routeToAdaptors(const QList<QPointer<DBusAdaptor>> &ada
         return false; // no adaptor serves this interface → callers' fallbacks
     }
 
+    // Peer (Ping, GetMachineId) is answered by libdbus's built-in filter on
+    // every client connection before Qt dispatch — any path, even
+    // unregistered ones — exactly as GDBus and sd-bus answer it in their
+    // libraries. dbusqml does not shadow it. Same-connection loopback
+    // callers bypass libdbus and get Qt's fallback (UnknownInterface):
+    // stock Qt behavior, documented in KNOWN_ISSUES.
+
     for (const auto &a : adaptors) {
         if (a && a->handleMessage(msg, conn))
             return true;

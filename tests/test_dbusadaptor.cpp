@@ -459,6 +459,7 @@ private slots:
     void testCaptureSubtreeInterfacelessIntrospect();
     void testCaptureSubtreeChildParity();
     void testMethodMissIdentity();
+    void testPeerAnsweredByTransport();
     void testCaptureSubtreeChildColocatedAgree();
     void testHeldReplyNullAdaptorLoud();
     void testNameOwnerChangedChurnSurvives();
@@ -4941,6 +4942,104 @@ void TestDBusAdaptor::testMethodMissIdentity() {
     delete child;
     delete cap;
     delete root;
+}
+
+void TestDBusAdaptor::testPeerAnsweredByTransport() {
+    // Peer is transport-owned (libdbus filter on the service connection).
+    QObject *plain = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  service: 'org.dbusqml.PeerObs'\n"
+                                      "  path: '/peerobs'\n"
+                                      "  iface: 'org.dbusqml.Plain'\n"
+                                      "  function ping() { return 'plain' }\n"
+                                      "}");
+    QVERIFY(plain != nullptr);
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.PeerObsCap'\n"
+                                    "  path: '/peerobscap'\n"
+                                    "  iface: 'org.dbusqml.Cap'\n"
+                                    "  captureSubtree: true\n"
+                                    "  function ping() { return 'root' }\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+    QObject *child = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  path: '/peerobscap/r1'\n"
+                                      "  iface: 'org.dbusqml.Child'\n"
+                                      "  function ping() { return 'pong' }\n"
+                                      "}");
+    QVERIFY(child != nullptr);
+
+    class BarePeerProbe : public QDBusVirtualObject {
+    public:
+        QString introspect(const QString &) const override { return {}; }
+        bool handleMessage(const QDBusMessage &, const QDBusConnection &) override { return false; }
+    };
+    BarePeerProbe bare;
+    QVERIFY(
+        QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/barepeer"), &bare));
+    QVERIFY(QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.BarePeer")));
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    QDBusConnection obs = QDBusConnection::connectToBus(QString::fromLocal8Bit(addr),
+                                                        QStringLiteral("peer-observer"));
+    QVERIFY(obs.isConnected());
+
+    auto peerCall = [&](const QString &svc, const QString &path, const QString &member) {
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            svc, path, QStringLiteral("org.freedesktop.DBus.Peer"), member);
+        return obs.call(m, QDBus::Block, 3000);
+    };
+
+    const QDBusMessage a = peerCall(QStringLiteral("org.dbusqml.PeerObs"),
+                                    QStringLiteral("/peerobs"), QStringLiteral("Ping"));
+    QCOMPARE(a.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(a.arguments().isEmpty());
+
+    const QDBusMessage b = peerCall(QStringLiteral("org.dbusqml.PeerObsCap"),
+                                    QStringLiteral("/peerobscap/r1"), QStringLiteral("Ping"));
+    QCOMPARE(b.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(b.arguments().isEmpty());
+
+    const QDBusMessage c = peerCall(QStringLiteral("org.dbusqml.PeerObs"),
+                                    QStringLiteral("/noSuchPeerPath"), QStringLiteral("Ping"));
+    QCOMPARE(c.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(c.arguments().isEmpty());
+
+    const QDBusMessage d = peerCall(QStringLiteral("org.dbusqml.PeerObs"),
+                                    QStringLiteral("/peerobs"), QStringLiteral("GetMachineId"));
+    QCOMPARE(d.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(d.arguments().size(), 1);
+    const QString id = d.arguments().first().toString();
+    QVERIFY2(QRegularExpression(QStringLiteral("^[0-9a-f]{32}$")).match(id).hasMatch(),
+             qPrintable(id));
+
+    const QDBusMessage e = peerCall(QStringLiteral("org.dbusqml.PeerObs"),
+                                    QStringLiteral("/peerobs"), QStringLiteral("Bogus"));
+    QCOMPARE(e.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(e.errorName(), QStringLiteral("org.freedesktop.DBus.Error.UnknownMethod"));
+    QCOMPARE(e.errorMessage(),
+             QStringLiteral("Unknown method invoked on org.freedesktop.DBus.Peer interface"));
+
+    const QDBusMessage f = peerCall(QStringLiteral("org.dbusqml.BarePeer"),
+                                    QStringLiteral("/barepeer"), QStringLiteral("Ping"));
+    QCOMPARE(f.type(), QDBusMessage::ReplyMessage);
+    QVERIFY(f.arguments().isEmpty());
+
+    QDBusMessage g = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.PeerObs"), QStringLiteral("/peerobs"),
+        QStringLiteral("org.freedesktop.DBus.Peer"), QStringLiteral("Ping"));
+    const QDBusMessage gr = QDBusConnection::sessionBus().call(g, QDBus::Block, 3000);
+    QCOMPARE(gr.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(gr.errorName(), QStringLiteral("org.freedesktop.DBus.Error.UnknownInterface"));
+
+    QDBusConnection::disconnectFromBus(QStringLiteral("peer-observer"));
+    QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.BarePeer"));
+    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/barepeer"));
+    delete child;
+    delete cap;
+    delete plain;
 }
 
 void TestDBusAdaptor::testCaptureSubtreeChildColocatedAgree() {

@@ -203,6 +203,8 @@ infrastructure that materially affects consumer trust).
   sensitivity self-tests (1 → 1, 2 → 2, none → 0).
 - **Wire oracle gains `CallAdaptorNoReply`** — observes replies to calls
   that asked for none.
+- **Peer tests observe the transport from a separate connection** — the
+  loopback-only Peer serving was removed as unreachable on the wire.
 - **Oracle pins no longer stall** — the harness called the wire
   oracle with a blocking `QDBus::Block` while the oracle called back into
   the same thread; every pin waited out the oracle's 5 s timeout. Now async
