@@ -343,11 +343,15 @@ road-to-one C3 grep-gate).** Two layers, each with its own job:
   are printed on every frame line), and append the version AND its
   anchor triples to the entry together — a one-small-PR,
   evidence-carrying change. Deliberate
-  consequence: the first CI run on an unvalidated Qt (the 6.8.2 cell)
-  FAILS red by design until its cells are validated — the
-  red→validate→green loop is the honest sequence for a genuinely
-  unvalidated surface (recorded in the register header so the first-push
-  red is expected, not alarming). (Distinct from suppression entry 2.1:
+   consequence: the first CI run on an unvalidated Qt (the 6.8.2 cell)
+   FAILS red by design until its cells are validated — the
+   red→validate→green loop is the honest sequence for a genuinely
+   unvalidated surface (recorded in the register header so the first-push
+   red is expected, not alarming). Observed 2026-09-23 on the first Qt
+   6.8.2 run: the registered classes did not fire at all; a sibling class
+   (the bus-bind delete×new allocator race, hit by the foreign canary) did,
+   and was registered with 6.8.2 evidence — the red→register→green loop,
+   not red→validate→green. (Distinct from suppression entry 2.1:
   that entry anchors the bus-bind ALLOCATOR race — `new` vs `delete` —
   via its symbolized dispatch frame; this register entry is the
   task-teardown class the symbol matcher cannot see.)

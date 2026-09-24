@@ -227,3 +227,53 @@ interceptor = "__tsan_memmove"
 below_module = "libQt6Core.so.6"
 thread = "QDBusConnection"
 access = "write:8"
+
+# --- Bus-bind allocator race (new×delete), canary-context on 6.8.2 ---
+# Registered from the first CI run on Qt 6.8.2 (run 35964966549, sanitizers
+# thread cell): the three task-teardown classes above never fired there; this
+# sibling — the detector-layer suppression 2.1 class (main allocates inside
+# qDBusBindToApplication while the QDBusConnection worker frees) — fired in
+# the FOREIGN CANARY instead. Suppression 2.1 anchors on the test-binary
+# dispatch frame (TestDBusAdaptor::qt_static_metacall), which a bare
+# connectToBus probe never contains, so on 6.8.2 the block reaches the
+# verdict layer and is registered here. Reproduced and captured on the
+# release fork against CI's exact binaries (libQt6Core/libQt6DBus BuildIds
+# match the CI log), 3+/5 canary runs; the fork's 6.11.2 does not fire it.
+
+[[class]]
+id = "qt6-dbus-bus-bind-alloc-new-delete"
+
+report_type = "data race"
+classification = "accepted-unresolved-Qt-internal-risk — NOT proven false positive"
+qt_validated = ["6.8.2"]
+
+summary_class = "data race (libQt6Core.so.6+0x1cdf4e / libQt6DBus.so.6+0x4048a) — QtDBus bus-bind allocator: main-thread operator new inside qDBusBindToApplication vs the QDBusConnection worker's operator delete"
+# CI (and the fork's BuildId-identical 6.8.2) symbolize these frames
+# offset-only: both racing frames are runtime-invisible to TSan. The 6.11.2
+# sibling offsets (libQt6DBus+0x3b647 new side, libQt6Core+0x1d43ee delete
+# side) map to qDBusBindToApplication / allocator internals — see
+# tsan-suppressions.txt entry 2.1's addr2line note.
+addr2line = "offset-only on 6.8.2 (runtime-invisible frames); 6.11.2 siblings: 0x3b647=qDBusBindToApplication (new, main), 0x1d43ee=allocator internals (delete, QDBusConnection worker) — tsan-suppressions.txt 2.1"
+reproducer = "tsan_canary_foreign (bare connectToBus probe) on Qt 6.8.2 — 3+/5 runs; first CI run 35964966549 fired it immediately"
+owning_test = "none in the suite — canary context only (tsan_canary_foreign); suite binaries keep the class at the detector layer via suppression 2.1"
+parent_parity = "same class as detector-layer suppression 2.1 (pre-existing at c513a2b and carried the whole cycle on 6.11.2); reaches the verdict layer only where 2.1's test-binary anchor is absent — the canary"
+upstream_link = "none exact; QTBUG-79770 (adjacent: Qt object-teardown TSan races)"
+honesty_qualifier = "a dbusqml-caused race can in principle present all-foreign; the census + red-team probe are the tripwires"
+falsifier = "the B run (TSan-instrumented Qt build) — ~/Documents/dbusqml/todos/TODO.md"
+
+[class.anchors]
+"6.8.2" = ["libQt6Core.so.6+0x1cdf4e@b3888185c629eef5b544147f7a7d564e0c3c67ff", "libQt6DBus.so.6+0x4048a@3f30c43fb713b34c07586fd76a9a88f4e8f5b058"]
+
+[[class.arrangement]]
+role = "access-first"
+interceptor = "operator delete"
+below_module = "libQt6Core.so.6"
+thread = "QDBusConnection"
+access = "write:8"
+
+[[class.arrangement]]
+role = "access-second"
+interceptor = "operator new"
+below_module = "libQt6DBus.so.6"
+thread = "main"
+access = "write:8"
