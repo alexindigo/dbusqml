@@ -780,10 +780,30 @@ bool DBusPathDispatcher::routeToAdaptors(const QList<QPointer<DBusAdaptor>> &ada
 
     if (!interface.isEmpty()) {
         for (const auto &a : adaptors) {
-            if (a && a->iface() == interface)
-                return a->handleMessage(msg, conn);
+            if (a && a->iface() == interface) {
+                if (a->handleMessage(msg, conn))
+                    return true;
+                // The interface IS served here (first-attached wins — no other
+                // adaptor gets a turn) and the adaptor declined: the method does
+                // not exist on it (name miss, arity miss, or a library-mechanism
+                // name that is deliberately never served). Stock Qt's adaptor
+                // dispatch, GDBus and sd-bus all say UnknownMethod for this;
+                // letting `false` fall to the bottom fallback said
+                // UnknownInterface — a lie about an interface introspection
+                // advertises (consumer leg 8a, 2026-09-23). Qt's text, B4 guard.
+                if (msg.isReplyRequired())
+                    checkedSend(conn,
+                                msg.createErrorReply(
+                                    QDBusError::UnknownMethod,
+                                    QStringLiteral("No such method '%1' in "
+                                                   "interface '%2' at object "
+                                                   "path '%3' (signature '%4')")
+                                        .arg(msg.member(), interface, msg.path(), msg.signature())),
+                                "method miss");
+                return true;
+            }
         }
-        return false;
+        return false; // no adaptor serves this interface → callers' fallbacks
     }
 
     for (const auto &a : adaptors) {

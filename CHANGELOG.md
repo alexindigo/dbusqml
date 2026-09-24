@@ -165,6 +165,12 @@ infrastructure that materially affects consumer trust).
 - **`DBus::Struct` / `DBusAsArray` demarshal via the signature walker**
   (was: `operator>>(QDBusArgument, QVariant)` inside the container — the
   libdbus crash class).
+- **Method miss on a served interface now answers `UnknownMethod`** (was
+  `UnknownInterface` — a lie about an advertised interface; consumer leg
+  8a). Roots and captured children alike; Qt's text; NO_REPLY_EXPECTED
+  honored.
+- **C++-path methods with more than five arguments answer `Failed`**
+  instead of declining.
 
 ### Quality
 

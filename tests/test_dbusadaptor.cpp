@@ -68,6 +68,7 @@ public:
 public slots:
     int echoInt(int v) { return v; }
     QString echoString(const QString &v) { return v; }
+    int six(int a, int b, int c, int d, int e, int f) { return a + b + c + d + e + f; }
 
 signals:
     void testIntChanged();
@@ -457,6 +458,7 @@ private slots:
     void testCaptureSubtreeChildFallbackErrors();
     void testCaptureSubtreeInterfacelessIntrospect();
     void testCaptureSubtreeChildParity();
+    void testMethodMissIdentity();
     void testCaptureSubtreeChildColocatedAgree();
     void testHeldReplyNullAdaptorLoud();
     void testNameOwnerChangedChurnSurvives();
@@ -4784,6 +4786,161 @@ void TestDBusAdaptor::testCaptureSubtreeChildParity() {
     delete child;
     delete cap;
     delete plain;
+}
+
+void TestDBusAdaptor::testMethodMissIdentity() {
+    QObject *root = createQmlAdaptor("import DBus 1.0\n"
+                                     "DBusAdaptor {\n"
+                                     "  service: 'org.dbusqml.MMRoot'\n"
+                                     "  path: '/mmRoot'\n"
+                                     "  iface: 'org.dbusqml.MM'\n"
+                                     "  function ping() { return 'pong' }\n"
+                                     "}");
+    QVERIFY(root != nullptr);
+    QObject *cap = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.MMCap'\n"
+                                    "  path: '/mmCap'\n"
+                                    "  iface: 'org.dbusqml.MMRoot'\n"
+                                    "  captureSubtree: true\n"
+                                    "}");
+    QVERIFY(cap != nullptr);
+    QObject *child = createQmlAdaptor("import DBus 1.0\n"
+                                      "DBusAdaptor {\n"
+                                      "  path: '/mmCap/child'\n"
+                                      "  iface: 'org.dbusqml.MM'\n"
+                                      "  function ping() { return 'pong' }\n"
+                                      "}");
+    QVERIFY(child != nullptr);
+
+    const QString mm = QStringLiteral("org.dbusqml.MM");
+    const struct {
+        const char *id;
+        QString svc;
+        QString path;
+    } objs[] = {{"root", QStringLiteral("org.dbusqml.MMRoot"), QStringLiteral("/mmRoot")},
+                {"child", QStringLiteral("org.dbusqml.MMCap"), QStringLiteral("/mmCap/child")}};
+
+    auto call = [](const QString &svc, const QString &path, const QString &iface,
+                   const QString &member, const QVariantList &args) {
+        QDBusPendingCallWatcher *w = asyncCallDeferred(svc, path, iface, member, args);
+        QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+        if (!w->isFinished())
+            spy.wait(3000);
+        const QDBusMessage r = w->reply();
+        delete w;
+        return r;
+    };
+    auto missText = [](const QString &member, const QString &iface, const QString &path,
+                       const QString &sig) {
+        return QStringLiteral("No such method '%1' in interface '%2' at object path '%3' "
+                              "(signature '%4')")
+            .arg(member, iface, path, sig);
+    };
+
+    QStringList fails;
+    for (const auto &o : objs) {
+        const QDBusMessage a = call(o.svc, o.path, mm, QStringLiteral("bogus"), {});
+        const QString aWant = missText(QStringLiteral("bogus"), mm, o.path, QString());
+        if (a.type() != QDBusMessage::ErrorMessage ||
+            a.errorName() != QStringLiteral("org.freedesktop.DBus.Error.UnknownMethod") ||
+            a.errorMessage() != aWant) {
+            fails << QStringLiteral("a %1 type=%2 name=%3 text=%4 want=%5")
+                         .arg(QString::fromLatin1(o.id))
+                         .arg(int(a.type()))
+                         .arg(a.errorName(), a.errorMessage(), aWant);
+        }
+        const QDBusMessage b =
+            call(o.svc, o.path, mm, QStringLiteral("ping"), {QStringLiteral("x")});
+        const QString bWant = missText(QStringLiteral("ping"), mm, o.path, QStringLiteral("s"));
+        if (b.type() != QDBusMessage::ErrorMessage ||
+            b.errorName() != QStringLiteral("org.freedesktop.DBus.Error.UnknownMethod") ||
+            b.errorMessage() != bWant) {
+            fails << QStringLiteral("b %1 type=%2 name=%3 text=%4 want=%5")
+                         .arg(QString::fromLatin1(o.id))
+                         .arg(int(b.type()))
+                         .arg(b.errorName(), b.errorMessage(), bWant);
+        }
+        const QDBusMessage c = call(o.svc, o.path, mm, QStringLiteral("emitSignal"), {});
+        const QString cWant = missText(QStringLiteral("emitSignal"), mm, o.path, QString());
+        if (c.type() != QDBusMessage::ErrorMessage ||
+            c.errorName() != QStringLiteral("org.freedesktop.DBus.Error.UnknownMethod") ||
+            c.errorMessage() != cWant) {
+            fails << QStringLiteral("c %1 type=%2 name=%3 text=%4 want=%5")
+                         .arg(QString::fromLatin1(o.id))
+                         .arg(int(c.type()))
+                         .arg(c.errorName(), c.errorMessage(), cWant);
+        }
+        const QDBusMessage e =
+            call(o.svc, o.path, QStringLiteral("org.dbusqml.Missing"), QStringLiteral("ping"), {});
+        if (e.type() != QDBusMessage::ErrorMessage ||
+            e.errorName() != QStringLiteral("org.freedesktop.DBus.Error.UnknownInterface")) {
+            fails << QStringLiteral("e %1 type=%2 name=%3")
+                         .arg(QString::fromLatin1(o.id))
+                         .arg(int(e.type()))
+                         .arg(e.errorName());
+        }
+    }
+
+    QProcess *oracle = startOracle();
+    if (!oracle)
+        fails << QStringLiteral("oracle missing");
+    else {
+        for (const auto &o : objs) {
+            const quint32 serial =
+                oracleCallAdaptorNoReply(o.svc, o.path, mm, QStringLiteral("bogus"));
+            const quint32 n = oracleSettledCount(serial, 0u);
+            if (n != 0u)
+                fails << QStringLiteral("d %1 count=%2").arg(QString::fromLatin1(o.id)).arg(n);
+        }
+    }
+
+    QObject *coA = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  service: 'org.dbusqml.MMCo'\n"
+                                    "  path: '/mmCo'\n"
+                                    "  iface: 'org.dbusqml.MMA'\n"
+                                    "  function ping() { return 'a' }\n"
+                                    "}");
+    QVERIFY(coA != nullptr);
+    QObject *coB = createQmlAdaptor("import DBus 1.0\n"
+                                    "DBusAdaptor {\n"
+                                    "  path: '/mmCo'\n"
+                                    "  iface: 'org.dbusqml.MMB'\n"
+                                    "  function pong() { return 'b' }\n"
+                                    "}");
+    QVERIFY(coB != nullptr);
+    const QDBusMessage f = call(QStringLiteral("org.dbusqml.MMCo"), QStringLiteral("/mmCo"),
+                                QString(), QStringLiteral("pong"), {});
+    if (f.type() != QDBusMessage::ReplyMessage || f.arguments().isEmpty() ||
+        f.arguments().first().toString() != QStringLiteral("b")) {
+        fails << QStringLiteral("f type=%1").arg(int(f.type()));
+    }
+
+    TestAdaptor sixAd;
+    sixAd.setService(QStringLiteral("org.dbusqml.MMSix"));
+    sixAd.setPath(QStringLiteral("/MMSix"));
+    sixAd.setIface(QStringLiteral("org.dbusqml.MMSix"));
+    sixAd.classBegin();
+    sixAd.componentComplete();
+    const QDBusMessage six =
+        call(QStringLiteral("org.dbusqml.MMSix"), QStringLiteral("/MMSix"),
+             QStringLiteral("org.dbusqml.MMSix"), QStringLiteral("six"), {1, 2, 3, 4, 5, 6});
+    if (six.type() != QDBusMessage::ErrorMessage ||
+        six.errorName() != QStringLiteral("org.freedesktop.DBus.Error.Failed") ||
+        !six.errorMessage().contains(QStringLiteral("at most 5"))) {
+        fails << QStringLiteral("six type=%1 name=%2 text=%3")
+                     .arg(int(six.type()))
+                     .arg(six.errorName(), six.errorMessage());
+    }
+
+    QVERIFY2(fails.isEmpty(), qPrintable(fails.join(QStringLiteral("\n"))));
+
+    delete coB;
+    delete coA;
+    delete child;
+    delete cap;
+    delete root;
 }
 
 void TestDBusAdaptor::testCaptureSubtreeChildColocatedAgree() {

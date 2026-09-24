@@ -1939,7 +1939,13 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 qWarning("dbusqml: method %s takes %d arguments — the C++ dispatch path supports "
                          "at most 5; declare fewer parameters",
                          qPrintable(matchedName), int(dbusArgs.size()));
-                return false;
+                sendReply(msg.createErrorReply(
+                    QDBusError::Failed,
+                    QStringLiteral("method %1 takes %2 arguments; the C++ dispatch path supports "
+                                   "at most 5")
+                        .arg(matchedName)
+                        .arg(dbusArgs.size())));
+                return true;
             }
         }
 
