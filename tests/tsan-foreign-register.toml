@@ -277,3 +277,46 @@ interceptor = "operator new"
 below_module = "libQt6DBus.so.6"
 thread = "main"
 access = "write:8"
+
+# --- QtTest watchdog race (QtTest-internal, libstdc++) ---
+# Captured on the CI-identical Qt 6.8.2 build on the release fork during the
+# 12-test selection (2/10 runs across two sessions, in two different tests —
+# not test-specific; quiet-hours report §2). Zero dbusqml frames anywhere:
+# the QtTest timeout-watchdog thread's condition-variable wait races the main
+# thread's libstdc++ clock read.
+
+[[class]]
+id = "qttest-watchdog-cond-wait-clock"
+
+report_type = "data race"
+classification = "accepted-unresolved-Qt-internal-risk — NOT proven false positive"
+qt_validated = ["6.8.2"]
+
+summary_class = "data race (libstdc++.so.6) — QtTest Watchdog thread's pthread_cond_wait vs the main thread's clock_gettime"
+# Offset-only: CI's 6.8.2 symbolization (and the fork's BuildId-identical
+# build) resolves neither frame beyond the module; both anchors are
+# libstdc++ internals with no public symbol at the offset.
+addr2line = "offset-only (libstdc++.so.6+0xdc817 main/clock_gettime side; libstdc++.so.6+0xb3607 watchdog/pthread_cond_wait side) — unsymbolized on this build"
+reproducer = "the 12-test TSan selection on Qt 6.8.2 — 2/10 runs, in two different tests (testOwnerChangeForeignThreadAdaptor, testLossProbeIdleTraffic)"
+owning_test = "none — QtTest's own watchdog thread vs main; zero dbusqml frames"
+parent_parity = "not dbusqml-caused: arises in QtTest's timeout watchdog with libstdc++ internals on both sides"
+upstream_link = "none found (searched QTBUG for the watchdog/condvar race)"
+honesty_qualifier = "a dbusqml-caused race can in principle present all-foreign; the census + red-team probe are the tripwires"
+falsifier = "the B run (TSan-instrumented Qt build) — ~/Documents/dbusqml/todos/TODO.md"
+
+[class.anchors]
+"6.8.2" = ["libstdc++.so.6+0xdc817@5b8d3de442de987b24d0e3679533068f2ae62497", "libstdc++.so.6+0xb3607@5b8d3de442de987b24d0e3679533068f2ae62497"]
+
+[[class.arrangement]]
+role = "access-first"
+interceptor = "clock_gettime"
+below_module = "libstdc++.so.6"
+thread = "main"
+access = "write:8"
+
+[[class.arrangement]]
+role = "access-second"
+interceptor = "pthread_cond_wait"
+below_module = "libstdc++.so.6"
+thread = "QtTest Watchdog"
+access = "atomic read:1"
