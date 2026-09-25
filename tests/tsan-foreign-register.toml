@@ -164,9 +164,9 @@ access = "write:8"
 # reaches the verdict layer only in non-test binaries (canary/probe).
 # They differ ONLY in which thread performs the realloc — the
 # arrangement-tightness case made flesh. The previously demoted pooled
-# entry (free×realloc, FD1 of tsan-register-tightening) was NEVER captured;
-# its refire still follows the FD1 flow (red once → capture → register
-# tight).
+# entry (free×realloc, FD1 of tsan-register-tightening) followed its FD1
+# flow (red once → capture → register tight): captured 2026-09-24 and
+# registered as qt6-dbus-bus-bind-free-realloc (below).
 
 [[class]]
 id = "qt6-dbus-bus-bind-realloc-worker"
@@ -240,6 +240,46 @@ access = "write:8"
 [[class.arrangement]]
 role = "access-second"
 interceptor = "__tsan_memmove"
+below_module = "libQt6Core.so.6"
+thread = "QDBusConnection"
+access = "write:8"
+
+# --- FD1 (free×realloc) — captured 2026-09-24, registered per the FD1 flow ---
+# First live capture: the 12-test selection on Qt 6.11.2
+# (testHeldReplyTimeoutNoReplySilent; tsan611-fd1-block.log). Pure-QtDBus
+# probe proof (fd1-amplify3, zero dbusqml): 4/24 runs under the daemon-kill
+# teardown shape with these exact anchors, 0/72 without it — see
+# ~/Documents/dbusqml/plans/release-1.0.0/fd1-investigation.md.
+
+[[class]]
+id = "qt6-dbus-bus-bind-free-realloc"
+
+report_type = "data race"
+classification = "accepted-unresolved-Qt-internal-risk — NOT proven false positive"
+qt_validated = ["6.11.2"]
+
+summary_class = "data race (libQt6Core.so.6+0x2ae895 / +0x2d1ab3) — main-thread teardown of the finished QDBusConnection worker's thread data (QThreadData::~QThreadData via QDBusConnectionManager::instance) vs the worker's QArrayData realloc (bus-bind family, FD1 pooled arrangement)"
+addr2line = "0x2ae895=QThreadData::~QThreadData (main, free side, via QDBusConnectionManager::instance); 0x2d1ab3=QArrayData::reallocateUnaligned (worker realloc side, qarraydata.cpp:236) — resolved 2026-09-24 via debuginfod.archlinux.org, BuildId 3e89a2b2af7893db9e9a63269b878a94627e4142"
+reproducer = "the 12-test TSan selection on Qt 6.11.2 (testHeldReplyTimeoutNoReplySilent); pure-QtDBus probe fd1-amplify3: 4/24 runs daemon-killed with live traffic, 0/72 otherwise (fd1-investigation.md); the graceful-order suite variant still fired 3/10 (pre-push-fixes-report-5.md)"
+owning_test = "test_dbusadaptor.cpp testHeldReplyTimeoutNoReplySilent (suite, first capture); fd1-amplify3 (probe)"
+parent_parity = "family pre-existing; FD1 is the demoted pooled entry predicted above — captured and registered per its prescribed flow"
+upstream_link = "none exact; QTBUG-79770 (adjacent: Qt object-teardown TSan races)"
+honesty_qualifier = "a dbusqml-caused race can in principle present all-foreign; the census + red-team probe are the tripwires"
+falsifier = "the B run (TSan-instrumented Qt build) — ~/Documents/dbusqml/todos/TODO.md"
+
+[class.anchors]
+"6.11.2" = ["libQt6Core.so.6+0x2ae895@3e89a2b2af7893db9e9a63269b878a94627e4142", "libQt6Core.so.6+0x2d1ab3@3e89a2b2af7893db9e9a63269b878a94627e4142"]
+
+[[class.arrangement]]
+role = "access-first"
+interceptor = "free"
+below_module = "libQt6Core.so.6"
+thread = "main"
+access = "write:8"
+
+[[class.arrangement]]
+role = "access-second"
+interceptor = "realloc"
 below_module = "libQt6Core.so.6"
 thread = "QDBusConnection"
 access = "write:8"
