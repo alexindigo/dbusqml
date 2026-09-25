@@ -7,6 +7,7 @@
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
+#include <QDBusServiceWatcher>
 #include <QDBusVariant>
 #include <QXmlStreamReader>
 #include <QDir>
@@ -5540,6 +5541,22 @@ void TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() {
     // delivered its acquisition through the relay after the storm.
     churn.unregisterService(name);
     const qint64 stormMs = bound.elapsed();
+
+    // G1-investigation diagnostic (test-only; no behavior change): tap the
+    // private bus so we can see whether and when the daemon emitted
+    // NameOwnerChanged(name, *, <survivor>).
+    QProcess mon;
+    const QString monLog =
+        QStringLiteral("/tmp/g1-monitor-%1.log").arg(QCoreApplication::applicationPid());
+    mon.setProgram(QStringLiteral("dbus-monitor"));
+    mon.setArguments({QStringLiteral("--address"),
+                      QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS")),
+                      QStringLiteral("type='signal',interface='org.freedesktop.DBus',"
+                                     "member='NameOwnerChanged'"),
+                      QStringLiteral("type='method_call',interface='org.freedesktop.DBus'")});
+    mon.setStandardOutputFile(monLog);
+    mon.start();
+
     QObject *s = comp.create();
     QVERIFY(s != nullptr);
     QSignalSpy sSpy(s, SIGNAL(nameAcquired()));
@@ -5547,7 +5564,50 @@ void TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() {
     // backlog and the relay's drain — both proportional to how long the storm
     // took under the current load. A fixed 15 s was 3× red on a 15 h,
     // OOM-battered VM and green fresh (quiet-hours report §5).
-    QTRY_VERIFY_WITH_TIMEOUT(sSpy.count() >= 1, qMax(15000, int(3 * stormMs)));
+    const int settleMs = qMax(15000, int(3 * stormMs));
+    // Diagnostics (ruling): count the name's ownership changes on the session
+    // connection from here on, with timestamps.
+    QElapsedTimer sinceSurvivor;
+    sinceSurvivor.start();
+    QDBusServiceWatcher nameWatch(name, QDBusConnection::sessionBus(),
+                                  QDBusServiceWatcher::WatchForOwnerChange);
+    QStringList ownerTransitions;
+    QObject::connect(
+        &nameWatch, &QDBusServiceWatcher::serviceOwnerChanged, s,
+        [&](const QString &, const QString &oldO, const QString &newO) {
+            ownerTransitions
+                << QStringLiteral("%1ms %2->%3").arg(sinceSurvivor.elapsed()).arg(oldO, newO);
+        });
+    QElapsedTimer wait;
+    wait.start();
+    while (sSpy.count() < 1 && wait.elapsed() < settleMs) {
+        QCoreApplication::processEvents();
+        QThread::msleep(2);
+    }
+    const bool arrived = sSpy.count() >= 1;
+    if (mon.state() == QProcess::Running) {
+        mon.kill();
+        mon.waitForFinished(1000);
+    }
+    // Always on (the acquisition-time distribution is the (a)-side evidence
+    // when no failure fires): elapsed since the survivor's create.
+    qInfo() << "G1-diag survivor acquisition at" << sinceSurvivor.elapsed() << "ms (storm"
+            << stormMs << "ms; settle window" << settleMs << "ms)";
+    if (!arrived) {
+        // Failure path: dump the evidence BEFORE failing the same assertion.
+        QDBusMessage gm = QDBusMessage::createMethodCall(
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("GetNameOwner"));
+        gm.setArguments({name});
+        const QDBusMessage gr = QDBusConnection::sessionBus().call(gm, QDBus::Block, 3000);
+        qInfo() << "G1-diag GetNameOwner:" << gr;
+        qInfo() << "G1-diag elapsed since survivor create:" << sinceSurvivor.elapsed()
+                << "ms (settle was" << settleMs << "ms; storm took" << stormMs << "ms)";
+        qInfo() << "G1-diag owner transitions seen on the session connection:" << ownerTransitions;
+        qInfo() << "G1-diag claim record (survivor's connection):"
+                << DBusPathDispatcher::debugClaimState(QDBusConnection::sessionBus().name(), name);
+        qInfo() << "G1-diag monitor log:" << monLog;
+    }
     acquiredNotes = sSpy.count();
     QVERIFY(acquiredNotes >= 1);
     delete s;

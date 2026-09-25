@@ -158,17 +158,25 @@ bool OwnerChangeRelay::event(QEvent *e) {
         {
             RegistryMutexGuard locker(registryMutex());
             auto it = serviceClaims().find({note.connName, note.service});
-            if (it == serviceClaims().end())
+            if (it == serviceClaims().end()) {
+                qCDebug(lcDbusqmlDispatch)
+                    << "relay drop [claim gone]:" << note.service << "on" << note.connName;
                 drop = true; // Claim gone → drop the note. A detached
                              // adaptor wants no notification.
-            else if (!it.value().notifyQueued)
+            } else if (!it.value().notifyQueued) {
+                qCDebug(lcDbusqmlDispatch)
+                    << "relay drop [stale/not-queued]:" << note.service << "on" << note.connName;
                 drop = true; // Stale/duplicate post — already delivered.
-            else {
+            } else {
                 ServiceClaim &claim = it.value();
                 claim.notifyQueued = false;
-                if (claim.owned == claim.lastNotifiedOwned)
+                if (claim.owned == claim.lastNotifiedOwned) {
+                    qCDebug(lcDbusqmlDispatch)
+                        << "relay drop [coalesced/no net transition]:" << note.service << "on"
+                        << note.connName << "owned=" << claim.owned
+                        << "lastNotified=" << claim.lastNotifiedOwned;
                     drop = true; // Coalesced burst, no net transition.
-                else {
+                } else {
                     claim.lastNotifiedOwned = claim.owned;
                     acquired = claim.owned;
                     holders = claim.holders;
@@ -223,8 +231,11 @@ void DBusPathDispatcher::handleServiceOwnerChange(const QString &connName, const
     {
         RegistryMutexGuard locker(registryMutex());
         auto it = serviceClaims().find({connName, service});
-        if (it == serviceClaims().end())
+        if (it == serviceClaims().end()) {
+            qCDebug(lcDbusqmlDispatch) << "owner-change for unclaimed" << service << "on"
+                                       << connName << "(no claim record — skipped)";
             return;
+        }
         ServiceClaim &claim = it.value();
         if (newOwner == claim.baseService && !claim.owned) {
             claim.owned = true;
@@ -232,11 +243,17 @@ void DBusPathDispatcher::handleServiceOwnerChange(const QString &connName, const
         } else if (claim.owned && newOwner != claim.baseService) {
             claim.owned = false;
         } else {
+            qCDebug(lcDbusqmlDispatch) << "owner-change for" << service << "on" << connName
+                                       << "is no transition (owned=" << claim.owned
+                                       << "newOwner=" << newOwner << ") — skipped";
             return;
         }
         // Coalesce: the relay diffs owned vs lastNotifiedOwned, so any
         // number of posts collapse into the net transition.
         claim.notifyQueued = true;
+        qCDebug(lcDbusqmlDispatch)
+            << "owner-change transition for" << service << "on" << connName
+            << "-> owned=" << claim.owned << "(was notified" << claim.lastNotifiedOwned << ")";
         note = {connName, service};
         haveNote = true;
         // Publish the relay before any watch can fire (creation under the
@@ -621,6 +638,27 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
 int DBusPathDispatcher::liveCount() {
     RegistryMutexGuard locker(registryMutex());
     return dispatchers().size();
+}
+
+// G1 investigation (debug-only caller: the owner-change storm test): dump the
+// claim record for (connName, service). Reads under the registry lock; no
+// state is modified. Returns an empty string when no claim exists.
+QString DBusPathDispatcher::debugClaimState(const QString &connName, const QString &service) {
+    RegistryMutexGuard locker(registryMutex());
+    auto it = serviceClaims().find({connName, service});
+    if (it == serviceClaims().end())
+        return QString();
+    const ServiceClaim &c = it.value();
+    return QStringLiteral("owned=%1 lastNotifiedOwned=%2 notifyQueued=%3 refs=%4 pending=%5 "
+                          "tearingDown=%6 watchArmed=%7 base=%8")
+        .arg(c.owned)
+        .arg(c.lastNotifiedOwned)
+        .arg(c.notifyQueued)
+        .arg(c.refs)
+        .arg(c.pending)
+        .arg(c.tearingDown)
+        .arg(c.watchContext != nullptr)
+        .arg(c.baseService);
 }
 
 void DBusPathDispatcher::attachAdaptor(DBusAdaptor *adaptor) {

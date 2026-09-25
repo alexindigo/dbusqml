@@ -82,6 +82,11 @@ public:
     // baseline (no leaked bus registrations).
     static int liveCount();
 
+    // Library-private diagnostics (G1 investigation; called only from tests,
+    // never in production paths): the claim state for (connName, service) as
+    // a debug string, or an empty string when no claim record exists.
+    static QString debugClaimState(const QString &connName, const QString &service);
+
     // QDBusVirtualObject
     QString introspect(const QString &path) const override;
     bool handleMessage(const QDBusMessage &message, const QDBusConnection &connection) override;
