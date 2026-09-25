@@ -287,10 +287,17 @@ private slots:
             first = r2.arguments().first();
         }
         const QDBusArgument reader = qvariant_cast<QDBusArgument>(first);
-        if (reader.currentSignature() == QLatin1String("(as)"))
+        // beginStructure() on the const reader allocates QtDBus's
+        // sub-demarshaller, freed only by the matching endStructure() —
+        // pair them (Qt 6.8.2 ASan + slow unwinder evidence: the unpaired
+        // begin leaked 112 B per run — quiet-hours slow-unwinder report).
+        const bool entered = reader.currentSignature() == QLatin1String("(as)");
+        if (entered)
             reader.beginStructure();
         qInfo("AsArray pin executing qdbus_cast<DBusAsArray>");
         const DBusAsArray back = qdbus_cast<DBusAsArray>(reader);
+        if (entered)
+            reader.endStructure();
         QCOMPARE(back.value, (QStringList{QStringLiteral("one"), QStringLiteral("two")}));
     }
 };
