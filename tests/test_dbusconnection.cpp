@@ -3565,7 +3565,17 @@ int main(int argc, char *argv[]) {
     for (const QString &name : openedConnectionNames())
         QDBusConnection::disconnectFromBus(name);
     if (s_testService) {
+        // Quiesce before the delete: unregister (synchronously stops new
+        // dispatch), then drain a few iterations so the connection worker's
+        // already-posted events for the object are delivered or discarded on
+        // its (this) thread. Deleting while the worker still posted raced its
+        // QPostEventList growth against the destructor (pre-push-fixes-report-5).
         QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/TestService"));
+        for (int i = 0; i < 50; ++i) {
+            app.processEvents();
+            app.sendPostedEvents(nullptr, QEvent::DeferredDelete);
+            QThread::msleep(1);
+        }
         delete s_testService;
         s_testService = nullptr;
     }
