@@ -137,7 +137,13 @@ jobs:
           # that stops firing fails the job itself. The independent
           # crosscheck (scripts/tsan-crosscheck.sh) re-greps the
           # classifier's foreign blocks and must agree.
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan-suppressions.txt
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan-suppressions.txt:fast_unwind_on_malloc=0
+          # fast_unwind_on_malloc=0: LSan's default fast unwinder stops at
+          # the first frame without frame pointers (Qt's archive builds),
+          # producing 2-frame nameless stacks that mis-attribute leaks and
+          # make named suppressions unmatchable; the slow (DWARF) unwinder is
+          # what xdg-desktop-portal's CI uses (its tests/conftest.py). An
+          # unwinder setting, not a suppression.
           TSAN_OPTIONS: exitcode=0:suppressions=${{ github.workspace }}/tests/tsan-suppressions.txt
         run: |
           if [ "${{ matrix.sanitizer }}" = "thread" ]; then
