@@ -102,9 +102,12 @@ if grep -q "WARNING: ThreadSanitizer" "$WORK/foreign.log"; then
         cat "$WORK/foreign.verdict"
         gate_fail
     fi
-    grep -q "id=qt6-dbus-bus-bind-worker-startup" "$WORK/foreign.verdict" || {
-        echo "GATE FAIL: foreign canary classified but not as the registered" \
-            "bus-bind class"
+    # The bus-bind family has four members across Qt versions; which one the
+    # canary hits is Qt's choice (6.11.2: worker-startup; 6.8.2:
+    # alloc-new-delete). Any registered family member proves the machinery.
+    grep -Eq 'id=qt6-dbus-bus-bind-[a-z0-9-]+' "$WORK/foreign.verdict" || {
+        echo "GATE FAIL: foreign canary classified but not as a registered" \
+            "bus-bind-family class"
         cat "$WORK/foreign.verdict"
         gate_fail
     }

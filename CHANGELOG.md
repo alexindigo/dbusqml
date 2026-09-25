@@ -223,6 +223,12 @@ infrastructure that materially affects consumer trust).
 - **Dead oracle `DoubleSend` member removed** — the suite's double-send
   service is QtDBus-side.
 - **H6c `Failed` is wire-pinned** — real method-call, name + count legs.
+- **Test teardown is explicit** — the suites close their named connections,
+  stop the oracle, and delete their static engines before exit (LSan-clean
+  on CI's Qt 6.8.2 save libdbus's process-lifetime register residue);
+  the TSan gate's foreign canary now accepts any registered bus-bind-family
+  class; the owner-change storm's survivor settle is proportional to the
+  storm's measured duration.
 
 ### Docs
 
