@@ -464,7 +464,11 @@ def anchor_mismatch_reason(block_anchors, entry_site_lists):
     return "site anchors differ"
 
 
-ANCHOR_TRIPLE_RE = re.compile(r"^[^+()]+\+0x[0-9a-fA-F]+@[0-9a-fA-F]{8,}$")
+# Module basenames may contain '+' (libstdc++.so.6 is the canonical case);
+# the '+0x<hex>@' tail is unambiguous, so the module is everything before the
+# LAST '+0x'. Parens stay excluded (frame-text confusion guard); everything
+# else stays fail-closed.
+ANCHOR_TRIPLE_RE = re.compile(r"^[^()]+\+0x[0-9a-fA-F]+@[0-9a-fA-F]{8,}$")
 
 
 def load_register(path):

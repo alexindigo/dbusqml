@@ -191,10 +191,18 @@ def main():
             ("register-bad-missing-field.toml", "missing required fields"),
             ("register-bad-empty-arrangement.toml", "non-empty list"),
             ("register-bad-anchors-missing.toml", "anchors absent for validated Qt 6.8.2"),
+            ("register-bad-anchor-malformed.toml", "triples"),
             ("register-bad-qt-scalar.toml", "qt_validated must be a list")]:
         expect(f"register schema: {bad} -> load FAIL naming the error",
                "foreign-bus-bind-suite.log", True,
                register=os.path.join(FIXTURES, bad), want_substr=needle)
+
+    # the '+'-in-module case (libstdc++.so.6): a valid register carrying such
+    # an anchor must LOAD clean (the schema's module charset includes '+').
+    expect("register schema: libstdc++.so.6 anchor loads",
+           "foreign-bus-bind-suite.log", False,
+           register=os.path.join(FIXTURES, "register-good-libstdcxx-anchor.toml"),
+           want_substr="VERDICT: PASS")
 
     # 7g. build identity (v3.1, tsan-buildid-fold) — astra's fourth
     # objection: a version string is not a binary identity; the anchor

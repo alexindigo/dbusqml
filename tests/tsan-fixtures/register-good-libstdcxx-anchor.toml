@@ -1,0 +1,65 @@
+# Selftest fixture: a valid register whose second entry anchors on a module
+# with '+' in its basename (libstdc++.so.6) — must LOAD clean (the anchor
+# schema accepts '+' in module basenames).
+
+[[class]]
+id = "probe-bus-bind"
+report_type = "data race"
+classification = "accepted-unresolved-Qt-internal-risk — test"
+qt_validated = ["6.11.2"]
+summary_class = "s"
+addr2line = "a"
+reproducer = "r"
+owning_test = "o"
+parent_parity = "p"
+upstream_link = "u"
+honesty_qualifier = "h"
+falsifier = "f"
+
+[class.anchors]
+"6.11.2" = ["libQt6Core.so.6+0x2ae895@3e89a2b2af7893db9e9a63269b878a94627e4142", "libQt6Core.so.6+0x2ae4aa@3e89a2b2af7893db9e9a63269b878a94627e4142"]
+
+[[class.arrangement]]
+role = "access-first"
+interceptor = "free"
+below_module = "libQt6Core.so.6"
+thread = "main"
+access = "write:8"
+
+[[class.arrangement]]
+role = "access-second"
+interceptor = "__tsan_memmove"
+below_module = "libQt6Core.so.6"
+thread = "QDBusConnection"
+access = "write:8"
+
+[[class]]
+id = "probe-watchdog"
+report_type = "data race"
+classification = "accepted-unresolved-Qt-internal-risk — test"
+qt_validated = ["6.8.2"]
+summary_class = "s"
+addr2line = "a"
+reproducer = "r"
+owning_test = "o"
+parent_parity = "p"
+upstream_link = "u"
+honesty_qualifier = "h"
+falsifier = "f"
+
+[class.anchors]
+"6.8.2" = ["libstdc++.so.6+0xdc817@5b8d3de442de987b24d0e3679533068f2ae62497", "libstdc++.so.6+0xb3607@5b8d3de442de987b24d0e3679533068f2ae62497"]
+
+[[class.arrangement]]
+role = "access-first"
+interceptor = "clock_gettime"
+below_module = "libstdc++.so.6"
+thread = "main"
+access = "write:8"
+
+[[class.arrangement]]
+role = "access-second"
+interceptor = "pthread_cond_wait"
+below_module = "libstdc++.so.6"
+thread = "QtTest Watchdog"
+access = "atomic read:1"
