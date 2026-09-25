@@ -5539,10 +5539,15 @@ void TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() {
     // Liveness: free the churned name, then a survivor must still be
     // delivered its acquisition through the relay after the storm.
     churn.unregisterService(name);
+    const qint64 stormMs = bound.elapsed();
     QObject *s = comp.create();
     QVERIFY(s != nullptr);
     QSignalSpy sSpy(s, SIGNAL(nameAcquired()));
-    QTRY_VERIFY_WITH_TIMEOUT(sSpy.count() >= 1, 15000);
+    // The survivor's acquisition queues behind the daemon's NameOwnerChanged
+    // backlog and the relay's drain — both proportional to how long the storm
+    // took under the current load. A fixed 15 s was 3× red on a 15 h,
+    // OOM-battered VM and green fresh (quiet-hours report §5).
+    QTRY_VERIFY_WITH_TIMEOUT(sSpy.count() >= 1, qMax(15000, int(3 * stormMs)));
     acquiredNotes = sSpy.count();
     QVERIFY(acquiredNotes >= 1);
     delete s;
