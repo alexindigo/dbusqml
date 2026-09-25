@@ -84,17 +84,21 @@ classification = "accepted-unresolved-Qt-internal-risk — NOT proven false posi
 qt_validated = ["6.11.2"]
 
 # --- Evidence block (mirrors the suppression file's six-field discipline) ---
-# SUMMARY class: data race (libQt6Core.so.6+0x2ae895) — main-thread free()
-#   inside qDBusBindToApplication (the once-per-process bus bind spawning
-#   the QDBusConnection worker) vs the just-spawned worker's memmove.
-summary_class = "data race (libQt6Core.so.6+0x2ae895) — QtDBus bus-bind task teardown vs worker startup"
-# addr2line best-symbols (Qt 6.11.2, fork): 0x2ae895 =
-#   QRunnable::QGenericRunnable::~QGenericRunnable (main, free side);
-#   0x2ae4aa = same vicinity (worker memmove side); 0x3b97e =
-#   qDBusBindToApplication. All runtime-invisible to TSan (<null> frames) —
-#   the class is structurally beyond TSan's suppression matcher, which is
-#   why it lives HERE (the verdict layer) and not in tsan-suppressions.txt.
-addr2line = "0x2ae895=QRunnable::QGenericRunnable::~QGenericRunnable; 0x2ae4aa=QGenericRunnable vicinity (worker); 0x3b97e=qDBusBindToApplication"
+# SUMMARY class: data race (libQt6Core.so.6+0x2ae895) — the main thread
+#   destroys the just-finished QDBusConnection worker's thread data
+#   (~QThreadData) while the worker's own post-event-list/string activity
+#   is still settling.
+summary_class = "data race (libQt6Core.so.6+0x2ae895) — main-thread QThreadData teardown of the finished QDBusConnection worker vs the worker's own settling activity"
+# Symbols resolved 2026-09-24 via debuginfod.archlinux.org, BuildId
+#   3e89a2b2af7893db9e9a63269b878a94627e4142 (fd1-investigation.md); earlier
+#   strings were nearest-exported guesses (QtDBus uses no QRunnable/
+#   QThreadPool at all). Real: 0x2ae895=QThreadData::~QThreadData (main);
+#   0x2ae4aa=QPostEventList::addEvent (worker); 0x3b97e=
+#   QDBusConnectionManager::instance(). All runtime-invisible to TSan
+#   (<null> frames) — the class is structurally beyond TSan's suppression
+#   matcher, which is why it lives HERE (the verdict layer) and not in
+#   tsan-suppressions.txt.
+addr2line = "0x2ae895=QThreadData::~QThreadData (main, free side); 0x2ae4aa=QPostEventList::addEvent (worker); 0x3b97e=QDBusConnectionManager::instance"
 # Reproducing probe + rate: council-punch artifacts/isolate_tsan.cpp
 #   connonly mode — 20/20 deterministic; suite testHeldReplyTimeoutSettleCancels
 #   ~4/10 (ambient timing).
@@ -152,9 +156,11 @@ access = "write:8"
 # plans/tsan-register-tightening/probes/canary-variant-captures.tgz;
 # committed as fixtures foreign-bus-bind-variant-{worker,main}-realloc.log).
 # Both are the 0x2d1ab3 allocator site (QArrayData::reallocateUnaligned —
-# the detector layer's accepted-risk register entry) racing the bus-bind
-# worker's memmove at 0x2ae4aa; in suite binaries the detector layer's
-# test-scoped suppression anchors (qt_static_metacall) absorb it — it
+# the detector layer's accepted-risk register entry) racing the post-event
+# list's memmove at 0x2ae4aa (QPostEventList::addEvent — resolved
+# 2026-09-24 via debuginfod; was "the bus-bind worker's memmove"); in suite
+# binaries the detector layer's test-scoped suppression anchors
+# (qt_static_metacall) absorb it — it
 # reaches the verdict layer only in non-test binaries (canary/probe).
 # They differ ONLY in which thread performs the realloc — the
 # arrangement-tightness case made flesh. The previously demoted pooled
@@ -169,8 +175,13 @@ report_type = "data race"
 classification = "accepted-unresolved-Qt-internal-risk — NOT proven false positive"
 qt_validated = ["6.11.2"]
 
-summary_class = "data race (libQt6Core.so.6+0x2d1ab3) — QDBusConnection worker's QArrayData realloc vs main-thread memmove (bus-bind family)"
-addr2line = "0x2d1ab3=QArrayData::reallocateUnaligned (realloc side); 0x2ae4aa=QGenericRunnable vicinity (memmove side)"
+# Symbols resolved 2026-09-24 via debuginfod.archlinux.org, BuildId
+#   3e89a2b2af7893db9e9a63269b878a94627e4142 (fd1-investigation.md); earlier
+#   strings were nearest-exported guesses. Real: 0x2ae4aa=
+#   QPostEventList::addEvent (the post-event list growing via memmove);
+#   0x2d1ab3 was right (QArrayData::reallocateUnaligned, qarraydata.cpp:236).
+summary_class = "data race (libQt6Core.so.6+0x2d1ab3) — the finished QDBusConnection worker's QArrayData realloc vs the main thread's teardown-side post-event-list activity (QThreadData teardown, bus-bind family)"
+addr2line = "0x2d1ab3=QArrayData::reallocateUnaligned (realloc side, qarraydata.cpp:236); 0x2ae4aa=QPostEventList::addEvent (memmove side)"
 reproducer = "amplified pure-QtDBus bind loop (25 binds/run) — 3/20 this arrangement; never observed in the suite selection"
 owning_test = "none in the suite — canary/probe context only (tsan_canary_foreign)"
 parent_parity = "family pre-existing; the 0x2d1ab3 site is the detector layer's accepted-risk register entry (test-binary-scoped suppression anchors keep it out of suite binaries)"
@@ -202,8 +213,13 @@ report_type = "data race"
 classification = "accepted-unresolved-Qt-internal-risk — NOT proven false positive"
 qt_validated = ["6.11.2"]
 
-summary_class = "data race (libQt6Core.so.6+0x2d1ab3) — main-thread QArrayData realloc vs the QDBusConnection worker's memmove (bus-bind family)"
-addr2line = "0x2d1ab3=QArrayData::reallocateUnaligned (realloc side); 0x2ae4aa=QGenericRunnable vicinity (memmove side)"
+# Symbols resolved 2026-09-24 via debuginfod.archlinux.org, BuildId
+#   3e89a2b2af7893db9e9a63269b878a94627e4142 (fd1-investigation.md); earlier
+#   strings were nearest-exported guesses. Real: 0x2ae4aa=
+#   QPostEventList::addEvent; 0x2d1ab3 was right (QArrayData::
+#   reallocateUnaligned, qarraydata.cpp:236).
+summary_class = "data race (libQt6Core.so.6+0x2d1ab3) — the main thread's QArrayData realloc during teardown vs the finished QDBusConnection worker's post-event-list activity (QThreadData teardown, bus-bind family)"
+addr2line = "0x2d1ab3=QArrayData::reallocateUnaligned (realloc side, qarraydata.cpp:236); 0x2ae4aa=QPostEventList::addEvent (memmove side)"
 reproducer = "amplified pure-QtDBus bind loop (25 binds/run) — 1/20 this arrangement; never observed in the suite selection"
 owning_test = "none in the suite — canary/probe context only (tsan_canary_foreign)"
 parent_parity = "family pre-existing; the 0x2d1ab3 site is the detector layer's accepted-risk register entry (test-binary-scoped suppression anchors keep it out of suite binaries)"

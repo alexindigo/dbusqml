@@ -316,16 +316,18 @@ road-to-one C3 grep-gate).** Two layers, each with its own job:
 
   The foreign register currently holds three classes, all the Qt bus-bind
   family: `qt6-dbus-bus-bind-worker-startup` (the `0x2ae895` report:
-  main-thread `free()` inside `qDBusBindToApplication` — the
-  once-per-process bus bind spawning the QDBusConnection worker — racing
-  the just-spawned worker's `memmove`; both access stacks
-  runtime-symbol-less, hence structurally beyond TSan's suppression
-  matcher, hence the verdict layer) and the two captured `0x2d1ab3`
-  allocator-site variants (`qt6-dbus-bus-bind-realloc-{worker,main}` —
-  `QArrayData::reallocateUnaligned` racing the worker's `memmove`,
+  the main thread's `QThreadData` teardown of the just-finished
+  QDBusConnection worker — reached via `QDBusConnectionManager::instance()`
+  — racing the worker's own settling activity (`QPostEventList::addEvent`);
+  both access stacks runtime-symbol-less, hence structurally beyond TSan's
+  suppression matcher, hence the verdict layer) and the two captured
+  `0x2d1ab3` allocator-site variants (`qt6-dbus-bus-bind-realloc-{worker,main}` —
+  `QArrayData::reallocateUnaligned` racing the post-event-list memmove,
   differing only in which thread reallocs; they reach the verdict layer
   only in non-test binaries, where the detector layer's test-scoped
-  suppression anchors don't apply). Classification on all three:
+  suppression anchors don't apply). (Mechanism strings resolved to real
+  symbols 2026-09-24 via debuginfod — the earlier "QGenericRunnable /
+  qDBusBindToApplication" phrasing was nearest-exported-symbol guesses.) Classification on all three:
   *accepted-unresolved-Qt-internal-risk — NOT proven false positive*;
   falsifier: the B run (one-shot TSan-instrumented Qt build —
   `~/Documents/dbusqml/todos/TODO.md`), which now decides a three-entry
