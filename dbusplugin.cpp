@@ -1,12 +1,8 @@
 #include <QDBusMetaType>
-#include <QQmlEngineExtensionPlugin>
 
 #include "dbustypes.h"
 
-void qml_register_types_DBus();
-
 // Type converter registrations that must run when the library is loaded.
-// Called both from the static initializer below and from the plugin constructor.
 static void registerTypeConverters() {
     static bool registered = false;
     if (registered)
@@ -85,17 +81,8 @@ struct Init {
 } _init;
 } // namespace
 
-class DBusPlugin : public QQmlEngineExtensionPlugin {
-    Q_OBJECT
-    Q_PLUGIN_METADATA(IID QQmlExtensionInterface_iid)
-    Q_DISABLE_COPY_MOVE(DBusPlugin)
-
-public:
-    DBusPlugin(QObject *parent = nullptr) : QQmlEngineExtensionPlugin(parent) {
-        registerTypeConverters();
-        volatile auto registration = &qml_register_types_DBus;
-        Q_UNUSED(registration);
-    }
-};
-
-#include "dbusplugin.moc"
+// There is deliberately no QML plugin class in this file: qt_add_qml_module
+// generates the real one into libdbusqmlplugin.so. The hand-written class
+// that used to live here compiled into libdbusqml.so, was never instantiated,
+// and its duplicate staticMetaObject tripped ASan's ODR check whenever a
+// process loaded both DSOs (quiet-hours report §4).

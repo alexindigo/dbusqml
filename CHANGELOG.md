@@ -171,6 +171,10 @@ infrastructure that materially affects consumer trust).
   honored.
 - **C++-path methods with more than five arguments answer `Failed`**
   instead of declining.
+- **Plugin loads clean under ASan's ODR check** — the backing library no
+  longer carries a dead duplicate of the generated QML plugin class (its
+  copy of the class's `staticMetaObject` tripped the odr-violation abort
+  when a process had both DSOs loaded, e.g. an ASan-instrumented consumer).
 
 ### Quality
 
