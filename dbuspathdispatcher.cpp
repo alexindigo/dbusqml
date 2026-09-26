@@ -54,8 +54,24 @@ struct ServiceClaim {
     // only delivers real transitions (stale/duplicate posts harmless).
     bool notifyQueued = false;
     bool lastNotifiedOwned = false;
+    // A2/A3 (the G1 fix): the RequestName reply drives the claim's initial
+    // state. requestToken is a process-global monotonically increasing id,
+    // never reused; latched on the claim at every send, bumped on every send,
+    // on last detach, and on adoption — a reply whose token mismatches is
+    // stale and a no-op. lostSinceSend: an owner-change to a foreign owner
+    // for the current token marks it, making a later PRIMARY_OWNER reply a
+    // no-op (astra's same-generation guard).
+    uint requestToken = 0;
+    bool lostSinceSend = false;
     QList<QPointer<DBusAdaptor>> holders;
 };
+
+// A5: the invariant every writer must keep — an owned claim has either been
+// notified or has a note in flight (otherwise a joiner's CF-19 direct
+// delivery would double with the pending note).
+inline void assertClaimInvariant(const ServiceClaim &claim) {
+    Q_ASSERT(!claim.owned || claim.lastNotifiedOwned || claim.notifyQueued);
+}
 
 QMutex &registryMutex() {
     static QMutex m;
@@ -121,6 +137,13 @@ std::atomic<bool> &ownerChangeDrainPosted() {
 QHash<QString, OwnerChangeReceiver *> &ownerChangeReceivers() {
     static QHash<QString, OwnerChangeReceiver *> h;
     return h;
+}
+
+// A2: the process-global monotonically increasing request token — never
+// reused (a per-claim counter would restart after erasure and collide).
+std::atomic<uint> &nextRequestToken() {
+    static std::atomic<uint> next{0};
+    return next;
 }
 
 } // namespace
@@ -268,6 +291,10 @@ void DBusPathDispatcher::handleServiceOwnerChange(const QString &connName, const
             claim.queued = false;
         } else if (claim.owned && newOwner != claim.baseService) {
             claim.owned = false;
+            // Same-generation guard (astra): a takeover to a foreign owner
+            // for the current token makes a later PRIMARY_OWNER reply a
+            // no-op (the reply predates the loss).
+            claim.lostSinceSend = true;
         } else {
             qCDebug(lcDbusqmlDispatch) << "owner-change for" << service << "on" << connName
                                        << "is no transition (owned=" << claim.owned
@@ -277,6 +304,7 @@ void DBusPathDispatcher::handleServiceOwnerChange(const QString &connName, const
         // Coalesce: the relay diffs owned vs lastNotifiedOwned, so any
         // number of posts collapse into the net transition.
         claim.notifyQueued = true;
+        assertClaimInvariant(claim);
         qCDebug(lcDbusqmlDispatch)
             << "owner-change transition for" << service << "on" << connName
             << "-> owned=" << claim.owned << "(was notified" << claim.lastNotifiedOwned << ")";
@@ -326,6 +354,59 @@ void DBusPathDispatcher::handleConnectionLost(const QString &connName) {
         OwnerChangeRelay::postNote(std::move(n));
 }
 
+// A3: the reply drives the initial state. Whichever of the reply or the
+// signal arrives first wins; the relay's diff (owned vs lastNotifiedOwned)
+// makes the second a no-op. Same-generation ordering argument (astra): the
+// reply (via the watcher) and the signal (via A6's receiver) are both posted
+// to the receiver's thread in daemon order (FIFO) — a takeover signal for
+// the current token sets lostSinceSend, making a later PRIMARY_OWNER reply
+// a no-op.
+void DBusPathDispatcher::handleRequestNameReply(const QString &connName, const QString &service,
+                                                uint code, uint token) {
+    if (!QCoreApplication::instance())
+        return;
+    bool wakeRelay = false;
+    {
+        RegistryMutexGuard locker(registryMutex());
+        auto it = serviceClaims().find({connName, service});
+        if (it == serviceClaims().end())
+            return;
+        ServiceClaim &claim = it.value();
+        if (claim.requestToken != token || claim.refs == 0 || claim.tearingDown)
+            return; // stale reply — a later send/detach/adoption bumped the token
+        if (claim.lostSinceSend) {
+            claim.lostSinceSend = false;
+            return; // a foreign takeover for this token already moved the state
+        }
+        switch (code) {
+        case 1: // DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER
+        case 4: // DBUS_REQUEST_NAME_REPLY_ALREADY_OWNER
+            if (!claim.owned) {
+                claim.owned = true;
+                claim.queued = false;
+                claim.notifyQueued = true;
+                wakeRelay = true;
+                OwnerChangeRelay::instance();
+            }
+            break;
+        case 2: // DBUS_REQUEST_NAME_REPLY_IN_QUEUE
+            claim.queued = true;
+            break;
+        case 3: // DBUS_REQUEST_NAME_REPLY_EXISTS
+            // EXISTS (do-not-queue and the name is taken): warn only — the
+            // claim was never acquired, so no nameLost (never owned).
+            qCWarning(lcDbusqmlDispatch) << "service" << service << "on" << connName
+                                         << "exists and we were not queued (do-not-queue claim)";
+            break;
+        default:
+            break;
+        }
+        assertClaimInvariant(claim);
+    }
+    if (wakeRelay)
+        OwnerChangeRelay::postNote({connName, service});
+}
+
 DBusPathDispatcher::DBusPathDispatcher(const QString &connName, const QString &path,
                                        const QDBusConnection &conn)
     : m_connName(connName), m_path(path), m_conn(conn) {}
@@ -336,8 +417,8 @@ inline bool flaggedForClaim(bool allowReplacement, bool replaceExisting, bool qu
 }
 
 inline void sendFlaggedRequest(const QDBusConnection &conn, OwnerChangeReceiver *receiver,
-                               const QString &service, bool allowReplacement, bool replaceExisting,
-                               bool queueOnBusy) {
+                               const QString &service, uint token, bool allowReplacement,
+                               bool replaceExisting, bool queueOnBusy) {
     // Flagged claim: RequestName carrying the flags, sent non-blocking.
     // Acquisition or queueing is observed through the owner-change watch —
     // nameAcquired fires from there (consumers with flags wait for
@@ -349,21 +430,26 @@ inline void sendFlaggedRequest(const QDBusConnection &conn, OwnerChangeReceiver 
         QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
         QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
     req.setArguments({service, requestFlags});
+    // A3: the reply drives the initial state. The watcher lives on the
+    // registry-owned receiver (A2); the reply code is mapped into the claim
+    // by handleRequestNameReply under the registry lock, guarded by the
+    // claim's request token.
     auto pending = conn.asyncCall(req);
     // A2: the reply watcher's parent AND connect-context are the
     // registry-owned per-connection receiver — never the adaptor, never the
     // dispatcher (both can die before the reply arrives).
     auto *watcher = new QDBusPendingCallWatcher(pending, receiver);
     QObject::connect(watcher, &QDBusPendingCallWatcher::finished, receiver,
-                     [service](QDBusPendingCallWatcher *w) {
+                     [conn, service, token](QDBusPendingCallWatcher *w) {
                          QDBusPendingReply<uint> r = *w;
                          if (r.isError()) {
+                             // Documented unchanged: consumers waiting on
+                             // nameAcquired get no failure signal.
                              qWarning("dbusqml: Failed to register service %s: %s",
                                       qPrintable(service), qPrintable(r.error().message()));
-                         } else if (r.value() == 0) {
-                             qWarning("dbusqml: Failed to register service %s (in "
-                                      "use, not queued)",
-                                      qPrintable(service));
+                         } else {
+                             DBusPathDispatcher::handleRequestNameReply(conn.name(), service,
+                                                                        r.value(), token);
                          }
                          w->deleteLater();
                      });
@@ -479,7 +565,12 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
                 // deliver the current state directly (outside the lock).
                 claim.refs++;
                 claim.holders.append(adaptor);
-                if (claim.owned)
+                // A5: direct delivery only when the acquisition was already
+                // delivered (lastNotifiedOwned) — otherwise the relay serves
+                // the joiner (it re-resolves holders). The invariant every
+                // writer keeps: owned ⟹ (lastNotifiedOwned || notifyQueued).
+                assertClaimInvariant(claim);
+                if (claim.owned && claim.lastNotifiedOwned)
                     joinerNeedsAcquired = true;
             } else {
                 claim.refs = 1;
@@ -503,8 +594,13 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
                     // published — creation on the fire path is only the
                     // idempotent fallback.
                     OwnerChangeRelay::instance();
+                    // A2/A3: the token identifies this send; the reply drives
+                    // the claim's initial state via handleRequestNameReply.
+                    claim.requestToken = ++nextRequestToken();
+                    claim.lostSinceSend = false;
                     sendFlaggedRequest(conn, ownerChangeReceivers().value(connName), service,
-                                       allowReplacement, replaceExisting, queueOnBusy);
+                                       claim.requestToken, allowReplacement, replaceExisting,
+                                       queueOnBusy);
                     claim.pending = false;
                 }
             }
@@ -535,6 +631,7 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
                 // re-deliver a stale acquired. notifyQueued stays false —
                 // nothing for the relay to do.
                 claim.lastNotifiedOwned = true;
+                assertClaimInvariant(claim);
                 locker.m_locker.unlock();
                 adaptor->nameAcquiredInternal();
             } else {
@@ -589,6 +686,9 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
                 if (refs <= 0) {
                     claim.refs = 0;
                     claim.holders.clear();
+                    // A2: a reply to a pre-detach RequestName arriving now is
+                    // stale — bump the token so it no-ops (A3's guard).
+                    claim.requestToken = ++nextRequestToken();
                     // Part 2: only an OWNED name is worth the blocking
                     // ReleaseName. A lost name (takeover path) would return
                     // NOT_OWNER — futile by construction, and it used to log
@@ -645,7 +745,7 @@ QString DBusPathDispatcher::debugClaimState(const QString &connName, const QStri
         return QString();
     const ServiceClaim &c = it.value();
     return QStringLiteral("owned=%1 lastNotifiedOwned=%2 notifyQueued=%3 refs=%4 pending=%5 "
-                          "tearingDown=%6 watchArmed=%7 base=%8")
+                          "tearingDown=%6 watchArmed=%7 base=%8 token=%9 lostSinceSend=%10")
         .arg(c.owned)
         .arg(c.lastNotifiedOwned)
         .arg(c.notifyQueued)
@@ -653,7 +753,9 @@ QString DBusPathDispatcher::debugClaimState(const QString &connName, const QStri
         .arg(c.pending)
         .arg(c.tearingDown)
         .arg(ownerChangeReceivers().contains(connName))
-        .arg(c.baseService);
+        .arg(c.baseService)
+        .arg(c.requestToken)
+        .arg(c.lostSinceSend);
 }
 
 void DBusPathDispatcher::attachAdaptor(DBusAdaptor *adaptor) {

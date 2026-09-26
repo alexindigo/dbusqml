@@ -96,6 +96,12 @@ public:
     static void handleServiceOwnerChange(const QString &connName, const QString &service,
                                          const QString &newOwner);
 
+    // A3 (the G1 fix): the RequestName REPLY drives the claim's initial
+    // state. Called by the reply watcher (on the registry-owned receiver's
+    // thread) with the daemon's reply code; the token guards stale replies.
+    static void handleRequestNameReply(const QString &connName, const QString &service, uint code,
+                                       uint token);
+
     // P5 (features train, Phase 3): connection-loss fan-out. The
     // DBusConnection that observed Local.Disconnected calls this with its
     // QDBusConnection identity; every claim on that connection flips to

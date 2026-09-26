@@ -288,6 +288,21 @@ static void stopPrivateBus() {
 // destroyed there too, so the process exits with nothing of ours alive when
 // LeakSanitizer takes its snapshot.
 
+// G1 pins (P6): a dynamic QML signal has no C++ member pointer, so the
+// in-delivery joiner needs a slot — this tiny helper creates the joiner the
+// moment the anchor's nameAcquired fires.
+class JoinerOnSignal : public QObject {
+    Q_OBJECT
+public:
+    QQmlComponent *comp = nullptr;
+    QObject *created = nullptr;
+public slots:
+    void fire() {
+        if (!created)
+            created = comp->create();
+    }
+};
+
 static QStringList &openedConnectionNames() {
     static QStringList names;
     return names;
@@ -494,6 +509,11 @@ private slots:
     // re-entrant-handler, anchor-spy-timing, foreign-thread-adaptor.
     void testOwnerChangeDestroyDuringNotification();
     void testOwnerChangeWireOrdering();
+    void testReplyDrivenPrimaryOwner();
+    void testReplyDrivenAlreadyOwner();
+    void testReplyDrivenInQueue();
+    void testJoinerExactlyOnce();
+    void testGrantThenTakeoverOnce();
     void testOwnerChangeStormImmediateDelete();
     void testOwnerChangeReentrantHandler();
     void testOwnerChangeAnchorSpyTiming();
@@ -5693,6 +5713,252 @@ void TestDBusAdaptor::testOwnerChangeWireOrdering() {
                             .arg(firstRequest)
                             .arg(monLog)));
     delete stormConn;
+}
+
+// ---- A3/A5 pins (the reply-driven claim state + exactly-once joiner) ----
+// (council-amended plan §1; pins land with the commit they pin.)
+
+// P3: a flagged claim's acquisition must be driven from the RequestName
+// REPLY, so a late or suppressed owner-change signal can never wedge it —
+// the acquisition fires, and the claim record shows owned.
+void TestDBusAdaptor::testReplyDrivenPrimaryOwner() {
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.ReplyP3'\n"
+                              "  path: '/ReplyP3'\n"
+                              "  iface: 'org.dbusqml.ReplyP3'\n"
+                              "  allowReplacement: true\n"
+                              "  connection: connC\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    engine.rootContext()->setContextProperty(QStringLiteral("connC"), conn);
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    QObject *a = comp.create();
+    QVERIFY(a != nullptr);
+    QSignalSpy spy(a, SIGNAL(nameAcquired()));
+    QTRY_VERIFY_WITH_TIMEOUT(spy.count() >= 1, 10000);
+    const QString state = DBusPathDispatcher::debugClaimState(
+        QDBusConnection(*conn).name(), QStringLiteral("org.dbusqml.ReplyP3"));
+    QVERIFY2(state.contains(QLatin1String("owned=1")), qPrintable(state));
+    delete conn;
+    delete a;
+}
+
+// P4: a joiner on a claim the connection already owns gets ALREADY_OWNER —
+// its nameAcquired must still fire (from the reply).
+void TestDBusAdaptor::testReplyDrivenAlreadyOwner() {
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+
+    auto makeSrc = [](const QString &path) {
+        return QStringLiteral("import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.ReplyP4'\n"
+                              "  path: '%1'\n"
+                              "  iface: 'org.dbusqml.ReplyP4'\n"
+                              "  allowReplacement: true\n"
+                              "  connection: connC\n"
+                              "  function ping() { return 'x' }\n"
+                              "}")
+            .arg(path)
+            .toUtf8();
+    };
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    engine.rootContext()->setContextProperty(QStringLiteral("connC"), conn);
+
+    QQmlComponent compA(&engine);
+    compA.setData(makeSrc(QStringLiteral("/ReplyP4A")), QUrl());
+    QVERIFY2(compA.isReady(), qPrintable(compA.errorString()));
+    QObject *a = compA.create();
+    QVERIFY(a != nullptr);
+    QSignalSpy spyA(a, SIGNAL(nameAcquired()));
+    QTRY_VERIFY_WITH_TIMEOUT(spyA.count() >= 1, 10000);
+
+    QQmlComponent compB(&engine);
+    compB.setData(makeSrc(QStringLiteral("/ReplyP4B")), QUrl());
+    QVERIFY2(compB.isReady(), qPrintable(compB.errorString()));
+    // The joiner's acquisition may be delivered synchronously at
+    // completeCreate — the spy must exist before it.
+    QObject *b = compB.beginCreate(engine.rootContext());
+    QVERIFY(b != nullptr);
+    QSignalSpy spyB(b, SIGNAL(nameAcquired()));
+    compB.completeCreate();
+    QTRY_VERIFY_WITH_TIMEOUT(spyB.count() >= 1, 10000);
+    delete b;
+    delete conn;
+    delete a;
+}
+
+// P5: IN_QUEUE — no premature nameAcquired while the blocker owns it; the
+// later grant delivers exactly one.
+void TestDBusAdaptor::testReplyDrivenInQueue() {
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    // The blocker: a plain connection that owns the name first.
+    QDBusConnection blocker = QDBusConnection::connectToBus(QString::fromLocal8Bit(addr),
+                                                            QStringLiteral("g1-p5-blocker"));
+    QVERIFY(blocker.isConnected());
+    QVERIFY(blocker.registerService(QStringLiteral("org.dbusqml.ReplyP5")));
+
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.ReplyP5'\n"
+                              "  path: '/ReplyP5'\n"
+                              "  iface: 'org.dbusqml.ReplyP5'\n"
+                              "  queueOnBusy: true\n"
+                              "  connection: connC\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    engine.rootContext()->setContextProperty(QStringLiteral("connC"), conn);
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    QObject *a = comp.create();
+    QVERIFY(a != nullptr);
+    QSignalSpy spy(a, SIGNAL(nameAcquired()));
+
+    // While the blocker owns it: no acquisition.
+    QTest::qWait(400);
+    QCOMPARE(spy.count(), 0);
+
+    blocker.unregisterService(QStringLiteral("org.dbusqml.ReplyP5"));
+    QTRY_VERIFY_WITH_TIMEOUT(spy.count() >= 1, 10000);
+    QTest::qWait(200);
+    QCOMPARE(spy.count(), 1); // exactly one, from the eventual grant
+    blocker.disconnectFromBus(QStringLiteral("g1-p5-blocker"));
+    delete conn;
+    delete a;
+}
+
+// P6 (CF-19 exactly-once): a joiner attaching while the acquisition is
+// being delivered gets exactly one nameAcquired (never direct + relay).
+// The window is caught deterministically: the relay sets lastNotifiedOwned
+// before delivering holders, so the joiner attaches from inside A's own
+// nameAcquired signal — mid-delivery.
+void TestDBusAdaptor::testJoinerExactlyOnce() {
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+
+    auto makeSrc = [](const QString &path) {
+        return QStringLiteral("import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.JoinOnce'\n"
+                              "  path: '%1'\n"
+                              "  iface: 'org.dbusqml.JoinOnce'\n"
+                              "  allowReplacement: true\n"
+                              "  connection: connC\n"
+                              "  property int fired: 0\n"
+                              "  onNameAcquired: fired = fired + 1\n"
+                              "  function ping() { return 'x' }\n"
+                              "}")
+            .arg(path)
+            .toUtf8();
+    };
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    engine.rootContext()->setContextProperty(QStringLiteral("connC"), conn);
+
+    QQmlComponent compB(&engine);
+    compB.setData(makeSrc(QStringLiteral("/JoinOnceB")), QUrl());
+    QVERIFY2(compB.isReady(), qPrintable(compB.errorString()));
+
+    QQmlComponent compA(&engine);
+    compA.setData(makeSrc(QStringLiteral("/JoinOnceA")), QUrl());
+    QVERIFY2(compA.isReady(), qPrintable(compA.errorString()));
+    QObject *a = compA.create();
+    QVERIFY(a != nullptr);
+    QSignalSpy spyA(a, SIGNAL(nameAcquired()));
+
+    // The joiner attaches from inside A's nameAcquired — the relay is
+    // mid-delivery (lastNotifiedOwned already set; holders copied without
+    // the joiner). Exactly one delivery must reach it, never direct + relay.
+    JoinerOnSignal joiner;
+    joiner.comp = &compB;
+    QObject::connect(a, SIGNAL(nameAcquired()), &joiner, SLOT(fire()));
+    QTRY_VERIFY_WITH_TIMEOUT(spyA.count() >= 1, 10000);
+    QTest::qWait(300); // let every pending delivery run
+    QObject *b = joiner.created;
+    QVERIFY(b != nullptr);
+    QCOMPARE(b->property("fired").toInt(), 1);
+    delete b;
+    delete conn;
+    delete a;
+}
+
+// P7: grant then immediate REPLACE_EXISTING takeover — final state unowned;
+// exactly one nameAcquired and one nameLost (no double, no stale re-grant).
+void TestDBusAdaptor::testGrantThenTakeoverOnce() {
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+    const QString name = QStringLiteral("org.dbusqml.GrantTakeover");
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.GrantTakeover'\n"
+                              "  path: '/GrantTakeover'\n"
+                              "  iface: 'org.dbusqml.GrantTakeover'\n"
+                              "  allowReplacement: true\n"
+                              "  connection: connC\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    engine.rootContext()->setContextProperty(QStringLiteral("connC"), conn);
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    QObject *a = comp.create();
+    QVERIFY(a != nullptr);
+    QSignalSpy spyAcq(a, SIGNAL(nameAcquired()));
+    QSignalSpy spyLost(a, SIGNAL(nameLost()));
+    QTRY_VERIFY_WITH_TIMEOUT(spyAcq.count() >= 1, 10000);
+
+    // The takeover: a raw REPLACE_EXISTING RequestName from another
+    // connection (the churn-suite pattern).
+    QDBusConnection stealer = QDBusConnection::connectToBus(QString::fromLocal8Bit(addr),
+                                                            QStringLiteral("g1-p7-stealer"));
+    QVERIFY(stealer.isConnected());
+    QDBusMessage steal = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
+    steal.setArguments({name, uint(2)}); // REPLACE_EXISTING
+    QCOMPARE(stealer.call(steal, QDBus::Block, 5000).type(), QDBusMessage::ReplyMessage);
+
+    QTRY_VERIFY_WITH_TIMEOUT(spyLost.count() >= 1, 10000);
+    QTest::qWait(300); // let any stale duplicate delivery surface
+    QCOMPARE(spyAcq.count(), 1);
+    QCOMPARE(spyLost.count(), 1);
+    QCOMPARE(QDBusConnection::sessionBus().interface()->serviceOwner(name), stealer.baseService());
+    stealer.unregisterService(name);
+    stealer.disconnectFromBus(QStringLiteral("g1-p7-stealer"));
+    delete conn;
+    delete a;
 }
 
 // T1 relay gate G2 (V1 punch list): the F3 geometry via public API —
