@@ -54,12 +54,6 @@ struct ServiceClaim {
     // only delivers real transitions (stale/duplicate posts harmless).
     bool notifyQueued = false;
     bool lastNotifiedOwned = false;
-    QMetaObject::Connection watch;
-    // T1 watch context (library-owned delivery target for the claim's
-    // serviceOwnerChanged watch). Never moved after creation; freed via
-    // deleteLater on teardown. Raw pointer (QHash values must stay
-    // copyable; the claim record owns it exclusively).
-    OwnerChangeWatch *watchContext = nullptr;
     QList<QPointer<DBusAdaptor>> holders;
 };
 
@@ -121,7 +115,39 @@ std::atomic<bool> &ownerChangeDrainPosted() {
     return f;
 }
 
+// A6: the per-connection receivers (registry-owned). Keyed by connection
+// name; created at the first flagged attach on that connection; purged only
+// in handleConnectionLost. Access under registryMutex().
+QHash<QString, OwnerChangeReceiver *> &ownerChangeReceivers() {
+    static QHash<QString, OwnerChangeReceiver *> h;
+    return h;
+}
+
 } // namespace
+
+void OwnerChangeReceiver::onNameOwnerChanged(const QString &name, const QString &,
+                                             const QString &newOwner) {
+    // Fan out by service name into the same per-claim handling the
+    // per-claim watch delivered (A6: the delivery path is unchanged).
+    DBusPathDispatcher::handleServiceOwnerChange(m_connName, name, newOwner);
+}
+
+// Arm the connection's persistent subscription at the FIRST flagged attach
+// on it — before that attach's RequestName is enqueued. The public
+// QDBusConnection::connect hook install is a BlockingQueued call that
+// enqueues the AddMatch before returning, so the subscription precedes the
+// request on the socket by construction (the G1 wire pin, A8/P8).
+// CALLER: registryMutex() held (attach's flagged branch).
+void ensureOwnerChangeReceiver(QDBusConnection conn, const QString &connName) {
+    if (ownerChangeReceivers().contains(connName))
+        return;
+    auto *receiver = new OwnerChangeReceiver(connName);
+    conn.connect(QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+                 QStringLiteral("org.freedesktop.DBus"), QStringLiteral("NameOwnerChanged"),
+                 QStringLiteral("sss"), receiver,
+                 SLOT(onNameOwnerChanged(QString, QString, QString)));
+    ownerChangeReceivers().insert(connName, receiver);
+}
 
 void OwnerChangeRelay::postNote(Note n) {
     {
@@ -289,6 +315,12 @@ void DBusPathDispatcher::handleConnectionLost(const QString &connName) {
         }
         if (!notes.isEmpty())
             OwnerChangeRelay::instance();
+        // A6: the dead connection's receiver goes with it.
+        auto rit = ownerChangeReceivers().find(connName);
+        if (rit != ownerChangeReceivers().end()) {
+            rit.value()->deleteLater();
+            ownerChangeReceivers().erase(rit);
+        }
     }
     for (auto &n : notes)
         OwnerChangeRelay::postNote(std::move(n));
@@ -303,41 +335,9 @@ inline bool flaggedForClaim(bool allowReplacement, bool replaceExisting, bool qu
     return allowReplacement || replaceExisting || queueOnBusy;
 }
 
-inline void armClaimWatch(const QDBusConnection &conn, const QString &connName,
-                          const QString &service, ServiceClaim &claim) {
-    // Owner-change watch (flagged claims only): nameAcquired for queued
-    // acquisitions and nameLost for takeovers are driven by the daemon's
-    // owner changes. An unflagged claim cannot be taken away and releases
-    // its name only on its own teardown, so it needs no watch.
-    //
-    // T1 (features train, Phase 2): the watch context is a heap
-    // OwnerChangeWatch object, NOT conn.interface(). QtDBus's own
-    // NameOwnerChanged hook.obj is QDBusConnectionPrivate (direct
-    // delivery on the manager thread, qdbusintegrator.cpp:815-833);
-    // serviceOwnerChanged then AutoConnects to this watcher. With iface
-    // as the context the *connect* is a BlockingQueued metacall from the
-    // attach thread into the manager thread — attach deadlocks against
-    // its own watch delivery. A dedicated context confines that coupling
-    // to a QObject the library owns.
-    if (claim.watch)
-        return;
-    auto *watcher = new OwnerChangeWatch(connName, service);
-    claim.watch =
-        QObject::connect(conn.interface(), &QDBusConnectionInterface::serviceOwnerChanged, watcher,
-                         [watcher](const QString &name, const QString &, const QString &newOwner) {
-                             if (name == watcher->service())
-                                 DBusPathDispatcher::handleServiceOwnerChange(
-                                     watcher->connName(), watcher->service(), newOwner);
-                         });
-    claim.watchContext = watcher;
-    // Never moved: AutoConnection queues the lambda to this object's
-    // attach-thread affinity (qdbusintegrator.cpp:2711-2714 posts to
-    // hook.obj; our watch is the QObject::connect context, not hook.obj).
-}
-
-inline void sendFlaggedRequest(const QDBusConnection &conn, DBusPathDispatcher *disp,
-                               const QString &service, DBusAdaptor *adaptor, bool allowReplacement,
-                               bool replaceExisting, bool queueOnBusy) {
+inline void sendFlaggedRequest(const QDBusConnection &conn, OwnerChangeReceiver *receiver,
+                               const QString &service, bool allowReplacement, bool replaceExisting,
+                               bool queueOnBusy) {
     // Flagged claim: RequestName carrying the flags, sent non-blocking.
     // Acquisition or queueing is observed through the owner-change watch —
     // nameAcquired fires from there (consumers with flags wait for
@@ -350,8 +350,11 @@ inline void sendFlaggedRequest(const QDBusConnection &conn, DBusPathDispatcher *
         QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
     req.setArguments({service, requestFlags});
     auto pending = conn.asyncCall(req);
-    auto *watcher = new QDBusPendingCallWatcher(pending, disp);
-    QObject::connect(watcher, &QDBusPendingCallWatcher::finished, adaptor,
+    // A2: the reply watcher's parent AND connect-context are the
+    // registry-owned per-connection receiver — never the adaptor, never the
+    // dispatcher (both can die before the reply arrives).
+    auto *watcher = new QDBusPendingCallWatcher(pending, receiver);
+    QObject::connect(watcher, &QDBusPendingCallWatcher::finished, receiver,
                      [service](QDBusPendingCallWatcher *w) {
                          QDBusPendingReply<uint> r = *w;
                          if (r.isError()) {
@@ -487,17 +490,21 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
                 claim.lastNotifiedOwned = false;
                 doRegister = claim.pending;
                 if (flaggedForClaim(allowReplacement, replaceExisting, queueOnBusy)) {
-                    armClaimWatch(conn, connName, service, claim);
+                    // A6: arm the connection's registry-owned receiver
+                    // BEFORE the RequestName is enqueued — the public
+                    // QDBusConnection::connect hook install is a
+                    // BlockingQueued call that enqueues the AddMatch before
+                    // returning, so the match precedes the request on the
+                    // socket by construction (the wire pin).
+                    ensureOwnerChangeReceiver(conn, connName);
                     // Publish the relay at first flagged attach, before
-                    // any watch can fire (blessed shape): by the time the
-                    // manager thread observes an owner change, instance()
-                    // is already published — creation on the fire path is
-                    // only the idempotent fallback.
+                    // any owner change can fire (blessed shape): by the time
+                    // the manager thread observes one, instance() is already
+                    // published — creation on the fire path is only the
+                    // idempotent fallback.
                     OwnerChangeRelay::instance();
-                    // Flagged path unchanged: async RequestName, observed
-                    // through the watch.
-                    sendFlaggedRequest(conn, disp, service, adaptor, allowReplacement,
-                                       replaceExisting, queueOnBusy);
+                    sendFlaggedRequest(conn, ownerChangeReceivers().value(connName), service,
+                                       allowReplacement, replaceExisting, queueOnBusy);
                     claim.pending = false;
                 }
             }
@@ -580,18 +587,6 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
                 }
                 const int refs = claim.refs - 1;
                 if (refs <= 0) {
-                    if (claim.watch) {
-                        QObject::disconnect(claim.watch);
-                        claim.watch = QMetaObject::Connection();
-                    }
-                    // The watch context is manager-thread-affine by
-                    // delivery; destroy it on its own thread. deleteLater
-                    // from any thread is thread-safe (posts
-                    // DeferredDelete to the object's thread).
-                    if (claim.watchContext) {
-                        claim.watchContext->deleteLater();
-                        claim.watchContext = nullptr;
-                    }
                     claim.refs = 0;
                     claim.holders.clear();
                     // Part 2: only an OWNED name is worth the blocking
@@ -657,7 +652,7 @@ QString DBusPathDispatcher::debugClaimState(const QString &connName, const QStri
         .arg(c.refs)
         .arg(c.pending)
         .arg(c.tearingDown)
-        .arg(c.watchContext != nullptr)
+        .arg(ownerChangeReceivers().contains(connName))
         .arg(c.baseService);
 }
 

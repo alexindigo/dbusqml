@@ -493,6 +493,7 @@ private slots:
     // candidate 4, qwen G1–G5): destroy-during-notification,
     // re-entrant-handler, anchor-spy-timing, foreign-thread-adaptor.
     void testOwnerChangeDestroyDuringNotification();
+    void testOwnerChangeWireOrdering();
     void testOwnerChangeStormImmediateDelete();
     void testOwnerChangeReentrantHandler();
     void testOwnerChangeAnchorSpyTiming();
@@ -5616,6 +5617,82 @@ void TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() {
     delete churnConn;
     QTest::qWait(10);
     QVERIFY(true);
+}
+
+// P8 (the A6 wire pin): under a flagged-claim storm, the NameOwnerChanged
+// subscription's AddMatch must precede the first RequestName from this
+// connection on the wire. RED on the base under load (the captured G1
+// failure — the manager-thread deferral lands the match after the grant);
+// GREEN with A6 (the registry-owned receiver is armed at the first flagged
+// attach, before that attach's RequestName, by construction).
+void TestDBusAdaptor::testOwnerChangeWireOrdering() {
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.T1G8'\n"
+                              "  path: '/T1G8'\n"
+                              "  iface: 'org.dbusqml.T1G8'\n"
+                              "  allowReplacement: true\n"
+                              "  connection: stormConn\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    // A fresh connection, so the subscription arms inside this test's tap
+    // window (an earlier suite test may already hold the session bus's).
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *stormConn = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(stormConn != nullptr);
+
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    engine.rootContext()->setContextProperty(QStringLiteral("stormConn"), stormConn);
+
+    // Tap the whole storm (the G1 diagnostics shape).
+    QProcess mon;
+    const QString monLog =
+        QStringLiteral("/tmp/g1-p8-%1.log").arg(QCoreApplication::applicationPid());
+    mon.setProgram(QStringLiteral("dbus-monitor"));
+    mon.setArguments({QStringLiteral("--address"),
+                      QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS")),
+                      QStringLiteral("type='signal',interface='org.freedesktop.DBus',"
+                                     "member='NameOwnerChanged'"),
+                      QStringLiteral("type='method_call',interface='org.freedesktop.DBus'")});
+    mon.setStandardOutputFile(monLog);
+    mon.start();
+    QTest::qWait(300); // let the monitor become a monitor before the storm
+
+    for (int i = 0; i < 200; ++i) {
+        QObject *o = comp.create();
+        QVERIFY(o != nullptr);
+        delete o;
+    }
+    QTest::qWait(300); // let the wire flush into the tap
+    mon.terminate();   // graceful exit flushes the monitor's block buffer
+    mon.waitForFinished(1000);
+
+    QFile f(monLog);
+    QVERIFY(f.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QStringList lines = QString::fromLocal8Bit(f.readAll()).split(QLatin1Char('\n'));
+    long firstAddMatch = -1, firstRequest = -1;
+    for (long i = 0; i < lines.size(); ++i) {
+        if (firstAddMatch < 0 && lines[i].contains(QLatin1String("member=AddMatch")))
+            firstAddMatch = i;
+        if (firstRequest < 0 && lines[i].contains(QLatin1String("member=RequestName")))
+            firstRequest = i;
+    }
+    QVERIFY2(firstAddMatch >= 0 && firstRequest >= 0,
+             qPrintable(QStringLiteral("tap saw no AddMatch/RequestName; log %1").arg(monLog)));
+    QVERIFY2(firstAddMatch < firstRequest,
+             qPrintable(QStringLiteral("AddMatch at line %1 followed the first RequestName at %2 "
+                                       "— the subscription was late (see %3)")
+                            .arg(firstAddMatch)
+                            .arg(firstRequest)
+                            .arg(monLog)));
+    delete stormConn;
 }
 
 // T1 relay gate G2 (V1 punch list): the F3 geometry via public API —

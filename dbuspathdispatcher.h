@@ -22,30 +22,28 @@ class OwnerChangeRelay;
 // NEVER moved. Verified against Qt 6.11 qdbusintegrator.cpp:815-833 and
 // :2711-2714: activateSignal DIRECT_DELIVERs when hook.obj is
 // QDBusConnectionPrivate (manager thread) and otherwise
-// QCoreApplication::postEvent(hook.obj) — i.e. hook.obj's thread
-// affinity. The NameOwnerChanged hook.obj is the private (direct, manager
-// thread); that emits serviceOwnerChanged on the interface (parented to
-// the private). AutoConnection then queues our lambda to this object's
-// attach-thread affinity. Using a library-owned context (instead of
-// conn.interface()) keeps the connect-time BlockingQueued metacall out of
-// attach's registry-locked path: with iface as context, QObject::connect
-// blocks the attaching thread on the manager thread while the manager
-// thread may itself be blocked delivering an earlier owner-change into
-// handleServiceOwnerChange under registryMutex — a self-deadlock through
-// Qt internals, not our lock. Owned by the claim record; destroyed via
-// deleteLater on teardown (delivery affinity is this object's thread).
-class OwnerChangeWatch : public QObject {
+// A6 (the G1 fix, council-amended plan §1): ONE registry-owned
+// NameOwnerChanged receiver per QDBusConnection — subscribed via the public
+// bus-signal API (QDBusConnection::connect with the "sss" signature filter),
+// armed at the first flagged attach on that connection and never
+// disconnected for the connection's lifetime. The slot fans out by service
+// name into handleServiceOwnerChange exactly as the per-claim watch did.
+// This kills the per-claim connect/disconnect churn whose
+// connectNotify/disconnectNotify deferral let a grant's broadcast precede
+// our AddMatch at the daemon (the G1 wire proof, g1-investigation.md).
+class OwnerChangeReceiver : public QObject {
     Q_OBJECT
 
 public:
-    OwnerChangeWatch(const QString &connName, const QString &service, QObject *parent = nullptr)
-        : QObject(parent), m_connName(connName), m_service(service) {}
+    explicit OwnerChangeReceiver(const QString &connName, QObject *parent = nullptr)
+        : QObject(parent), m_connName(connName) {}
     QString connName() const { return m_connName; }
-    QString service() const { return m_service; }
+
+public slots:
+    void onNameOwnerChanged(const QString &name, const QString &, const QString &newOwner);
 
 private:
     QString m_connName;
-    QString m_service;
 };
 
 // Library-private: routes incoming D-Bus calls on a shared (connection, path)
