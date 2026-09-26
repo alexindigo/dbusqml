@@ -5515,6 +5515,23 @@ void TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() {
     QElapsedTimer bound;
     bound.start();
     const int iterations = 500;
+
+    // G1-investigation diagnostic (test-only; no behavior change): tap the
+    // private bus for the WHOLE test (storm + survivor) so the daemon-side
+    // AddMatch/RemoveMatch sequence and the NameOwnerChanged emission are on
+    // record.
+    QProcess mon;
+    const QString monLog =
+        QStringLiteral("/tmp/g1-monitor-%1.log").arg(QCoreApplication::applicationPid());
+    mon.setProgram(QStringLiteral("dbus-monitor"));
+    mon.setArguments({QStringLiteral("--address"),
+                      QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS")),
+                      QStringLiteral("type='signal',interface='org.freedesktop.DBus',"
+                                     "member='NameOwnerChanged'"),
+                      QStringLiteral("type='method_call',interface='org.freedesktop.DBus'")});
+    mon.setStandardOutputFile(monLog);
+    mon.start();
+
     int acquiredNotes = 0;
     for (int i = 0; i < iterations; ++i) {
         QVERIFY2(bound.elapsed() < 55000,
@@ -5541,21 +5558,6 @@ void TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() {
     // delivered its acquisition through the relay after the storm.
     churn.unregisterService(name);
     const qint64 stormMs = bound.elapsed();
-
-    // G1-investigation diagnostic (test-only; no behavior change): tap the
-    // private bus so we can see whether and when the daemon emitted
-    // NameOwnerChanged(name, *, <survivor>).
-    QProcess mon;
-    const QString monLog =
-        QStringLiteral("/tmp/g1-monitor-%1.log").arg(QCoreApplication::applicationPid());
-    mon.setProgram(QStringLiteral("dbus-monitor"));
-    mon.setArguments({QStringLiteral("--address"),
-                      QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS")),
-                      QStringLiteral("type='signal',interface='org.freedesktop.DBus',"
-                                     "member='NameOwnerChanged'"),
-                      QStringLiteral("type='method_call',interface='org.freedesktop.DBus'")});
-    mon.setStandardOutputFile(monLog);
-    mon.start();
 
     QObject *s = comp.create();
     QVERIFY(s != nullptr);
