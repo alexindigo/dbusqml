@@ -514,6 +514,8 @@ private slots:
     void testReplyDrivenInQueue();
     void testJoinerExactlyOnce();
     void testGrantThenTakeoverOnce();
+    void testQueuedClaimWithdrawnOnDestroy();
+    void testReplacedOwnerWithdrawnOnDestroy();
     void testOwnerChangeStormImmediateDelete();
     void testOwnerChangeReentrantHandler();
     void testOwnerChangeAnchorSpyTiming();
@@ -5961,6 +5963,175 @@ void TestDBusAdaptor::testGrantThenTakeoverOnce() {
     delete a;
 }
 
+// ---- A1/A4 pins (the withdrawal invariant; ghost owners) ----
+// (council-amended plan §1; pins land with the commit they pin.)
+
+// P1 (the ghost): a queueOnBusy adaptor whose RequestName queued at the
+// daemon, destroyed before the name frees — the release must withdraw the
+// queued request, or the daemon grants the name to a dead adaptor's
+// connection later (the ghost owner, fd1-investigation.md §0).
+void TestDBusAdaptor::testQueuedClaimWithdrawnOnDestroy() {
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    const QString name = QStringLiteral("org.dbusqml.Ghost1");
+    QDBusConnection blocker = QDBusConnection::connectToBus(QString::fromLocal8Bit(addr),
+                                                            QStringLiteral("g1-ghost-blocker"));
+    QVERIFY(blocker.isConnected());
+    QVERIFY(blocker.registerService(name));
+
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+    const QString ourBase = QDBusConnection(*conn).baseService();
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.Ghost1'\n"
+                              "  path: '/Ghost1'\n"
+                              "  iface: 'org.dbusqml.Ghost1'\n"
+                              "  queueOnBusy: true\n"
+                              "  connection: connC\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    engine.rootContext()->setContextProperty(QStringLiteral("connC"), conn);
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    QObject *a = comp.create();
+    QVERIFY(a != nullptr);
+    QTest::qWait(400); // our RequestName is queued at the daemon by now
+
+    // Destroy the adaptor (detach) — the queued request must be withdrawn.
+    delete conn;
+    delete a;
+    QTest::qWait(300);               // let any release settle
+    blocker.unregisterService(name); // the name frees
+    QTest::qWait(300);
+
+    // GetNameOwner: with the bug, the daemon grants the still-queued request
+    // and OUR connection becomes the owner of a name nobody serves.
+    QDBusMessage gm = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("GetNameOwner"));
+    gm.setArguments({name});
+    const QDBusMessage gr = QDBusConnection::sessionBus().call(gm, QDBus::Block, 3000);
+    if (gr.type() == QDBusMessage::ReplyMessage) {
+        const QString owner = gr.arguments().first().toString();
+        QVERIFY2(owner != ourBase && owner != QDBusConnection::sessionBus().baseService(),
+                 qPrintable(QStringLiteral("ghost ownership: name granted to %1 (ours) after "
+                                           "the adaptor died [ourBase=%2 sessionBase=%3]")
+                                .arg(owner)
+                                .arg(ourBase)
+                                .arg(QDBusConnection::sessionBus().baseService())));
+    }
+    // A third connection requesting the name must win it outright.
+    QDBusConnection third = QDBusConnection::connectToBus(QString::fromLocal8Bit(addr),
+                                                          QStringLiteral("g1-ghost-third"));
+    QVERIFY(third.isConnected());
+    QDBusMessage req = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
+    req.setArguments({name, uint(0)});
+    const QDBusMessage rr = third.call(req, QDBus::Block, 3000);
+    QCOMPARE(rr.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(rr.arguments().first().toUInt(), 1u); // DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER
+    third.unregisterService(name);
+    third.disconnectFromBus(QStringLiteral("g1-ghost-third"));
+    blocker.unregisterService(name);
+    blocker.disconnectFromBus(QStringLiteral("g1-ghost-blocker"));
+}
+
+// P2 (the second ghost): a replaced ALLOW_REPLACEMENT owner sits at queue
+// position 2 with owned=false — its teardown must release that queue slot
+// too, or it re-owns when the stealer later releases.
+void TestDBusAdaptor::testReplacedOwnerWithdrawnOnDestroy() {
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    const QString name = QStringLiteral("org.dbusqml.Ghost2");
+
+    DBusConnection *conn = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(conn != nullptr);
+    const QString ourBase = QDBusConnection(*conn).baseService();
+
+    static const char *kSrc = "import DBus 1.0\n"
+                              "DBusAdaptor {\n"
+                              "  service: 'org.dbusqml.Ghost2'\n"
+                              "  path: '/Ghost2'\n"
+                              "  iface: 'org.dbusqml.Ghost2'\n"
+                              "  allowReplacement: true\n"
+                              "  queueOnBusy: true\n"
+                              "  connection: connC\n"
+                              "  function ping() { return 'x' }\n"
+                              "}";
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    engine.rootContext()->setContextProperty(QStringLiteral("connC"), conn);
+    QQmlComponent comp(&engine);
+    comp.setData(kSrc, QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    QObject *a = comp.create();
+    QVERIFY(a != nullptr);
+    QSignalSpy spy(a, SIGNAL(nameAcquired()));
+    QTRY_VERIFY_WITH_TIMEOUT(spy.count() >= 1, 10000); // we own it
+
+    // The stealer takes the name with REPLACE_EXISTING; our connection moves
+    // to queue position 2. Wait for the LOSS to land on our side first —
+    // otherwise the claim's owned flag is stale-true at detach and the
+    // release happens anyway (not the ghost shape).
+    QDBusConnection stealer = QDBusConnection::connectToBus(QString::fromLocal8Bit(addr),
+                                                            QStringLiteral("g1-ghost2-stealer"));
+    QVERIFY(stealer.isConnected());
+    QDBusMessage steal = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("RequestName"));
+    steal.setArguments({name, uint(2)}); // REPLACE_EXISTING
+    QCOMPARE(stealer.call(steal, QDBus::Block, 5000).type(), QDBusMessage::ReplyMessage);
+    QTRY_VERIFY_WITH_TIMEOUT(QDBusConnection::sessionBus().interface()->serviceOwner(name) ==
+                                 stealer.baseService(),
+                             10000);
+    // Our claim's loss must be DELIVERED (the relay) before the destroy —
+    // otherwise owned is stale-true at detach and the release fires anyway.
+    {
+        QElapsedTimer dl;
+        dl.start();
+        while (dl.elapsed() < 10000) {
+            const QString st =
+                DBusPathDispatcher::debugClaimState(QDBusConnection(*conn).name(), name);
+            if (st.contains(QLatin1String("owned=0")))
+                break;
+            QTest::qWait(20);
+        }
+        QVERIFY2(DBusPathDispatcher::debugClaimState(QDBusConnection(*conn).name(), name)
+                     .contains(QLatin1String("owned=0")),
+                 "our claim never saw the takeover");
+    }
+
+    // Destroy our adaptor: the queue-2 slot must be withdrawn.
+    delete conn;
+    delete a;
+    QTest::qWait(300);
+    stealer.unregisterService(name); // the stealer releases
+    QTest::qWait(300);
+
+    QDBusMessage gm = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("GetNameOwner"));
+    gm.setArguments({name});
+    const QDBusMessage gr = QDBusConnection::sessionBus().call(gm, QDBus::Block, 3000);
+    if (gr.type() == QDBusMessage::ReplyMessage) {
+        const QString owner = gr.arguments().first().toString();
+        QVERIFY2(owner != ourBase && owner != QDBusConnection::sessionBus().baseService(),
+                 qPrintable(QStringLiteral("ghost ownership after replacement: %1 (ours) "
+                                           "[ourBase=%2 sessionBase=%3]")
+                                .arg(owner)
+                                .arg(ourBase)
+                                .arg(QDBusConnection::sessionBus().baseService())));
+    }
+    stealer.disconnectFromBus(QStringLiteral("g1-ghost2-stealer"));
+}
 // T1 relay gate G2 (V1 punch list): the F3 geometry via public API —
 // owner-change storm vs immediate main-thread deletes, ×100, zero
 // settle. Distinct from G1 (which churns the DAEMON name around

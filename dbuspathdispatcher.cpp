@@ -63,6 +63,14 @@ struct ServiceClaim {
     // no-op (astra's same-generation guard).
     uint requestToken = 0;
     bool lostSinceSend = false;
+    // A1/A4: requestSent is latched under the registry lock in attach's
+    // flagged branch immediately before sendFlaggedRequest (and on adoption
+    // re-send) — a queued-or-owned name always withdraws at last detach.
+    // flagged records which path the first claimant took (the flagged
+    // release reads the ReleaseName reply code; unflagged keeps Qt's
+    // unregisterService bookkeeping).
+    bool requestSent = false;
+    bool flagged = false;
     QList<QPointer<DBusAdaptor>> holders;
 };
 
@@ -338,6 +346,7 @@ void DBusPathDispatcher::handleConnectionLost(const QString &connName) {
                 continue;
             claim.owned = false;
             claim.queued = false;
+            claim.requestSent = false; // A1: no blocking call on a dead connection
             claim.notifyQueued = true;
             notes.append({it.key().first, it.key().second});
         }
@@ -598,6 +607,11 @@ bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const
                     // the claim's initial state via handleRequestNameReply.
                     claim.requestToken = ++nextRequestToken();
                     claim.lostSinceSend = false;
+                    // A1: the withdrawal invariant — a sent request is
+                    // always withdrawn at last detach (needUnregister =
+                    // owned || requestSent in detach()).
+                    claim.flagged = true;
+                    claim.requestSent = true;
                     sendFlaggedRequest(conn, ownerChangeReceivers().value(connName), service,
                                        claim.requestToken, allowReplacement, replaceExisting,
                                        queueOnBusy);
@@ -671,6 +685,8 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
         // into the unregister window.
         const ServiceKey svcKey{connName, service};
         bool needUnregister = false;
+        bool flaggedRelease = false;
+        uint releaseToken = 0;
         {
             RegistryMutexGuard locker(registryMutex());
             auto it = serviceClaims().find(svcKey);
@@ -689,11 +705,12 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
                     // A2: a reply to a pre-detach RequestName arriving now is
                     // stale — bump the token so it no-ops (A3's guard).
                     claim.requestToken = ++nextRequestToken();
-                    // Part 2: only an OWNED name is worth the blocking
-                    // ReleaseName. A lost name (takeover path) would return
-                    // NOT_OWNER — futile by construction, and it used to log
-                    // a spurious "Failed to unregister" on the happy path.
-                    needUnregister = claim.owned;
+                    // A1: a name we ever requested withdraws at last detach —
+                    // owned or merely queued (the ghost-owner fix). A lost
+                    // name's ReleaseName answers NOT_OWNER, handled quietly.
+                    needUnregister = claim.owned || claim.requestSent;
+                    flaggedRelease = claim.flagged;
+                    releaseToken = claim.requestToken;
                     claim.owned = false;
                     // Part 3: tombstone — stays in the map until the bus call
                     // below returns. attach() adopts it (see there).
@@ -706,7 +723,36 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
         if (needUnregister) {
             // Part 1 + 4: OUTSIDE the lock (guard asserts it in debug).
             assertNoRegistryMutex("DBusPathDispatcher::detach");
-            const bool released = conn.unregisterService(service);
+            QString warnText;
+            if (flaggedRelease) {
+                // A4: the flagged path's release reads the ReleaseName reply
+                // code: 1 RELEASED / 2 NON_EXISTENT / 3 NOT_OWNER are quiet
+                // success; disconnected-connection errors quiet; anything
+                // else is reported.
+                QDBusMessage rel = QDBusMessage::createMethodCall(
+                    QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+                    QStringLiteral("org.freedesktop.DBus"), QStringLiteral("ReleaseName"));
+                rel.setArguments({service});
+                const QDBusMessage rr = conn.call(rel, QDBus::Block, 3000);
+                if (rr.type() == QDBusMessage::ReplyMessage) {
+                    const uint code = rr.arguments().first().toUInt();
+                    if (code < 1 || code > 3)
+                        warnText =
+                            QStringLiteral("ReleaseName(%1) answered %2").arg(service).arg(code);
+                } else if (conn.isConnected()) {
+                    warnText = rr.errorName() + QLatin1String(" ") + rr.errorMessage();
+                }
+            } else {
+                // Unflagged path: Qt's own bookkeeping (qdbusconnection.cpp).
+                if (!conn.unregisterService(service)) {
+                    const QString err = conn.lastError().message();
+                    // NOT_OWNER (lost the name between gating and ReleaseName)
+                    // is expected fallout of a takeover, not a failure.
+                    if (!err.contains(QStringLiteral("NOT_OWNER")) &&
+                        !err.contains(QStringLiteral("not an owner")))
+                        warnText = err;
+                }
+            }
             {
                 RegistryMutexGuard locker(registryMutex());
                 auto it = serviceClaims().find(svcKey);
@@ -716,16 +762,14 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
                 // (adopt path never re-registers, so nothing to un-register).
                 if (it != serviceClaims().end() && it.value().tearingDown && it.value().refs == 0) {
                     serviceClaims().erase(it);
+                } else if (it != serviceClaims().end() && it.value().requestToken == releaseToken) {
+                    // A1's generation guard: clear requestSent only if the
+                    // token is unchanged (an adopter may have re-sent).
+                    it.value().requestSent = false;
                 }
             }
-            if (!released) {
-                const QString err = conn.lastError().message();
-                // NOT_OWNER (lost the name between gating and ReleaseName)
-                // is expected fallout of a takeover, not a failure.
-                if (!err.contains(QStringLiteral("NOT_OWNER")) &&
-                    !err.contains(QStringLiteral("not an owner")))
-                    qmlInfo(adaptor) << "Failed to unregister service" << service << err;
-            }
+            if (!warnText.isEmpty())
+                qmlInfo(adaptor) << "Failed to unregister service" << service << warnText;
         }
     }
 }
