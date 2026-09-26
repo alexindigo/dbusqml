@@ -175,6 +175,18 @@ infrastructure that materially affects consumer trust).
   longer carries a dead duplicate of the generated QML plugin class (its
   copy of the class's `staticMetaObject` tripped the odr-violation abort
   when a process had both DSOs loaded, e.g. an ASan-instrumented consumer).
+- **Owner-change acquisition can no longer be missed** — a flagged claim's
+  initial state comes from the RequestName reply, so a late or suppressed
+  `NameOwnerChanged` signal no longer wedges `nameAcquired` (the G1
+  capture). `nameAcquired` may now arrive earlier (from the reply). And
+  tearing down a flagged adaptor always withdraws its name request, even
+  when the name was only queued at the daemon or held after a takeover —
+  previously such a claim stayed queued and the daemon could grant the name
+  later to a connection with nobody serving it (a ghost owner answering
+  `UnknownObject`, blocking the legitimate next requester). One blocking
+  `ReleaseName` now happens at every flagged last-detach (was: only when
+  owned). The deprecated `serviceOwnerChanged` warning is gone (the
+  subscription moved to the public bus-signal API). No public API change.
 
 ### Quality
 

@@ -270,15 +270,15 @@ bool OwnerChangeRelay::event(QEvent *e) {
     }
 }
 
-// Owner-change watch: a name we claimed was acquired (possibly after
+// Owner-change delivery: a name we claimed was acquired (possibly after
 // queueing) or lost to another owner.
 //
-// T1 (features train, Phase 2 — candidate 4, concilium-unanimous): this
-// runs on QtDBus's MANAGER thread and NEVER touches adaptors. Under the
-// lock it updates the claim state and sets the coalescing notifyQueued
-// flag — holders are NOT copied here; the main-thread relay re-resolves
-// them. Unlock; post a value-only note (drop if !qApp). No bus calls,
-// no adaptor calls, no posts under the lock.
+// T1 (features train, Phase 2 — candidate 4, concilium-unanimous): this runs
+// on the thread of the connection's registry-owned receiver (A6) and NEVER
+// touches adaptors. Under the lock it updates the claim state and sets the
+// coalescing notifyQueued flag — holders are NOT copied here; the
+// main-thread relay re-resolves them. Unlock; post a value-only note (drop
+// if !qApp). No bus calls, no adaptor calls, no posts under the lock.
 void DBusPathDispatcher::handleServiceOwnerChange(const QString &connName, const QString &service,
                                                   const QString &newOwner) {
     if (!QCoreApplication::instance())
@@ -758,8 +758,10 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
                 auto it = serviceClaims().find(svcKey);
                 // Erase the tombstone — UNLESS a concurrent attach adopted
                 // it meanwhile (refs > 0 or !tearingDown): then the adopters
-                // own the record and the bus call above was theirs to skip
-                // (adopt path never re-registers, so nothing to un-register).
+                // own the record; their own (re-)RequestName is in flight and
+                // the bus call above was the OLD record's release — the
+                // adopters' new request must not be withdrawn by it (the
+                // requestToken generation guards that below).
                 if (it != serviceClaims().end() && it.value().tearingDown && it.value().refs == 0) {
                     serviceClaims().erase(it);
                 } else if (it != serviceClaims().end() && it.value().requestToken == releaseToken) {

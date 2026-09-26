@@ -384,6 +384,15 @@ consumer threads. Ownership notifications arrive on the main thread (the
 T1 relay); adaptors on foreign threads get main-thread delivery + a loud
 warning (unsupported, T2 contract).
 
+F5 (multi-thread attach/detach interleave): a `ReleaseName` from a detach
+on one thread interleaving with a same-name attach's `RequestName` on
+another is **unsupported territory** — the registry's tombstone/generation
+guards assume consumer-serialized attach/detach per (connection, service);
+concurrent drivers get no ordering guarantee against the daemon's FIFO.
+Also note: tombstone adoption re-queues at the BACK of the daemon's queue
+(the adopter's fresh RequestName is a new queue entry — adoption does not
+inherit the old request's queue position).
+
 Under a captured prefix (`captureSubtree: true`), messages under that
 path are delivered to handlers in bus arrival order on the object's
 thread. Nested event loops inside those handlers are unsupported: they
