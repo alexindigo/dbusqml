@@ -156,6 +156,26 @@ def main():
            "foreign-bus-bind-variant-main-realloc.log", False,
            want_substr="VERDICT: PASS")
 
+    # 7f. CI-format interceptor frames (the 1.0.0-ceremony CI red): GCC's
+    # libtsan prints interceptor frames with RELATIVE source paths
+    # (#0 operator delete(void*, unsigned long) ../../../../src/libsanitizer/
+    # tsan/tsan_new_delete.cpp:150 …); the frame-token path strip must not
+    # leave a ".." segment — the block must still match the registered
+    # bus-bind alloc-new-delete class. Captured 2026-09-27 in the CI-parity
+    # container (CT 110 on agora — Ubuntu 24.04 GCC 13 libtsan, CI's frame
+    # format; aqt Qt 6.8.2, BuildId-identical to the runner's).
+    expect("CI-format interceptor frame (relative source path) is registered",
+           "foreign-bus-bind-ci-format.log", False, want_substr="VERDICT: PASS")
+    # Same CI format, one layer deeper: GCC's libtsan names the memcpy
+    # interceptor "memcpy" (Arch: "__tsan_memcpy") and prints an extra
+    # interceptor-internal libtsan frame (no BuildId) before the call site.
+    # Normalization (libc-name token + transparent libtsan-internal frames)
+    # must land this on the registered signal-delivery class. Captured with
+    # the same CT-110 run as the fixture above.
+    expect("CI-format signal-delivery block is registered (interceptor "
+           "normalization)", "foreign-signal-delivery-ci-format.log", False,
+           want_substr="VERDICT: PASS")
+
     # 7d. report-type coverage (E3) — every type the detector can emit has
     # a pinned expected verdict
     expect("lock-order-inversion block: parses, scans, all-foreign -> knob FAIL",

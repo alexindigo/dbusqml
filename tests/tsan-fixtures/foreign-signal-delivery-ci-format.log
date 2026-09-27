@@ -1,0 +1,40 @@
+dbus[10457]: Unable to set up transient service directory: XDG_RUNTIME_DIR "/run/user/0" not available: No such file or directory
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+********* Start testing of TestDBusAdaptor *********
+Config: Using QtTest library 6.8.2, Qt 6.8.2 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 10.3.1 20210422 (Red Hat 10.3.1-1)), ubuntu 24.04
+dbus[10461]: Unable to set up transient service directory: XDG_RUNTIME_DIR "/run/user/0" not available: No such file or directory
+PASS   : TestDBusAdaptor::initTestCase()
+dbus-daemon[10461]: [session uid=0 pid=10461] Connection :1.2 (uid=0 pid=10464 comm="/bin/dbus-monitor --address unix:path=/tmp/dbus-nL" label="unconfined") became a monitor.
+dbus-daemon[10461]: [session uid=0 pid=10461] Monitoring connection :1.2 closed.
+QINFO  : TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() G1-diag survivor acquisition at 130 ms (storm 328 ms; settle window 15000 ms)
+PASS   : TestDBusAdaptor::testOwnerChangeDestroyDuringNotification()
+PASS   : TestDBusAdaptor::cleanupTestCase()
+Totals: 3 passed, 0 failed, 0 skipped, 0 blacklisted, 552ms
+********* Finished testing of TestDBusAdaptor *********
+==================
+WARNING: ThreadSanitizer: data race (pid=10458)
+  Write of size 8 at 0x72100000e090 by main thread:
+    #0 free ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:724 (libtsan.so.2+0x57c71) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #1 <null> <null> (libQt6DBus.so.6+0x6b900) (BuildId: 3f30c43fb713b34c07586fd76a9a88f4e8f5b058)
+    #2 <null> <null> (libc.so.6+0x2a1c9) (BuildId: a4a7992a8e66555c8141ab2a08a8465ff6e0ea65)
+
+  Previous read of size 8 at 0x72100000e090 by thread T3:
+    #0 memcpy ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors_memintrinsics.inc:115 (libtsan.so.2+0x8bd30) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #1 memcpy ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors_memintrinsics.inc:107 (libtsan.so.2+0x8bd30)
+    #2 QString::append(QChar const*, long long) <null> (libQt6Core.so.6+0x27b835) (BuildId: b3888185c629eef5b544147f7a7d564e0c3c67ff)
+
+  Thread T3 'QDBusConnection' (tid=10463, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022 (libtsan.so.2+0x5ac1a) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #1 QThread::start(QThread::Priority) <null> (libQt6Core.so.6+0x3297ac) (BuildId: b3888185c629eef5b544147f7a7d564e0c3c67ff)
+    #2 trackedConnectToBus /root/dbusqml/tests/test_dbusadaptor.cpp:317 (test_adaptor+0x37057) (BuildId: e4dd827c714422ad301f69f2ce228e8bc2729bbe)
+    #3 TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() /root/dbusqml/tests/test_dbusadaptor.cpp:5533 (test_adaptor+0x9b2ba) (BuildId: e4dd827c714422ad301f69f2ce228e8bc2729bbe)
+    #4 TestDBusAdaptor::qt_static_metacall(QObject*, QMetaObject::Call, int, void**) /root/dbusqml/build-san/test_adaptor_autogen/include/test_dbusadaptor.moc:2953 (test_adaptor+0x11b6fd) (BuildId: e4dd827c714422ad301f69f2ce228e8bc2729bbe)
+    #5 QMetaMethodInvoker::invokeImpl(QMetaMethod, void*, Qt::ConnectionType, long long, void const* const*, char const* const*, QtPrivate::QMetaTypeInterface const* const*) <null> (libQt6Core.so.6+0x19121b) (BuildId: b3888185c629eef5b544147f7a7d564e0c3c67ff)
+    #6 <null> <null> (libc.so.6+0x2a1c9) (BuildId: a4a7992a8e66555c8141ab2a08a8465ff6e0ea65)
+
+SUMMARY: ThreadSanitizer: data race (/opt/qt/6.8.2/gcc_64/lib/libQt6DBus.so.6+0x6b900) (BuildId: 3f30c43fb713b34c07586fd76a9a88f4e8f5b058) 
+==================
+ThreadSanitizer: reported 1 warnings

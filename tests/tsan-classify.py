@@ -169,6 +169,13 @@ def parse_module(rest):
     return parse_module_offset(rest)[0]
 
 
+def norm_interceptor(name):
+    """Canonical interceptor token. Arch's libtsan prints the internal alias
+    (__tsan_memcpy); GCC's libtsan prints the intercepted libc name (memcpy)
+    — normalize to the libc name so both spellings fingerprint identically."""
+    return name.removeprefix("__tsan_")
+
+
 def parse_function(rest):
     """Best-effort function token of a frame (args stripped), '' if none."""
     # drop the module/offset group and trailing BuildId
@@ -176,8 +183,13 @@ def parse_function(rest):
     core = core.replace("<null>", "").strip()
     if not core:
         return ""
-    # strip source path tail ("func() /path/file.cpp:12" -> "func()")
-    core = core.split("/")[0].strip() if "/" in core and "::" not in core else core
+    # strip source path tail ("func() /path/file.cpp:12" -> "func()").
+    # The tail may be absolute (/…) or RELATIVE (../../… — GCC's libtsan
+    # prints interceptor frames with relative source paths); splitting on
+    # the first "/" would leave a stray ".." segment in the token, so strip
+    # a trailing path-looking token with a line suffix instead.
+    if "/" in core and "::" not in core:
+        core = re.sub(r"\s+\S*/\S+:\d+(?::\d+)?$", "", core)
     # strip args
     core = core.split("(")[0].strip()
     return core
@@ -363,7 +375,7 @@ def build_arrangement(block):
         f0 = FRAME_RE.match(frames[0]).group(2)
         f0_mod = parse_module(f0)
         if f0_mod and f0_mod.startswith("libtsan"):
-            interceptor = parse_function(f0) or "unnamed"
+            interceptor = norm_interceptor(parse_function(f0) or "unnamed")
             below = frames[1:]
         else:
             interceptor = "none"
@@ -373,6 +385,14 @@ def build_arrangement(block):
         for fl in below:
             frest = FRAME_RE.match(fl).group(2)
             m, off = parse_module_offset(frest)
+            if m and m.startswith("libtsan"):
+                # interceptor-internal frame: GCC's libtsan prints the
+                # interceptor's own implementation frames (e.g. a second
+                # memcpy frame from sanitizer_common_interceptors, without
+                # a BuildId) between the interceptor and the call site.
+                # Transparent for the below-resolution — the call site is
+                # the first NON-libtsan frame.
+                continue
             if m:
                 below_module = m
                 bid = parse_buildid(frest)
@@ -506,8 +526,8 @@ def load_register(path):
                     not a["role"]:
                 _schema_fail(eid, f"arrangement[{i}] fields must be strings, "
                              "role non-empty")
-            records.append((a["role"], a["interceptor"], a["below_module"],
-                            a["thread"], a["access"]))
+            records.append((a["role"], norm_interceptor(a["interceptor"]),
+                            a["below_module"], a["thread"], a["access"]))
         anchors = c.get("anchors", {})
         if not isinstance(anchors, dict):
             _schema_fail(eid, "anchors must be a table keyed by Qt version")

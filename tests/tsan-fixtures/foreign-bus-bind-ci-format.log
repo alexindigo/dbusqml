@@ -1,0 +1,23 @@
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+==================
+WARNING: ThreadSanitizer: data race (pid=10330)
+  Write of size 8 at 0x720800000500 by thread T1:
+    #0 operator delete(void*, unsigned long) ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150 (libtsan.so.2+0xa66c8) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #1 QMetaCallEvent::~QMetaCallEvent() <null> (libQt6Core.so.6+0x1cdf4e) (BuildId: b3888185c629eef5b544147f7a7d564e0c3c67ff)
+
+  Previous write of size 8 at 0x720800000500 by main thread:
+    #0 operator new(unsigned long) ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64 (libtsan.so.2+0xa6fae) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #1 <null> <null> (libQt6DBus.so.6+0x4048a) (BuildId: 3f30c43fb713b34c07586fd76a9a88f4e8f5b058)
+    #2 <null> <null> (libc.so.6+0x2a1c9) (BuildId: a4a7992a8e66555c8141ab2a08a8465ff6e0ea65)
+
+  Thread T1 'QDBusConnection' (tid=10334, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022 (libtsan.so.2+0x5ac1a) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #1 QThread::start(QThread::Priority) <null> (libQt6Core.so.6+0x3297ac) (BuildId: b3888185c629eef5b544147f7a7d564e0c3c67ff)
+    #2 <null> <null> (libc.so.6+0x2a1c9) (BuildId: a4a7992a8e66555c8141ab2a08a8465ff6e0ea65)
+
+SUMMARY: ThreadSanitizer: data race ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150 in operator delete(void*, unsigned long)
+==================
+ThreadSanitizer: reported 1 warnings
