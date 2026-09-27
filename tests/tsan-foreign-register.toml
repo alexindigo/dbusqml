@@ -376,3 +376,49 @@ interceptor = "pthread_cond_wait"
 below_module = "libstdc++.so.6"
 thread = "QtTest Watchdog"
 access = "atomic read:1"
+
+# --- QtDBus signal-delivery message teardown (6.8.2) ---
+# Captured at the release tip's 6.8.2 tsan-gate (9/9: the three owner-change
+# storm tests x 3 selection runs — g1-fix-report.md §4); bisected to
+# 1612b72 (A6, the first suite usage of the public bus-signal connect API —
+# 0/9 at 273cd77). PROVEN FALSE POSITIVE by the B run: under a
+# TSan-instrumented Qt 6.8.2 the class vanishes in the same environment,
+# load, probe, and commit (g1-fix-report.md §10-§11). CI note: CI installs
+# 6.8.2 WITHOUT debug_info, so the frames are runtime-invisible there and
+# the class reaches this verdict layer (the fingerprint's BuildId+offset
+# anchors match either way); on a fork WITH debug_info installed the
+# detector-level race:QDBusMessage::~QDBusMessage suppression catches it
+# first (§11's confound).
+
+[[class]]
+id = "qt6-dbus-signal-delivery-message-teardown"
+
+report_type = "data race"
+classification = "proven TSan instrumentation artifact — falsified by the B run (TSan-instrumented Qt 6.8.2: class vanishes, same environment/load/probe/commit)"
+qt_validated = ["6.8.2"]
+
+summary_class = "data race (libQt6DBus.so.6+0x6b900 / libQt6Core.so.6+0x27b835) — main-thread last-reference teardown of a delivered QDBusMessage (QDBusMessagePrivate::~QDBusMessagePrivate -> QString dtor) vs the QDBusConnection dispatch thread's pre-matching key build (QString::append from QDBusConnectionPrivate::handleSignal, qdbusintegrator.cpp:1674 @ v6.8.2)"
+addr2line = "0x6b900=QArrayDataPointer<char16_t>::~QArrayDataPointer (qarraydatapointer.h:110) <- QString::~QString (qstring.h:1330) <- QDBusMessagePrivate::~QDBusMessagePrivate (qdbusmessage.cpp:46); 0x27b835=memcpy (string_fortified.h:34) <- QPodArrayOps<char16_t>::copyAppend (qarraydataops.h:65/55) <- QCommonArrayOps<char16_t>::growAppend (qarraydataops.h:926) <- QString::append(QChar const*, long long) (qstring.cpp:3193/3187) — resolved 2026-09-26 via the aqt debug_info module (.gnu_debuglink), BuildIds 3f30c43fb713b34c07586fd76a9a88f4e8f5b058 / b3888185c629eef5b544147f7a7d564e0c3c67ff"
+reproducer = "pure-Qt probe (artifacts/g1-fix/qt-probe/: public sss NameOwnerChanged connect + 500x raw async RequestName/ReleaseName churn, 2 ms in-slot lag) — the exact anchor pair fires 3/3 with zero non-Qt frames; suite: the three owner-change storm tests, 9/9 at the 6.8.2 gate"
+owning_test = "test_dbusadaptor.cpp: testOwnerChangeStormImmediateDelete, testOwnerChangeReentrantHandler, testOwnerChangeDestroyDuringNotification (suite); qt-probe (pure-Qt reproducer)"
+parent_parity = "not present pre-A6: the class requires the public bus-signal connect delivery path (A6, 1612b72); bisected 0/9 at 273cd77 (pre-G1 tip) vs 9/9 at 1612b72"
+upstream_link = "none — proven false positive (instrumentation artifact), no QTBUG warranted"
+honesty_qualifier = "timing-window dependent: fires only when the main thread drops the delivered message's last reference inside the window (0/10 on a fresh 8 GiB VM — §9.1). Same-environment A/B (§11): probe control 3/3 fires vs instrumented-Qt treatment 0/3; the dbusqml storm tests against instrumented Qt 0/9; the pure-Qt probe fires the pair with zero non-Qt frames. A dbusqml-caused race can in principle present all-foreign; the census + red-team probe are the tripwires"
+falsifier = "executed 2026-09-26 — g1-fix-report.md §10-§11 (B run: the class vanishes under instrumented Qt 6.8.2)"
+
+[class.anchors]
+"6.8.2" = ["libQt6DBus.so.6+0x6b900@3f30c43fb713b34c07586fd76a9a88f4e8f5b058", "libQt6Core.so.6+0x27b835@b3888185c629eef5b544147f7a7d564e0c3c67ff"]
+
+[[class.arrangement]]
+role = "access-first"
+interceptor = "free"
+below_module = "libQt6DBus.so.6"
+thread = "main"
+access = "write:8"
+
+[[class.arrangement]]
+role = "access-second"
+interceptor = "__tsan_memcpy"
+below_module = "libQt6Core.so.6"
+thread = "QDBusConnection"
+access = "read:8"
