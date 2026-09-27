@@ -19,13 +19,18 @@ fi
 # Minimal independent block walker (awk): within each block, drop sections
 # whose header says "created by" (thread-creation stacks), keep everything
 # else, then grep the kept text for our artifact basenames.
+# The 'dbusqml' alternative must name a SOURCE FILE (…/dbusqml/….cpp:NN —
+# how our frames print), never the bare directory name: on CI the workspace
+# itself is '/home/runner/work/dbusqml/', so module paths like
+# '…/work/dbusqml/Qt/6.8.2/…/libQt6DBus.so.6' in SUMMARY lines would
+# false-positive a substring match (the release-ceremony CI red, layer 3).
 hits=$(awk '
   /^### foreign block from / { inblock=1; increation=0; next }
   inblock && /^WARNING: ThreadSanitizer/ { increation=0 }
   inblock && /^[[:space:]]*$/ { increation=0; next }
   inblock && /created by/ { increation=1; next }
   inblock && !increation { print }
-' "$DUMP" | grep -cE 'libdbusqml|dbusqml|test_|fuzz_|tsan_canary' || true)
+' "$DUMP" | grep -cE 'libdbusqml|dbusqml[^ )]*\.(cpp|h|qml)|test_|fuzz_|tsan_canary' || true)
 
 if [ "$hits" != "0" ]; then
     echo "tsan-crosscheck: DISAGREEMENT — $hits artifact-basename line(s) in" \

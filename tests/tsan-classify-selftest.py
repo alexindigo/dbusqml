@@ -253,6 +253,25 @@ def main():
         expect_crosscheck("crosscheck: artifact basename in an attribution section "
                           "is flagged", bad, True)
 
+    # The CI-workspace collision (release-ceremony CI red, layer 3): on CI
+    # the workspace itself is repo-named (/home/runner/work/dbusqml/), so a
+    # foreign block's SUMMARY line carries the module's absolute path under
+    # it — the bare 'dbusqml' substring must NOT flag that. Our source files
+    # (…/dbusqml/….cpp:NN) must still flag (the dirty case above).
+    ci_path_dump = (
+        "### foreign block from /tmp/run.log\n"
+        "WARNING: ThreadSanitizer: data race (pid=1)\n"
+        "  Write of size 8 at 0x720800000500 by main thread:\n"
+        "    #0 free <null> (libtsan.so.2+0x57c71)\n"
+        "    #1 <null> <null> (libQt6DBus.so.6+0x6b900) "
+        "(BuildId: 3f30c43fb713b34c07586fd76a9a88f4e8f5b058)\n"
+        "\n"
+        "SUMMARY: ThreadSanitizer: data race "
+        "(/home/runner/work/dbusqml/Qt/6.8.2/gcc_64/lib/libQt6DBus.so.6+0x6b900) "
+        "(BuildId: 3f30c43fb713b34c07586fd76a9a88f4e8f5b058)\n")
+    expect_crosscheck("crosscheck: CI workspace path (…/work/dbusqml/Qt/…) "
+                      "does not false-flag", ci_path_dump, False)
+
     for junk in (".selftest-foreign.dump", ".selftest-crosscheck.dump"):
         p = os.path.join(FIXTURES, junk)
         if os.path.exists(p):
