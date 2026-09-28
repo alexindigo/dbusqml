@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<!--
+ SPDX-License-Identifier: LGPL-2.1-or-later
+ SPDX-FileCopyrightText: Copyright © the xdg-desktop-portal contributors
+-->
+
+<node name="/" xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+  <!--
+      org.freedesktop.impl.portal.Session:
+      @short_description: Shared session interface
+
+      The Session interface is shared by all portal interfaces that involve
+      long lived sessions.  When a method that creates a session is called, the
+      reply will include a session handle (i.e. object path) for a Session
+      object, which will stay alive for the duration of the session.
+
+      The portal can abort the interaction by calling
+      org.freedesktop.impl.portal.Session.Close() on the Session object.
+  -->
+  <interface name="org.freedesktop.impl.portal.Session">
+
+    <!--
+        Close:
+
+        Close the session.
+    -->
+    <method name="Close">
+    </method>
+
+    <!--
+        Closed:
+
+        The session was closed by the portal implementation.
+    -->
+    <signal name="Closed">
+    </signal>
+    <property name="version" type="u" access="read"/>
+  </interface>
+</node>

@@ -62,6 +62,7 @@ dbusqml ships descriptors for these interfaces:
 - `org.freedesktop.impl.portal.FileChooser`
 - `org.freedesktop.impl.portal.Request`
 - `org.freedesktop.impl.portal.Inhibit`
+- `org.freedesktop.impl.portal.Session`
 - `org.freedesktop.portal.NetworkMonitor`
 - `org.freedesktop.UPower`
 - `org.freedesktop.NetworkManager`
