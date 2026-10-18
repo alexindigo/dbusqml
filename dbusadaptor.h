@@ -187,18 +187,24 @@ private:
     // (FD4); warn + drop entries without a trailing a{sv}. Also resolves
     // the entry's method-name key through the naming ladder.
     void validateOptionSpecs();
-    // P10a: the whitelist for a wire method name ({ key: sig }), or
+    // P10a: the whitelist for a RESOLVED method ({ key: sig }), or
     // nullopt when the method has no entry (filter OFF). R2: an engaged
     // EMPTY map is a real entry — filter ON with zero declared keys
-    // (deny-all-keys). Name resolution: exact wire name → folded QML name
-    // → alias (same ladder as dispatch).
-    std::optional<QVariantMap> optionWhitelist(const QString &wireMember) const;
+    // (deny-all-keys). Resolved-identity lookup: the resolved QML name
+    // first, then its advertised wire name — never the caller's spelling —
+    // so every accepted spelling of one handler gets the same filter.
+    std::optional<QVariantMap> optionWhitelist(const QString &qmlMember) const;
     // P10a: xdp_filter_options shape — drop unknown keys, type-check the
     // rest against the declared sigs. Returns the filtered dict; sets
     // *error to InvalidArgs detail on mistype (caller sends the reply).
     QVariantMap filterOptions(const QVariantMap &whitelist, const QVariantMap &options,
                               QString *error) const;
 
+    // The property's effective access — ONE resolution shared by generateXml
+    // (advertise) and Properties.Set (enforce): the catalog's declared
+    // access wins (A9); undeclared falls back to metaobject writability.
+    // prop is the RESOLVED meta-property.
+    QString effectiveAccess(const QMetaProperty &prop) const;
     // The naming ladder (explicit _members → catalog → first-char-upper fold):
     // the wire name advertised for a QML member name (methods and properties).
     QString advertisedName(const QString &qmlName) const;

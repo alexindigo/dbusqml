@@ -11,7 +11,33 @@ infrastructure that materially affects consumer trust).
 
 ## [Unreleased]
 
+### Changed
+
+- **`Properties.Set` on a property whose advertised access is `read` is
+  refused** with `org.freedesktop.DBus.Error.PropertyReadOnly`, the value
+  left unchanged. This covers catalog read-only declarations (previously
+  writable when the QML property was) and read-only QML/C++ properties
+  (previously reported as `InvalidArgs` "No such property" — the property
+  exists and is advertised, so the refusal now names the real reason).
+
 ### Fixed
+
+- **Adaptor access, options and privacy policy was checked against the
+  caller's spelling instead of the resolved member** — one rule now:
+  resolve the target member first, then apply policy to the resolved
+  identity. (1) a catalog read-only property (`access="read"`) whose QML
+  property was writable could be written over the bus — introspection
+  advertised `read` while `Set` only checked metaobject writability;
+  (2) an `_options` whitelist was looked up by the caller's exact
+  spelling, so the client-fold spelling of the same method (`doIt` for
+  the advertised `DoIt`) reached its handler with an unfiltered options
+  dict; (3) setting `_members` at runtime could alias a public wire name
+  onto a private (`_`-prefixed) property, which `Get`/`Set` then served.
+  `Set` now enforces the advertised access and replies
+  `PropertyReadOnly`; dispatch resolves the handler first and every
+  accepted spelling gets the same options filter; private alias targets
+  are refused with a warning whenever the map is set, and `Get`/`Set`
+  privacy is checked on the resolved property.
 
 - **Introspection and catalog XML could blow up via entity expansion** —
   both parsers now share one hardened reader: documents larger than 4 MiB

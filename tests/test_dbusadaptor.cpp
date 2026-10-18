@@ -443,6 +443,16 @@ private slots:
     void testOptionsStrictKindMatrix();
     void testOptionsEmptyWhitelistDeniesKeys();
     void testOptionsInvalidArgsExactlyOneReply();
+    // Adaptor policy applies to the RESOLVED member: a read-advertised
+    // property refuses Set with PropertyReadOnly (catalog-declared and
+    // metaobject read-only); the options filter is keyed by the resolved
+    // handler so every accepted spelling is filtered identically; runtime
+    // _members aliases onto private properties are refused like attach-time
+    // ones.
+    void testCatalogReadOnlySetRefused();
+    void testMetaReadOnlySetRefused();
+    void testOptionsFilteredForEverySpelling();
+    void testRuntimeAliasPrivateRefused();
     // Phase 6 (P10b sender authorization): AccessDenied for the
     // stranger, pass for the owner, Properties surfaces covered.
     void testAllowedSenderMethodGate();
@@ -2860,6 +2870,211 @@ void TestDBusAdaptor::testOptionsInvalidArgsExactlyOneReply() {
     QCOMPARE(r.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
     QVERIFY2(r.errorMessage().contains(QStringLiteral("Expected type 'as' for option 'tags'")),
              qPrintable(r.errorMessage()));
+    delete adaptor;
+}
+
+// ==================== Policy by resolved member (agent-scan class C) ======
+//
+// One rule: dispatch resolves the target member FIRST, then access /
+// options / privacy policy applies to the resolved identity — never to the
+// caller's spelling of the wire name.
+
+// Set enforces the ADVERTISED access: a catalog read-only property must
+// refuse Set with PropertyReadOnly even when the QML property itself is
+// writable (pre-fix Set only checked metaobject writability, so the
+// introspection contract lied — XML advertised "read" yet the bus wrote).
+void TestDBusAdaptor::testCatalogReadOnlySetRefused() {
+    QTemporaryDir userDir;
+    QVERIFY(userDir.isValid());
+    const QByteArray savedTypesPath = qgetenv("DBUSQML_TYPES_PATH");
+    qputenv("DBUSQML_TYPES_PATH", userDir.path().toLocal8Bit());
+    {
+        QFile f(userDir.filePath(QStringLiteral("org.dbusqml.CatReadOnly.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(R"(<node>
+  <interface name="org.dbusqml.CatReadOnly">
+    <property name="Percentage" type="u" access="read"/>
+  </interface>
+</node>
+)");
+    }
+    DBusCatalog::instance().reload();
+
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.CatReadOnly'\n"
+                                        "  path: '/CatReadOnly'\n"
+                                        "  iface: 'org.dbusqml.CatReadOnly'\n"
+                                        "  property int percentage: 50\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    auto trySet = [&](const QString &name) -> QDBusMessage {
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.CatReadOnly"), QStringLiteral("/CatReadOnly"),
+            QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Set"));
+        m.setArguments({QVariant(QStringLiteral("org.dbusqml.CatReadOnly")), QVariant(name),
+                        QVariant::fromValue(QDBusVariant(uint(80)))});
+        return bus.call(m, QDBus::Block, 3000);
+    };
+    // The advertised wire spelling …
+    QDBusMessage refused = trySet(QStringLiteral("Percentage"));
+    QCOMPARE(refused.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(refused.errorName(), QStringLiteral("org.freedesktop.DBus.Error.PropertyReadOnly"));
+    QCOMPARE(adaptor->property("percentage").toInt(), 50); // unchanged
+    // … and the exact QML spelling get the same refusal.
+    QDBusMessage refusedQml = trySet(QStringLiteral("percentage"));
+    QCOMPARE(refusedQml.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(refusedQml.errorName(), QStringLiteral("org.freedesktop.DBus.Error.PropertyReadOnly"));
+    QCOMPARE(adaptor->property("percentage").toInt(), 50); // unchanged
+
+    // Get (the allowed direction of a read property) still serves it.
+    QDBusMessage g = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.CatReadOnly"), QStringLiteral("/CatReadOnly"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    g.setArguments({QVariant(QStringLiteral("org.dbusqml.CatReadOnly")),
+                    QVariant(QStringLiteral("Percentage"))});
+    QDBusMessage gr = bus.call(g, QDBus::Block, 3000);
+    QCOMPARE(gr.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(gr.arguments().first().value<QDBusVariant>().variant().toInt(), 50);
+
+    qputenv("DBUSQML_TYPES_PATH", savedTypesPath);
+    DBusCatalog::instance().reload();
+    delete adaptor;
+}
+
+// Effective access falls back to the metaobject: a read-only (CONSTANT)
+// property is advertised "read" and refuses Set with PropertyReadOnly.
+// (Pre-fix: the dispatch loop silently skipped non-writable properties, so
+// the caller got InvalidArgs "No such property" for an advertised member.)
+void TestDBusAdaptor::testMetaReadOnlySetRefused() {
+    TypedPropsAdaptor adaptor;
+    adaptor.setService(QStringLiteral("org.dbusqml.MetaReadOnly"));
+    adaptor.setPath(QStringLiteral("/MetaReadOnly"));
+    adaptor.setIface(QStringLiteral("org.dbusqml.MetaReadOnly"));
+    adaptor.classBegin();
+    adaptor.componentComplete();
+
+    QDBusMessage m = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.MetaReadOnly"), QStringLiteral("/MetaReadOnly"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Set"));
+    m.setArguments({QVariant(QStringLiteral("org.dbusqml.MetaReadOnly")),
+                    QVariant(QStringLiteral("Level")), QVariant::fromValue(QDBusVariant(uint(9)))});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(m, QDBus::Block, 3000);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.PropertyReadOnly"));
+    QCOMPARE(int(adaptor.level()), 7); // unchanged
+}
+
+// The options policy is keyed by the RESOLVED handler: every accepted
+// spelling of one method gets the same filter. Pre-fix the whitelist was
+// looked up by the caller's exact spelling, so the client-fold spelling
+// ("doIt" for the advertised "DoIt") reached the handler with an
+// UNFILTERED dict — unknown keys delivered, mistyped keys never rejected.
+void TestDBusAdaptor::testOptionsFilteredForEverySpelling() {
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "import QtQml 2.15\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.OptSpell'\n"
+                         "  path: '/OptSpell'\n"
+                         "  iface: 'org.dbusqml.OptSpell'\n"
+                         "  _options: ({ DoIt: ({ count: 'u' }) })\n"
+                         "  function doIt(options) {\n"
+                         "    var keys = [];\n"
+                         "    for (var k in options) keys.push(k + '=' + options[k]);\n"
+                         "    keys.sort();\n"
+                         "    return keys.join(',');\n"
+                         "  }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+    auto callDo = [&](const QString &member, const QVariantMap &opts) -> QDBusMessage {
+        QDBusPendingCallWatcher *w =
+            asyncCallDeferred(QStringLiteral("org.dbusqml.OptSpell"), QStringLiteral("/OptSpell"),
+                              QStringLiteral("org.dbusqml.OptSpell"), member, QVariantList{opts});
+        QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+        if (!spy.wait(5000))
+            return QDBusMessage::createError(QStringLiteral("org.dbusqml.Test.Timeout"),
+                                             QStringLiteral("callDo timed out"));
+        QDBusMessage reply = w->reply();
+        delete w;
+        return reply;
+    };
+    for (const QString &member : {QStringLiteral("DoIt"), QStringLiteral("doIt")}) {
+        // Unknown keys silently dropped — identical for both spellings.
+        QDBusMessage ok =
+            callDo(member, QVariantMap{{QStringLiteral("count"), uint(3)},
+                                       {QStringLiteral("future"), QStringLiteral("z")}});
+        QCOMPARE(ok.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(ok.arguments().first().toString(), QStringLiteral("count=3"));
+        // Mistyped whitelisted key → InvalidArgs — identical for both.
+        QDBusMessage bad =
+            callDo(member, QVariantMap{{QStringLiteral("count"), QStringLiteral("not-a-number")}});
+        QCOMPARE(bad.type(), QDBusMessage::ErrorMessage);
+        QCOMPARE(bad.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    }
+    delete adaptor;
+}
+
+// _members aliases onto PRIVATE properties are refused at ANY time —
+// pre-fix only componentComplete stripped them, so a runtime _members set
+// laundered a public wire name onto a private property (Get/Set then
+// served it: privacy was checked on the caller's spelling, not the
+// resolved property).
+void TestDBusAdaptor::testRuntimeAliasPrivateRefused() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.AliasRt'\n"
+                                        "  path: '/AliasRt'\n"
+                                        "  iface: 'org.dbusqml.AliasRt'\n"
+                                        "  property int level: 7\n"
+                                        "  property var _secret: 1\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    auto getProp = [&](const QString &name) -> QDBusMessage {
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.AliasRt"), QStringLiteral("/AliasRt"),
+            QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+        m.setArguments({QVariant(QStringLiteral("org.dbusqml.AliasRt")), QVariant(name)});
+        return bus.call(m, QDBus::Block, 3000);
+    };
+    auto setProp = [&](const QString &name, const QVariant &val) -> QDBusMessage {
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.AliasRt"), QStringLiteral("/AliasRt"),
+            QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Set"));
+        m.setArguments({QVariant(QStringLiteral("org.dbusqml.AliasRt")), QVariant(name),
+                        QVariant::fromValue(QDBusVariant(val))});
+        return bus.call(m, QDBus::Block, 3000);
+    };
+
+    // Runtime alias onto a PRIVATE target → refused with the attach-time
+    // warning text, stripped from the map.
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral(".*targets a private property.*")));
+    QVERIFY(adaptor->setProperty("_members",
+                                 QVariantMap{{QStringLiteral("Pub"), QStringLiteral("_secret")}}));
+    QCOMPARE(adaptor->property("_members").toMap(), QVariantMap{});
+
+    // The refused alias resolves to nothing on either verb.
+    QCOMPARE(getProp(QStringLiteral("Pub")).errorName(),
+             QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    QCOMPARE(setProp(QStringLiteral("Pub"), 2).errorName(),
+             QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    // Directly addressed private names refuse identically.
+    QCOMPARE(getProp(QStringLiteral("_secret")).errorName(),
+             QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    QCOMPARE(setProp(QStringLiteral("_secret"), 2).errorName(),
+             QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+
+    // Control: a runtime alias onto a PUBLIC property serves normally.
+    QVERIFY(adaptor->setProperty("_members",
+                                 QVariantMap{{QStringLiteral("Open"), QStringLiteral("level")}}));
+    QDBusMessage served = getProp(QStringLiteral("Open"));
+    QCOMPARE(served.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(served.arguments().first().value<QDBusVariant>().variant().toInt(), 7);
     delete adaptor;
 }
 

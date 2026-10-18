@@ -39,6 +39,23 @@ static bool isPrivateProperty(const QString &name) {
     return name.startsWith(QLatin1Char('_'));
 }
 
+// A12/D2 at ANY time: an alias targeting a PRIVATE property is refused
+// wherever the map is written — the _members setter and the attach-time
+// pass in componentComplete share this one routine. Privacy wins over the
+// alias: the entry is dropped with one warning (fixed text).
+static QVariantMap stripPrivateAliasTargets(QVariantMap members) {
+    for (auto it = members.begin(); it != members.end();) {
+        if (isPrivateProperty(it.value().toString())) {
+            qWarning("dbusqml: _members alias %s targets a private property — refused",
+                     qPrintable(it.key()));
+            it = members.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return members;
+}
+
 // Helper: forwards QML signal emissions to D-Bus.
 // One relay per signal, with the signal name baked in at construction.
 class PropertiesChangedRelay;
@@ -299,7 +316,10 @@ void DBusAdaptor::setSignalSpecs(const QVariantMap &v) {
 void DBusAdaptor::setMemberAliases(const QVariantMap &v) {
     if (m_members == v)
         return;
-    m_members = v;
+    // A12/D2 at ANY time: refuse aliases targeting private properties (was
+    // attach-time-only — a runtime _members write laundered a public wire
+    // name onto a private property, which Get/Set then served).
+    m_members = stripPrivateAliasTargets(v);
     emit _membersChanged();
 }
 
@@ -335,23 +355,20 @@ void DBusAdaptor::setHeldReplyTimeout(int v) {
     emit heldReplyTimeoutChanged();
 }
 
-std::optional<QVariantMap> DBusAdaptor::optionWhitelist(const QString &wireMember) const {
-    // Ladder-consistent lookup: exact wire name → folded QML name →
-    // alias (mirrors declaredOutTypes above).
-    auto it = m_options.constFind(wireMember);
+std::optional<QVariantMap> DBusAdaptor::optionWhitelist(const QString &qmlMember) const {
+    // Resolved-identity lookup: the resolved QML name first, then its
+    // advertised wire name (the name introspection shows — _members alias,
+    // catalog declaration, or the fold) — never the caller's spelling, so
+    // every accepted spelling of the same handler gets the same filter.
+    auto it = m_options.constFind(qmlMember);
     if (it == m_options.constEnd())
-        it = m_options.constFind(dbusMemberToQml(wireMember));
-    if (it == m_options.constEnd()) {
-        const QString aliased = m_members.value(wireMember).toString();
-        if (!aliased.isEmpty())
-            it = m_options.constFind(aliased);
-    }
+        it = m_options.constFind(advertisedName(qmlMember));
     if (it == m_options.constEnd())
         return std::nullopt; // no entry: filter OFF for that method
     // The value must be a map { key: sig }; anything else is a typo —
     // loud, and treated as no whitelist.
     if (!it.value().canConvert<QVariantMap>()) {
-        qWarning("dbusqml: _options entry for %s is not a map — ignored", qPrintable(wireMember));
+        qWarning("dbusqml: _options entry for %s is not a map — ignored", qPrintable(qmlMember));
         return std::nullopt;
     }
     // R2 (road-to-one, Call 2): an EMPTY map is a real entry — filter ON
@@ -367,11 +384,13 @@ void DBusAdaptor::validateOptionSpecs() {
     // ZERO in-args (no trailing dict possible), → attach-time warning,
     // entry ignored. A method WITH in-args keeps its entry — the
     // dispatch-time shape check (last arg must be a QVariantMap)
-    // decides per call.
+    // decides per call. The name check uses the SAME identity set the
+    // dispatch lookup uses (the resolved QML name or its advertised
+    // wire name), so an entry the filter would never find is refused
+    // loudly here instead of dying silently.
     const QMetaObject *meta = metaObject();
     for (auto it = m_options.begin(); it != m_options.end();) {
         const QString key = it.key();
-        const QStringList candidates = candidateQmlNames(key);
         // CF-6: copy by value — the old `found = &m` escaped the
         // loop-local QMetaMethod and dereferenced it after scope end
         // (UB; found->parameterCount() at the old :319).
@@ -381,7 +400,8 @@ void DBusAdaptor::validateOptionSpecs() {
             QMetaMethod m = meta->method(i);
             if (m.methodType() != QMetaMethod::Method && m.methodType() != QMetaMethod::Slot)
                 continue;
-            if (candidates.contains(QString::fromLatin1(m.name()))) {
+            const QString mname = QString::fromLatin1(m.name());
+            if (key == mname || key == advertisedName(mname)) {
                 found = m;
                 haveMethod = true;
                 break;
@@ -708,18 +728,10 @@ QDBusConnection DBusAdaptor::bus() const {
 }
 
 void DBusAdaptor::componentComplete() {
-    // A12/D2: an alias targeting a PRIVATE property is refused everywhere —
-    // privacy wins over the alias. Strip it at attach with a warning; the
-    // wire name then resolves to nothing (Get/Set/GetAll/XML all refuse).
-    for (auto it = m_members.begin(); it != m_members.end();) {
-        if (isPrivateProperty(it.value().toString())) {
-            qWarning("dbusqml: _members alias %s targets a private property — refused",
-                     qPrintable(it.key()));
-            it = m_members.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    // A12/D2: the attach-time net — the setter strips private targets at
+    // any time; this pass shares the same routine (the wire name then
+    // resolves to nothing: Get/Set/GetAll/XML all refuse it).
+    m_members = stripPrivateAliasTargets(std::move(m_members));
     // P10a/FD4: an _options entry naming a method without a trailing
     // a{sv} in-arg is an attach-time warning + ignored entry (the
     // whitelist can only filter a trailing options dict).
@@ -1067,6 +1079,26 @@ static QString metaTypeToDbusSignature(int typeId) {
     }
 }
 
+// The property's effective access — ONE resolution shared by generateXml
+// (advertise) and Properties.Set (enforce), so the wire contract and the
+// write path can never diverge: the catalog's declared access wins (A9);
+// undeclared falls back to metaobject writability. prop is the RESOLVED
+// meta-property.
+QString DBusAdaptor::effectiveAccess(const QMetaProperty &prop) const {
+    QString access = prop.isWritable() ? QStringLiteral("readwrite") : QStringLiteral("read");
+    if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
+        const QString name = QString::fromLatin1(prop.name());
+        for (const auto &p : spec->properties) {
+            if (p.name == name || dbusMemberToQml(p.name) == name) {
+                if (!p.access.isEmpty())
+                    access = p.access;
+                break;
+            }
+        }
+    }
+    return access;
+}
+
 QString DBusAdaptor::generateXml() const {
     const QMetaObject *meta = metaObject();
     QString xml;
@@ -1176,21 +1208,20 @@ QString DBusAdaptor::generateXml() const {
             continue;
 
         QString dbusType = metaTypeToDbusSignature(static_cast<int>(prop.typeId()));
-
-        QString access = prop.isWritable() ? QStringLiteral("readwrite") : QStringLiteral("read");
-        // A9: the catalog's declared type/access win over the metaobject
+        // A9: the catalog's declared type wins over the metaobject
         // inference (a declared `u` must not serve as metaobject `i`/`v`).
         if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
             for (const auto &p : spec->properties) {
                 if (p.name == name || dbusMemberToQml(p.name) == name) {
                     if (!p.type.isEmpty())
                         dbusType = p.type;
-                    if (!p.access.isEmpty())
-                        access = p.access;
                     break;
                 }
             }
         }
+        // A9 access: the SAME resolution Set enforces — the advertised
+        // contract is the enforced contract.
+        const QString access = effectiveAccess(prop);
         xml += QStringLiteral("    <property name=\"%1\" type=\"%2\" access=\"%3\"/>\n")
                    .arg(advertisedName(name), dbusType, access);
     }
@@ -1461,21 +1492,10 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
         if (member == QStringLiteral("Get") && args.size() >= 2) {
             QString propName = args[1].toString();
-            if (isPrivateProperty(propName)) {
-                sendReply(
-                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
-                                         QStringLiteral("No such property: %1").arg(propName)));
-                return true;
-            }
-            // P10a: library config maps are not served properties.
-            if (propName == QStringLiteral("_options") ||
-                propName == QStringLiteral("_signatures") ||
-                propName == QStringLiteral("_signals") || propName == QStringLiteral("_members")) {
-                sendReply(
-                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
-                                         QStringLiteral("No such property: %1").arg(propName)));
-                return true;
-            }
+            // One resolution, then policy on the RESOLVED identity — never
+            // on the caller's spelling: privacy is decided for the
+            // meta-property the wire name resolves to, so an alias (or a
+            // fold) cannot launder a private property into a served one.
             // A2: dual lookup — exact QML name, then the folded wire name
             // (Get("iface", "Version") must find `property int version`),
             // mirroring the method dispatch's exact→folded order.
@@ -1489,6 +1509,11 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 if (!propCandidates.contains(name) &&
                     dbusFoldName(name, true) != dbusFoldName(propName, true))
                     continue;
+                // Resolved-name privacy: a private target refuses exactly
+                // like an unknown name (never leak existence). This also
+                // covers the library config maps (_options & co.).
+                if (isPrivateProperty(name))
+                    break;
                 QVariant val = prop.read(this);
                 if (val.userType() == qMetaTypeId<QJSValue>())
                     val = qjsValueToVariant(val.value<QJSValue>());
@@ -1567,32 +1592,30 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         }
         if (member == QStringLiteral("Set") && args.size() >= 3) {
             QString propName = args[1].toString();
-            if (isPrivateProperty(propName)) {
-                sendReply(
-                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
-                                         QStringLiteral("No such property: %1").arg(propName)));
-                return true;
-            }
-            // P10a: library config maps are not served properties.
-            if (propName == QStringLiteral("_options") ||
-                propName == QStringLiteral("_signatures") ||
-                propName == QStringLiteral("_signals") || propName == QStringLiteral("_members")) {
-                sendReply(
-                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
-                                         QStringLiteral("No such property: %1").arg(propName)));
-                return true;
-            }
             QVariant value = args[2];
+            // One resolution, then policy on the RESOLVED identity (same
+            // rule as Get): privacy first (a private target refuses like an
+            // unknown name), then the ADVERTISED access — the XML and the
+            // write path share effectiveAccess, so the contract cannot lie.
             // A2: same dual lookup as Get — exact QML name, then folded wire name.
             // A14/D5: both folds accepted on lookup (client vs server fold).
             const QStringList propCandidates = candidateQmlNames(propName);
             for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
                 QMetaProperty prop = meta->property(i);
                 const QString name = QString::fromLatin1(prop.name());
-                if ((!propCandidates.contains(name) &&
-                     dbusFoldName(name, true) != dbusFoldName(propName, true)) ||
-                    !prop.isWritable())
+                if (!propCandidates.contains(name) &&
+                    dbusFoldName(name, true) != dbusFoldName(propName, true))
                     continue;
+                if (isPrivateProperty(name))
+                    break;
+                if (effectiveAccess(prop) == QStringLiteral("read")) {
+                    // The advertised access is enforced: Set of a read
+                    // property is refused, value unchanged.
+                    sendReply(msg.createErrorReply(
+                        QStringLiteral("org.freedesktop.DBus.Error.PropertyReadOnly"),
+                        QStringLiteral("Property %1 is read-only").arg(propName)));
+                    return true;
+                }
                 // C1: a failed write is a caller error — reply InvalidArgs with
                 // the property unchanged, not a silent empty success (the
                 // 0.5.2 Get/GetAll guard precedent, on the last unguarded
@@ -1617,36 +1640,6 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
     // Method dispatch
     QVariantList dbusArgs = args;
-
-    // P10a: served option-whitelist. When the method declares an _options
-    // entry AND the last in-arg is a{sv}, filter the dict BEFORE dispatch:
-    // unknown keys silently dropped, wrong-kind/mistyped keys → InvalidArgs
-    // error reply (xdp semantics, R1). The FILTERED dict — with TYPED
-    // values — is what the handler receives. R2: an engaged-but-empty
-    // whitelist is a real entry (filter ON, zero declared keys → the
-    // handler receives {}); only a MISSING entry skips filtering.
-    {
-        const std::optional<QVariantMap> whitelist = optionWhitelist(member);
-        if (whitelist.has_value() && !dbusArgs.isEmpty()) {
-            const QVariant &last = dbusArgs.last();
-            QVariantMap opts;
-            bool isOptionsDict = false;
-            if (last.userType() == qMetaTypeId<QVariantMap>()) {
-                opts = last.toMap();
-                isOptionsDict = true;
-            }
-            if (isOptionsDict) {
-                QString filterError;
-                const QVariantMap filtered = filterOptions(*whitelist, opts, &filterError);
-                if (!filterError.isEmpty()) {
-                    sendReply(msg.createErrorReply(
-                        QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"), filterError));
-                    return true;
-                }
-                dbusArgs.last() = filtered;
-            }
-        }
-    }
 
     // D-Bus members are PascalCase; QML methods are camelCase (QML
     // forbids uppercase-initial names). Resolution order (the naming
@@ -1676,6 +1669,33 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
         if (method.parameterCount() != dbusArgs.size()) {
             continue;
+        }
+
+        // P10a (resolved identity): served option-whitelist. The handler is
+        // resolved FIRST; the policy key is the resolved QML name or its
+        // advertised wire name, so every accepted spelling of this handler
+        // gets the same filter. When the method declares an _options entry
+        // AND the last in-arg is a{sv}, filter the dict BEFORE invocation:
+        // unknown keys silently dropped, wrong-kind/mistyped keys →
+        // InvalidArgs error reply (xdp semantics, R1). The FILTERED dict —
+        // with TYPED values — is what the handler receives. R2: an
+        // engaged-but-empty whitelist is a real entry (filter ON, zero
+        // declared keys → the handler receives {}); only a MISSING entry
+        // skips filtering.
+        {
+            const std::optional<QVariantMap> whitelist = optionWhitelist(matchedName);
+            if (whitelist.has_value() && !dbusArgs.isEmpty() &&
+                dbusArgs.last().userType() == qMetaTypeId<QVariantMap>()) {
+                QString filterError;
+                const QVariantMap filtered =
+                    filterOptions(*whitelist, dbusArgs.last().toMap(), &filterError);
+                if (!filterError.isEmpty()) {
+                    sendReply(msg.createErrorReply(
+                        QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"), filterError));
+                    return true;
+                }
+                dbusArgs.last() = filtered;
+            }
         }
 
         QVariant retVal;

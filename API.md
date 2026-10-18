@@ -378,6 +378,13 @@ property name and its wire-cased form (`Get("iface", "Version")` finds
 `property int version`). A `Set` whose value cannot be converted replies
 `InvalidArgs` with the property unchanged.
 
+**Property access enforcement:** the access the introspection XML advertises
+is the access the bus enforces — one resolution drives both. A `Set` on a
+property whose effective access is `read` (declared by the interface's
+catalog XML, or a read-only `CONSTANT` QML/C++ property) is refused with
+`org.freedesktop.DBus.Error.PropertyReadOnly` and the value is left
+unchanged.
+
 **Property change notifications:** property changes emit the standard
 `org.freedesktop.DBus.Properties.PropertiesChanged` signal (with the
 advertised name; unmarshalable values report via `invalidated_properties`).
@@ -502,14 +509,17 @@ DBusAdaptor {
 | `iface` | `string` | The interface name to expose. |
 | `connection` | `DBusConnection` | The bus to register on (default session bus). |
 | `_signatures` | `var` (object) | Explicit reply signatures, keyed by D-Bus member name (see Shape Selection). |
-| `_options` | `var` (object) | Per-method served option whitelist `{ Method: { key: sig } }` applied to the method's last `a{sv}` in-arg (xdp `xdp_filter_options` semantics): the filter iterates the **declared** keys — unknown caller keys are silently dropped (forward-compat); a declared key present with a matching/coercible-same-kind value delivers the **typed** (coerced) value; a declared key with a wrong-kind (scalar-for-list, list-for-map, container-for-scalar) or non-convertible value gets `org.freedesktop.DBus.Error.InvalidArgs` and the handler never runs. An **empty entry** `{ Method: {} }` is a real rule: filter ON with zero declared keys — every caller key is dropped and the handler receives `{}` (deny-all-keys; no runtime notice). |
+| `_options` | `var` (object) | Per-method served option whitelist `{ Method: { key: sig } }` applied to the method's last `a{sv}` in-arg (xdp `xdp_filter_options` semantics): the filter iterates the **declared** keys — unknown caller keys are silently dropped (forward-compat); a declared key present with a matching/coercible-same-kind value delivers the **typed** (coerced) value; a declared key with a wrong-kind (scalar-for-list, list-for-map, container-for-scalar) or non-convertible value gets `org.freedesktop.DBus.Error.InvalidArgs` and the handler never runs. An **empty entry** `{ Method: {} }` is a real rule: filter ON with zero declared keys — every caller key is dropped and the handler receives `{}` (deny-all-keys; no runtime notice). The key may be the QML method name or its advertised wire name (the name introspection shows); the policy then applies to **every accepted spelling** of that method — exact, folded, or client-folded — because dispatch resolves the handler first and looks the whitelist up by the resolved identity. |
 | `allowedSender` | `string` | Unique bus name allowed to call this adaptor (empty = open); mismatch → `AccessDenied` before any handler runs (P10b). The value is compared against the caller's UNIQUE name (`msg.service()`): a well-known name never matches, so setting one denies everyone — attach-time warning. Introspection (`org.freedesktop.DBus.Introspectable`) is answered by the dispatcher before the adaptor gate runs, so it stays public metadata (xdp posture) regardless of `allowedSender`. |
 | `heldReplyTimeout` | `int` | Max held-reply lifetime in ms (`0` = disabled default); expiry settles with `Failed` ("reply timed out"). |
 
 **Private properties:** any adaptor property whose name starts with `_` is
 library meta-config (`_signatures`, `_options`, or your own helpers) and is
 never served over D-Bus — it is excluded from `generateXml()` and
-`Properties.Get/GetAll/Set`.
+`Properties.Get/GetAll/Set`. Privacy is checked on the resolved property,
+and a `_members` alias targeting a private property is refused with a
+warning whenever the map is set — attach-time or runtime — so an alias can
+never launder a private property into a public wire name.
 
 **Declared reply signatures:** when the served interface is in the bundled or
 user type catalog, its declared out-args drive reply marshaling. A
