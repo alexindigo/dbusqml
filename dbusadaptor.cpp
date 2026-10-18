@@ -119,12 +119,11 @@ private:
             }
             args = typed;
         }
-        for (const QVariant &a : args) {
-            if (!wireMarshalable(a)) {
-                qWarning("dbusqml: signal %s arg is not marshalable (type %s) — skipping send",
-                         qPrintable(m_name), QMetaType(a.userType()).name());
-                return;
-            }
+        QString sendErr;
+        if (!checkSendable(args, &sendErr)) {
+            qWarning("dbusqml: signal %s arg is not marshalable (%s) — skipping send",
+                     qPrintable(m_name), qPrintable(sendErr));
+            return;
         }
         QDBusMessage msg = QDBusMessage::createSignal(guard->path(), guard->iface(), m_name);
         if (!args.isEmpty())
@@ -1004,14 +1003,14 @@ void DBusAdaptor::emitSignal(const QString &name, const QJSValue &arguments) {
             }
             args = typed;
         }
-        // Robustness guard: an unmarshalable arg would kill the connection.
-        // Signals have no error-reply channel, so warn and skip the send.
-        for (const QVariant &a : std::as_const(args)) {
-            if (!wireMarshalable(a)) {
-                qWarning("dbusqml: signal %s arg is not marshalable (type %s) — skipping send",
-                         qPrintable(name), QMetaType(a.userType()).name());
-                return;
-            }
+        // Robustness guard: an unmarshalable arg or an over-long aggregate
+        // signature would kill the connection. Signals have no error-reply
+        // channel, so warn and skip the send.
+        QString sendErr;
+        if (!checkSendable(args, &sendErr)) {
+            qWarning("dbusqml: signal %s arg is not marshalable (%s) — skipping send",
+                     qPrintable(name), qPrintable(sendErr));
+            return;
         }
         msg.setArguments(args);
     }
@@ -1496,11 +1495,11 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 // V-providing slot: the explicit QDBusVariant wrap below is the
                 // reply's "v", so gadget values contribute their payload.
                 val = toDbusVariantNested(val);
-                if (!wireMarshalable(val)) {
-                    qWarning("dbusqml: property %s on %s is not marshalable (type %s) — "
+                QString sendErr;
+                if (!checkSendable({QVariant::fromValue(QDBusVariant(val))}, &sendErr)) {
+                    qWarning("dbusqml: property %s on %s is not marshalable (%s) — "
                              "replying InvalidArgs",
-                             qPrintable(propName), qPrintable(m_iface),
-                             QMetaType(val.userType()).name());
+                             qPrintable(propName), qPrintable(m_iface), qPrintable(sendErr));
                     sendReply(msg.createErrorReply(
                         QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
                         QStringLiteral("Property not marshalable: %1").arg(propName)));
@@ -1550,6 +1549,18 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                     continue;
                 }
                 props.insert(advertisedName(name), val);
+            }
+            // One send boundary, uniform with the other adaptor exits —
+            // provably vacuous today (fixed "a{sv}" signature, every value
+            // pre-guarded above) and cheap insurance if that ever changes.
+            QString sendErr;
+            if (!checkSendable(QVariantList{props}, &sendErr)) {
+                qWarning("dbusqml: GetAll reply on %s is not sendable (%s) — replying InvalidArgs",
+                         qPrintable(m_iface), qPrintable(sendErr));
+                sendReply(
+                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                                         QStringLiteral("GetAll reply is not marshalable")));
+                return true;
             }
             sendReply(msg.createReply(QVariantList{props}));
             return true;
@@ -2084,9 +2095,10 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
         // Robustness guard: an unmarshalable payload (e.g. a returned JS
         // function) would otherwise make QtDBus drop the bus connection.
         // Degrade to an error reply — one failed call, never the service.
-        if (!wireMarshalable(value)) {
-            qWarning("dbusqml: reply for %s is not marshalable (type %s) — sending error reply",
-                     qPrintable(member), QMetaType(value.userType()).name());
+        QString sendErr;
+        if (!checkSendable({value}, &sendErr)) {
+            qWarning("dbusqml: reply for %s is not marshalable (%s) — sending error reply",
+                     qPrintable(member), qPrintable(sendErr));
             checkedSend(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
                                              QStringLiteral("Reply value is not marshalable")),
                         "error reply");
@@ -2115,10 +2127,11 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
             // hit libdbus unguarded (the B4 comment at the h-branch claims
             // the boundary rejects it, but the boundary already ran).
             QVariant coerced = marshalBySignature(outTypes.first(), value);
-            if (!wireMarshalable(coerced)) {
-                qWarning("dbusqml: reply for %s cannot produce declared type '%s' — sending error "
-                         "reply",
-                         qPrintable(member), qPrintable(outTypes.first()));
+            QString sendErr;
+            if (!checkSendable({coerced}, &sendErr)) {
+                qWarning("dbusqml: reply for %s cannot produce declared type '%s' (%s) — sending "
+                         "error reply",
+                         qPrintable(member), qPrintable(outTypes.first()), qPrintable(sendErr));
                 checkedSend(
                     msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
                                          QStringLiteral("Reply value is not marshalable")),
@@ -2130,23 +2143,23 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
         }
         if (outTypes.size() > 1) {
             // Multi-out: the method returned a list of out values.
-            // CF-8: same post-coercion guard per element.
+            // CF-8: same post-coercion guard, now also on the AGGREGATE
+            // reply signature — the concatenated out types must fit the
+            // 255-byte message-signature cap.
             const QVariantList values = value.toList();
             QVariantList reply;
-            for (int i = 0; i < outTypes.size(); ++i) {
-                QVariant coerced = marshalBySignature(
-                    outTypes.at(i), i < values.size() ? values.at(i) : QVariant());
-                if (!wireMarshalable(coerced)) {
-                    qWarning("dbusqml: reply for %s cannot produce declared type '%s' (arg %d) — "
-                             "sending error reply",
-                             qPrintable(member), qPrintable(outTypes.at(i)), i);
-                    checkedSend(
-                        msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
-                                             QStringLiteral("Reply value is not marshalable")),
-                        "error reply");
-                    return;
-                }
-                reply << coerced;
+            for (int i = 0; i < outTypes.size(); ++i)
+                reply << marshalBySignature(outTypes.at(i),
+                                            i < values.size() ? values.at(i) : QVariant());
+            QString sendErr;
+            if (!checkSendable(reply, &sendErr)) {
+                qWarning("dbusqml: reply for %s is not marshalable (%s) — sending error reply",
+                         qPrintable(member), qPrintable(sendErr));
+                checkedSend(
+                    msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
+                                         QStringLiteral("Reply value is not marshalable")),
+                    "error reply");
+                return;
             }
             checkedSend(msg.createReply(reply), "multi-out reply");
             return;

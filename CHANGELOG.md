@@ -13,6 +13,21 @@ infrastructure that materially affects consumer trust).
 
 ### Fixed
 
+- **Peer-supplied or oversized signatures could abort the process inside
+  libdbus** — signatures are now validated with the complete spec rules
+  before registration or use: type codes only, balanced non-empty structs,
+  dict entries only as array elements with a basic-type key, array and
+  struct nesting capped at 32 levels each, and the 255-byte encoded-length
+  cap. A peer-advertised signature outside those rules (e.g. a 256-byte
+  array element type in introspection XML) previously registered and
+  aborted at `beginArray`; the call now fails locally with `Failed` and
+  the process stays alive. Every send path (client calls and
+  fire-and-forget sends, proxy and adaptor signals, adaptor replies, held
+  replies) also checks one send boundary — per-argument marshalability
+  plus the aggregate message signature ≤ 255 bytes — before a message
+  reaches QtDBus, so an over-long aggregate fails locally or is dropped
+  with a warning instead of reaching libdbus.
+
 - **Deep incoming messages could hang the decoder** — recursive readers now
   propagate failure and discard partial results instead of repeatedly reading
   the same argument. Decode limits follow D-Bus: 32 array and 32 struct levels

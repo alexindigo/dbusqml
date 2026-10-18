@@ -24,7 +24,7 @@ endif()
 # catalog XML is local trust (malformed-input qtests only).
 #
 # CF-24: the signature fuzzer links the REAL dbusconnection.cpp TU
-# (firstCompleteType/isStrictSignature/writeBySignature) instead of a
+# (firstCompleteType/validateSignature/writeBySignature) instead of a
 # TU-local copy — the old "identical by construction" copy could drift
 # from the crashing function without any test noticing. The TU drags
 # the adaptor/catalog/dispatcher link deps; that is the price of

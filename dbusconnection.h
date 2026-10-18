@@ -25,10 +25,20 @@ QVariant toDbusVariantNested(const QVariant &v);
 // (peer XML flows verbatim into this walker).
 QString firstCompleteType(const QString &sig, int &pos, int depth = 0);
 
-// Strict single-type validation: recursive descent, depth-capped at 32
-// (CF-18). Exported for the signature fuzzer (CF-24) and the
-// writeBySignature depth gate (CF-3).
-bool isStrictSignature(const QString &sig, int &pos, int depth = 0);
+// D-Bus signature validation (spec, "Valid Signatures"; libdbus
+// _dbus_validate_signature_with_reason): type codes only, containers
+// balanced, structs non-empty, dict entries only as an array's element
+// type with a basic-type key, array nesting ≤ 32, struct nesting ≤ 32
+// (a dict entry nests like a struct — the decode side counts the same,
+// dbusutils.cpp), encoded length ≤ 255 bytes (libdbus
+// DBUS_MAXIMUM_SIGNATURE_LENGTH / DBUS_MAXIMUM_TYPE_RECURSION_DEPTH).
+// Single = exactly one complete type; Message = zero or more concatenated
+// complete types (an outgoing message signature, possibly empty).
+// Signatures arrive from peer introspection XML, so anything this rejects
+// would otherwise be registered and passed to QtDBus — where an oversized
+// or malformed signature aborts inside libdbus (finding #1).
+enum class SignatureKind { Single, Message };
+bool validateSignature(const QString &sig, SignatureKind kind);
 
 // Marshal a JS-supplied QVariant against a known D-Bus signature.
 // Produces a QVariant with the correct C++ type for QtDBus to marshal
@@ -58,6 +68,18 @@ QJSValue precisionSafeToScriptValue(QQmlEngine *engine, const QVariant &v);
 // poisons the whole. Shared by the adaptor (reply/signal/property) and the
 // client (call/message/set) exits.
 bool wireMarshalable(const QVariant &v);
+
+// The one send boundary: every argument must be wire-marshalable AND the
+// aggregate outgoing message signature (the concatenation of the argument
+// wire signatures) must fit the spec's 255-byte cap — a longer signature
+// aborts inside libdbus when the message is serialized (finding #1's
+// aggregate twin). `err` receives the canonical reason ("argument N is
+// not marshalable" / "message signature exceeds the 255-byte D-Bus limit").
+// Every send path (client call/send, proxy signals, adaptor replies and
+// signals, held replies) checks this before handing a message to QtDBus;
+// each site keeps its own failure style (local error reply / warn+skip /
+// error reply).
+bool checkSendable(const QVariantList &args, QString *err);
 
 // Convert a QVariant into a native JS value, recursively unwrapping lists
 // and maps so the JS side receives real Array / Object instances (with a

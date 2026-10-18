@@ -774,11 +774,30 @@ DBusAdaptor {
 }
 ```
 
-A declared signature is never silently ignored. Every well-formed element
-signature is producible (unregistered container shapes mint assign-once
-signature-slot pool registrations — see `dbussignatureslots.h`); only
-malformed signatures, invalid values, or pool exhaustion log a warning and
-fall back to inference — never a different wire type with no notice.
+A declared signature is never silently ignored. An **invalid** declared
+signature (the validity rules below) fails the value instead: the call,
+signal, or reply fails locally at the send boundary rather than reaching
+the wire with an inferred type the peer never advertised. A **valid**
+signature whose value cannot produce it (or signature-slot pool
+exhaustion) logs a warning and falls back to inference — never a
+different wire type with no notice. Unregistered but valid container
+shapes mint assign-once signature-slot pool registrations (see
+`dbussignatureslots.h`).
+
+**Signature limits** (D-Bus "Valid Signatures", enforced before any
+signature is registered or used): a signature is a list of complete types
+built only from the type codes, parentheses, and curly braces; structs
+are balanced and non-empty; a dict entry appears only as an array's
+element type, has exactly two members, and its key is a basic type;
+array nesting and struct nesting are each capped at 32 levels; and the
+encoded signature is at most 255 bytes. The aggregate message signature —
+the concatenation of a message's argument signatures — is likewise capped
+at 255 bytes, checked with the per-argument marshalability guard at one
+send boundary shared by every send path (calls, fire-and-forget sends,
+proxy and adaptor signals, adaptor replies, held replies): a message that
+would exceed the cap fails locally (`Failed` error reply / `InvalidArgs`)
+or is dropped with a warning on paths without a reply channel, instead of
+aborting inside libdbus.
 
 ---
 
@@ -1034,7 +1053,10 @@ watchers, ObjectManager, fds, lossless 64-bit).
   libdbus's `DBUS_MAXIMUM_TYPE_RECURSION_DEPTH` (32) and its doubled body-depth
   limit. The send-side signature walkers currently retain their depth-32
   guard; exceeding a decode limit takes the failure paths above, never a
-  non-advancing loop.
+  non-advancing loop. Signature **validation** (Shape Selection) uses the
+  spec's own per-kind caps, so a spec-valid shape deeper than 32 total
+  levels is accepted by the validator but remains unproducible by the
+  depth-32 walkers and fails loud at marshal time.
 
 ### Signal handlers on `DBus` elements run in C++-object context
 

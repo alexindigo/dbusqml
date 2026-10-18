@@ -29,7 +29,19 @@
 // Delegates to the signature-driven marshaller in dbusconnection.cpp.
 // The marshaller handles all types — basic coercion, ay (string→UTF-8),
 // as (via DBusAsArray), a{sv}, a{sa{sv}}, and nested containers.
+// An INVALID declared in-arg type (from peer introspection, catalog, or
+// override) fails the value (invalid QVariant) — never inference. Falling
+// back would send a wire type the peer never advertised; the send
+// boundary's marshalability check turns the invalid value into the local
+// error (finding #1: a peer-advertised >255-byte signature must fail the
+// call locally, not reach libdbus).
 static QVariant toTypedDbusVariant(const QVariant &v, const QString &dbusType) {
+    if (!dbusType.isEmpty() && !validateSignature(dbusType, SignatureKind::Single)) {
+        qWarning("dbusqml: declared signature '%s' is not a valid D-Bus signature — failing the "
+                 "value",
+                 qPrintable(dbusType));
+        return {};
+    }
     return marshalBySignature(dbusType, v);
 }
 
@@ -51,17 +63,14 @@ public:
         for (int i = 0; i < converted.size() && i < types.size(); ++i)
             converted[i] = toTypedDbusVariant(converted[i], types[i]);
 
-        for (int i = 0; i < converted.size(); ++i) {
-            if (!wireMarshalable(converted.at(i))) {
-                qWarning("dbusqml: argument %d of %s is not marshalable (type %s) — failing call "
-                         "locally",
-                         i, qPrintable(method), QMetaType(converted.at(i).userType()).name());
-                auto *fail = new DBusPendingReply(m_proxy);
-                fail->setEngine(qmlEngine(m_proxy));
-                fail->completeLocalError(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
-                                         QStringLiteral("argument %1 is not marshalable").arg(i));
-                return fail;
-            }
+        QString sendErr;
+        if (!checkSendable(converted, &sendErr)) {
+            qWarning("dbusqml: %s in call to %s — failing call locally", qPrintable(sendErr),
+                     qPrintable(method));
+            auto *fail = new DBusPendingReply(m_proxy);
+            fail->setEngine(qmlEngine(m_proxy));
+            fail->completeLocalError(QStringLiteral("org.freedesktop.DBus.Error.Failed"), sendErr);
+            return fail;
         }
 
         QDBusMessage msg = QDBusMessage::createMethodCall(m_proxy->service(), m_proxy->path(),
@@ -442,15 +451,13 @@ void DBusProxy::emitSignal(const QString &name, const QVariantList &args) {
         QVariantList converted = args;
         for (int i = 0; i < converted.size(); ++i)
             converted[i] = toDbusVariant(converted[i]);
-        for (int i = 0; i < converted.size(); ++i) {
-            if (!wireMarshalable(converted.at(i))) {
-                // Signals have no error-reply channel — warn and skip, matching
-                // the adaptor-side convention.
-                qWarning("dbusqml: signal %s argument %d is not marshalable (type %s) — skipping "
-                         "send",
-                         qPrintable(name), i, QMetaType(converted.at(i).userType()).name());
-                return;
-            }
+        QString sendErr;
+        if (!checkSendable(converted, &sendErr)) {
+            // Signals have no error-reply channel — warn and skip, matching
+            // the adaptor-side convention.
+            qWarning("dbusqml: %s in signal %s — skipping send", qPrintable(sendErr),
+                     qPrintable(name));
+            return;
         }
         msg.setArguments(converted);
     }
@@ -464,13 +471,11 @@ void DBusProxy::emitSignal(const QString &service, const QString &path, const QS
         QVariantList converted = args;
         for (int i = 0; i < converted.size(); ++i)
             converted[i] = toDbusVariant(converted[i]);
-        for (int i = 0; i < converted.size(); ++i) {
-            if (!wireMarshalable(converted.at(i))) {
-                qWarning("dbusqml: signal %s argument %d is not marshalable (type %s) — skipping "
-                         "send",
-                         qPrintable(name), i, QMetaType(converted.at(i).userType()).name());
-                return;
-            }
+        QString sendErr;
+        if (!checkSendable(converted, &sendErr)) {
+            qWarning("dbusqml: %s in signal %s — skipping send", qPrintable(sendErr),
+                     qPrintable(name));
+            return;
         }
         msg.setArguments(converted);
     }
@@ -491,17 +496,14 @@ DBusPendingReply *DBusProxy::call(const QString &method, const QVariantList &arg
                 expectedType = types[i];
             converted[i] = toTypedDbusVariant(converted[i], expectedType);
         }
-        for (int i = 0; i < converted.size(); ++i) {
-            if (!wireMarshalable(converted.at(i))) {
-                qWarning("dbusqml: argument %d of %s is not marshalable (type %s) — failing call "
-                         "locally",
-                         i, qPrintable(method), QMetaType(converted.at(i).userType()).name());
-                auto *fail = new DBusPendingReply(this);
-                fail->setEngine(qmlEngine(this));
-                fail->completeLocalError(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
-                                         QStringLiteral("argument %1 is not marshalable").arg(i));
-                return fail;
-            }
+        QString sendErr;
+        if (!checkSendable(converted, &sendErr)) {
+            qWarning("dbusqml: %s in call to %s — failing call locally", qPrintable(sendErr),
+                     qPrintable(method));
+            auto *fail = new DBusPendingReply(this);
+            fail->setEngine(qmlEngine(this));
+            fail->completeLocalError(QStringLiteral("org.freedesktop.DBus.Error.Failed"), sendErr);
+            return fail;
         }
         msg.setArguments(converted);
     }
@@ -656,13 +658,11 @@ void DBusProxy::send(const QString &method, const QVariantList &args) {
                 expectedType = types[i];
             converted[i] = toTypedDbusVariant(converted[i], expectedType);
         }
-        for (int i = 0; i < converted.size(); ++i) {
-            if (!wireMarshalable(converted.at(i))) {
-                qWarning("dbusqml: argument %d of %s is not marshalable (type %s) — dropping "
-                         "send",
-                         i, qPrintable(method), QMetaType(converted.at(i).userType()).name());
-                return;
-            }
+        QString sendErr;
+        if (!checkSendable(converted, &sendErr)) {
+            qWarning("dbusqml: %s in call to %s — dropping send", qPrintable(sendErr),
+                     qPrintable(method));
+            return;
         }
         msg.setArguments(converted);
     }

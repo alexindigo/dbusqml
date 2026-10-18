@@ -282,6 +282,20 @@ discards the whole message's decoded arguments. Replies settle as local
 string-array demarshaller reuse that reader rather than maintaining separate
 container loops.
 
+### Send boundary
+
+All outgoing argument producers share `checkSendable`: per-argument
+marshalability plus the aggregate message signature against the spec's
+255-byte cap, evaluated before a message reaches QtDBus. Signature strings
+themselves (introspected in-args, `_signatures` overrides, `variant(x,
+sig)`, slot-pool registrations) are validated against the full "Valid
+Signatures" rules — type codes, balanced non-empty structs, dict entries
+only as array elements with basic-type keys, per-kind nesting ≤ 32,
+encoded length ≤ 255 — by one `validateSignature`, so an invalid
+signature fails the value and the boundary fails the send locally; each
+path keeps its own failure style (local error reply, warn+skip, error
+reply).
+
 ## Dependencies (`DBus` proxy + `DBusAdaptor`)
 
 | Dependency | Why |

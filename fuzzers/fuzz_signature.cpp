@@ -21,18 +21,19 @@ static int runOne(const uint8_t *data, size_t size) {
     const QString sig =
         QString::fromUtf8(QByteArray::fromRawData(reinterpret_cast<const char *>(data), int(size)));
     // The REAL walker (linked from dbusconnection.cpp) — a depth-cap
-    // breach must return empty, never crash. Follow with the strict gate
+    // breach must return empty, never crash. Follow with the spec validator
     // and the full writeBySignature marshal, mirroring the production
     // introspection→marshal chain (parse→marshal trust crossing).
     int pos = 0;
     const QString t = firstCompleteType(sig, pos);
     (void)t.size();
     (void)pos;
-    int spos = 0;
-    if (isStrictSignature(sig, spos) && spos == sig.size()) {
+    if (validateSignature(sig, SignatureKind::Single)) {
         const QVariant m = writeBySignature(sig, QVariant());
         (void)m.isValid();
     }
+    // The message-signature kind must terminate too.
+    (void)validateSignature(sig, SignatureKind::Message);
     return 0;
 }
 

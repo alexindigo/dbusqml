@@ -131,6 +131,70 @@ public:
     }
 };
 
+// ==================== Signature Probe Service ====================
+
+// A peer whose introspection advertises ONE method with a test-supplied
+// in-arg signature — finding #1's trust crossing: the type string flows
+// verbatim from peer XML into the marshal chain. The probe counts the calls
+// that actually arrive and records the incoming wire signature.
+class SignatureProbeObject : public QDBusVirtualObject {
+    Q_OBJECT
+
+public:
+    QString argType;     // advertised in-arg type, verbatim into the XML
+    int calls = 0;       // calls that reached the handler
+    QString lastWireSig; // message signature of the last received call
+
+    QString introspect(const QString &) const override {
+        return QStringLiteral("<node><interface name=\"org.dbusqml.SigProbe\">"
+                              "<method name=\"Take\"><arg type=\"%1\" direction=\"in\"/>"
+                              "<arg type=\"s\" direction=\"out\"/></method>"
+                              "</interface></node>")
+            .arg(argType);
+    }
+
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.interface() == QLatin1String("org.freedesktop.DBus.Introspectable"))
+            return false;
+        if (msg.member() == QLatin1String("Take")) {
+            ++calls;
+            lastWireSig = msg.signature();
+        }
+        return conn.send(msg.createReply(QVariantList{QStringLiteral("taken")}));
+    }
+};
+
+// Forwards messages to a DBusAdaptor without attach/registration (the
+// adaptor-reply send boundary) — same pattern as DecodeInjectionObject.
+class SigAdaptorForwarder : public QDBusVirtualObject {
+public:
+    DBusAdaptor *target = nullptr;
+    QString introspect(const QString &) const override { return {}; }
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.interface() == QLatin1String("org.freedesktop.DBus.Introspectable"))
+            return false;
+        return target->handleMessage(msg, conn);
+    }
+};
+
+// Declares 256 out strings — an aggregate reply signature of 256 bytes,
+// over the spec's 255-byte message-signature cap.
+class SigReplyAdaptor : public DBusAdaptor {
+    Q_OBJECT
+public:
+    SigReplyAdaptor() {
+        setIface(QStringLiteral("org.dbusqml.SigAdaptor"));
+        setSignatures({{QStringLiteral("Strings"), QString(256, QLatin1Char('s'))}});
+    }
+    Q_INVOKABLE QVariantList strings() {
+        QVariantList out;
+        out.reserve(256);
+        for (int i = 0; i < 256; ++i)
+            out << QStringLiteral("s%1").arg(i);
+        return out;
+    }
+};
+
 // ==================== Mock D-Bus Service ====================
 
 class TestService : public QObject {
@@ -3211,6 +3275,429 @@ private slots:
         delete ok;
         delete proxy;
     }
+
+    // ==================== Signature validation / send boundary (finding #1) ====================
+    //
+    // One validator (validateSignature) implements the spec's "Valid
+    // Signatures" rules — type codes, balance, non-empty structs, dict
+    // entries only as array elements with a basic-type key, array and
+    // struct nesting ≤ 32 each, encoded length ≤ 255 bytes — and one send
+    // boundary (checkSendable) adds the aggregate message-signature cap.
+    // A peer-advertised or hand-built signature outside those rules must
+    // fail LOCALLY (error reply / warn+drop); it must never reach
+    // QtDBus/libdbus, where an oversized signature aborts the process.
+    //
+    // Each kill-class scenario runs in its own process (the pre-fix tree
+    // aborts on the 256-byte shapes — that crash IS the finding).
+
+    void testSignatureBoundary_data() {
+        QTest::addColumn<QString>("scenario");
+        for (const char *name :
+             {// Peer-advertised hostile signatures → the call fails locally.
+              "peer-len256", "peer-len256-element", "peer-dict-bare", "peer-dict-vkey",
+              "peer-dict-ckey", "peer-structs33",
+              // Aggregate message signature > 255 at the send sites.
+              "aggregate-256", "aggregate-send-256", "proxy-emit-256", "adaptor-reply-256",
+              // Direct writeBySignature validity gates.
+              "write-len256", "write-dict-vkey", "write-dict-bare",
+              // QDBusSignature ('g') argument values are validated as
+              // message signatures.
+              "sigarg-len256", "sigarg-dict-bare",
+              // Valid boundaries keep working (characterization: these
+              // already pass pre-fix).
+              "valid-255", "valid-arrays32", "valid-structs32", "valid-aggregate-255",
+              "sigarg-valid-255"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+    }
+
+    void testSignatureBoundary() {
+        QFETCH(QString, scenario);
+        if (!qEnvironmentVariableIsSet("DBUSQML_SIGVAL_CHILD")) {
+            QProcess child;
+            auto env = QProcessEnvironment::systemEnvironment();
+            env.insert(QStringLiteral("DBUSQML_SIGVAL_CHILD"), QStringLiteral("1"));
+            child.setProcessEnvironment(env);
+            child.setProcessChannelMode(QProcess::MergedChannels);
+            child.setUnixProcessParameters(QProcess::UnixProcessFlag::CreateNewSession);
+            child.start(QCoreApplication::applicationFilePath(),
+                        {QStringLiteral("testSignatureBoundary:") + scenario});
+            QVERIFY(child.waitForStarted(3000));
+            QByteArray output;
+            QElapsedTimer startup;
+            startup.start();
+            while (!output.contains("SIGVAL_READY") && startup.elapsed() < 15000 &&
+                   child.state() != QProcess::NotRunning) {
+                child.waitForReadyRead(100);
+                output += child.readAll();
+            }
+            const bool ready = output.contains("SIGVAL_READY");
+            QElapsedTimer action;
+            action.start();
+            while (!output.contains("SIGVAL_DONE") && action.elapsed() < 4000 &&
+                   child.state() != QProcess::NotRunning) {
+                child.waitForReadyRead(50);
+                output += child.readAll();
+            }
+            const qint64 actionMs = action.elapsed();
+            const bool completed = output.contains("SIGVAL_DONE") && actionMs < 4000;
+            if (!completed && child.state() != QProcess::NotRunning)
+                ::kill(-static_cast<pid_t>(child.processId()), SIGKILL);
+            child.waitForFinished(5000);
+            output += child.readAll();
+            qInfo().noquote() << output;
+            qInfo("signature-boundary outcome observed in %lld ms",
+                  static_cast<long long>(actionMs));
+            QVERIFY2(ready, "signature-boundary subprocess never reached its ready barrier");
+            QVERIFY2(completed, "signature-boundary action did not finish within its bound");
+            QCOMPARE(child.exitStatus(), QProcess::NormalExit);
+            QCOMPARE(child.exitCode(), 0);
+            return;
+        }
+
+        // ---- child ----
+        auto wideInts = [](int n) {
+            QVariantList ints;
+            ints.reserve(n);
+            for (int i = 0; i < n; ++i)
+                ints << i;
+            return QVariant(ints);
+        };
+        auto nestedLists = [](int depth) {
+            QVariant v(42);
+            for (int i = 0; i < depth; ++i)
+                v = QVariant(QVariantList{v});
+            return v;
+        };
+        auto stringArgs = [](int n) {
+            QVariantList args;
+            args.reserve(n);
+            for (int i = 0; i < n; ++i)
+                args << QStringLiteral("x%1").arg(i);
+            return args;
+        };
+
+        if (scenario.startsWith(QLatin1String("peer-")) || scenario == QLatin1String("valid-255") ||
+            scenario == QLatin1String("valid-arrays32") ||
+            scenario == QLatin1String("valid-structs32")) {
+            // A proxy against a peer advertising the scenario's in-arg
+            // signature; the hostile shapes must fail the call locally,
+            // the valid boundaries must round-trip.
+            SignatureProbeObject probe;
+            if (scenario == QLatin1String("peer-len256"))
+                probe.argType =
+                    QStringLiteral("a(") + QString(254, QLatin1Char('i')) + QStringLiteral(")");
+            else if (scenario == QLatin1String("peer-len256-element"))
+                probe.argType =
+                    QStringLiteral("a(") + QString(253, QLatin1Char('i')) + QStringLiteral(")");
+            else if (scenario == QLatin1String("peer-dict-bare"))
+                probe.argType = QStringLiteral("{sv}");
+            else if (scenario == QLatin1String("peer-dict-vkey"))
+                probe.argType = QStringLiteral("a{vs}");
+            else if (scenario == QLatin1String("peer-dict-ckey"))
+                probe.argType = QStringLiteral("a{(is)v}");
+            else if (scenario == QLatin1String("peer-structs33"))
+                probe.argType = QString(33, QLatin1Char('(')) + QStringLiteral("i") +
+                                QString(33, QLatin1Char(')'));
+            else if (scenario == QLatin1String("valid-255"))
+                probe.argType =
+                    QStringLiteral("(") + QString(253, QLatin1Char('i')) + QStringLiteral(")");
+            else if (scenario == QLatin1String("valid-arrays32"))
+                probe.argType = QString(32, QLatin1Char('a')) + QStringLiteral("i");
+            else // valid-structs32
+                probe.argType = QString(32, QLatin1Char('(')) + QStringLiteral("i") +
+                                QString(32, QLatin1Char(')'));
+            const bool hostile = scenario.startsWith(QLatin1String("peer-"));
+
+            auto bus = QDBusConnection::sessionBus();
+            QVERIFY(bus.registerVirtualObject(QStringLiteral("/SigProbe"), &probe));
+            QVERIFY(bus.registerService(QStringLiteral("org.dbusqml.SigProbe")));
+            DBusProxy proxy;
+            proxy.setService(QStringLiteral("org.dbusqml.SigProbe"));
+            proxy.setPath(QStringLiteral("/SigProbe"));
+            proxy.setIface(QStringLiteral("org.dbusqml.SigProbe"));
+            QSignalSpy ready(&proxy, &DBusProxy::introspectionCompleted);
+            QTRY_VERIFY_WITH_TIMEOUT(!ready.isEmpty(), 5000);
+
+            QVariant value;
+            if (scenario == QLatin1String("peer-len256"))
+                value = QVariant(QVariantList{wideInts(254)});
+            else if (scenario == QLatin1String("peer-len256-element"))
+                value = QVariant(QVariantList{wideInts(253)});
+            else if (scenario == QLatin1String("peer-structs33"))
+                value = nestedLists(33);
+            else if (scenario == QLatin1String("peer-dict-bare") ||
+                     scenario == QLatin1String("peer-dict-vkey") ||
+                     scenario == QLatin1String("peer-dict-ckey"))
+                value = QVariantMap{{QStringLiteral("k"), QStringLiteral("v")}};
+            else if (scenario == QLatin1String("valid-255"))
+                value = wideInts(253);
+            else if (scenario == QLatin1String("valid-arrays32"))
+                value = nestedLists(32);
+            else // valid-structs32
+                value = nestedLists(32);
+
+            qInfo("SIGVAL_READY");
+            ConnMessageCapture capture;
+            DBusPendingReply *reply = proxy.call(QStringLiteral("Take"), {value});
+            QVERIFY(reply != nullptr);
+            QTRY_VERIFY_WITH_TIMEOUT(reply->isFinished(), 800);
+            qInfo("SIGVAL_DONE");
+            if (hostile) {
+                QVERIFY(reply->isError());
+                QCOMPARE(reply->error().name(),
+                         QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+                QCOMPARE(probe.calls, 0);
+                QVERIFY(capture.contains(QStringLiteral("is not a valid D-Bus signature")));
+            } else {
+                QVERIFY2(!reply->isError(), qPrintable(reply->error().message()));
+                QCOMPARE(reply->value().toString(), QStringLiteral("taken"));
+                QCOMPARE(probe.calls, 1);
+                QCOMPARE(probe.lastWireSig, probe.argType);
+            }
+        } else if (scenario == QLatin1String("aggregate-256")) {
+            DBusMessage msg;
+            msg.setService(QStringLiteral("org.dbusqml.SigEcho"));
+            msg.setPath(QStringLiteral("/"));
+            msg.setIface(QStringLiteral("org.dbusqml.SigEcho"));
+            msg.setMember(QStringLiteral("echo"));
+            msg.setArguments(stringArgs(256));
+            qInfo("SIGVAL_READY");
+            ConnMessageCapture capture;
+            SessionBusConnection bus;
+            auto *reply = bus.asyncCall(msg);
+            QTRY_VERIFY_WITH_TIMEOUT(reply->isFinished(), 800);
+            qInfo("SIGVAL_DONE");
+            QVERIFY(reply->isError());
+            QCOMPARE(reply->error().name(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+            QVERIFY(reply->error().message().contains(QStringLiteral("255-byte")));
+            QVERIFY(capture.contains(QStringLiteral("255-byte")));
+        } else if (scenario == QLatin1String("aggregate-send-256")) {
+            DBusMessage msg;
+            msg.setService(QStringLiteral("org.dbusqml.SigEcho"));
+            msg.setPath(QStringLiteral("/"));
+            msg.setIface(QStringLiteral("org.dbusqml.SigEcho"));
+            msg.setMember(QStringLiteral("echo"));
+            msg.setArguments(stringArgs(256));
+            qInfo("SIGVAL_READY");
+            ConnMessageCapture capture;
+            SessionBusConnection bus;
+            bus.send(msg);
+            QCoreApplication::processEvents();
+            qInfo("SIGVAL_DONE");
+            QVERIFY(capture.contains(QStringLiteral("255-byte")));
+        } else if (scenario == QLatin1String("proxy-emit-256")) {
+            DBusProxy proxy;
+            proxy.setService(QStringLiteral("org.dbusqml.EmitProbe"));
+            proxy.setPath(QStringLiteral("/EmitProbe"));
+            proxy.setIface(QStringLiteral("org.dbusqml.EmitProbe"));
+            qInfo("SIGVAL_READY");
+            ConnMessageCapture capture;
+            proxy.emitSignal(QStringLiteral("Blob"), stringArgs(256));
+            qInfo("SIGVAL_DONE");
+            QVERIFY(capture.contains(QStringLiteral("255-byte")));
+        } else if (scenario == QLatin1String("adaptor-reply-256")) {
+            SigReplyAdaptor adaptor;
+            SigAdaptorForwarder forwarder;
+            forwarder.target = &adaptor;
+            auto bus = QDBusConnection::sessionBus();
+            QVERIFY(bus.registerVirtualObject(QStringLiteral("/SigAdaptor"), &forwarder));
+            auto call = QDBusMessage::createMethodCall(
+                bus.baseService(), QStringLiteral("/SigAdaptor"),
+                QStringLiteral("org.dbusqml.SigAdaptor"), QStringLiteral("Strings"));
+            qInfo("SIGVAL_READY");
+            ConnMessageCapture capture;
+            const QDBusMessage reply = bus.call(call, QDBus::Block, 2500);
+            qInfo("SIGVAL_DONE");
+            QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+            QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+            QCOMPARE(reply.errorMessage(), QStringLiteral("Reply value is not marshalable"));
+            QVERIFY(capture.contains(QStringLiteral("255-byte")));
+        } else if (scenario.startsWith(QLatin1String("write-"))) {
+            qInfo("SIGVAL_READY");
+            if (scenario == QLatin1String("write-len256")) {
+                const QVariant out = writeBySignature(
+                    QStringLiteral("(") + QString(254, QLatin1Char('i')) + QStringLiteral(")"),
+                    wideInts(254));
+                qInfo("SIGVAL_DONE");
+                QVERIFY2(!out.isValid(), "a 256-byte single complete type must be rejected");
+            } else if (scenario == QLatin1String("write-dict-vkey")) {
+                const QVariant out = writeBySignature(
+                    QStringLiteral("a{vs}"),
+                    QVariant(QVariantMap{{QStringLiteral("k"), QStringLiteral("v")}}));
+                qInfo("SIGVAL_DONE");
+                QVERIFY2(!out.isValid(), "a variant dict key must be rejected");
+            } else { // write-dict-bare
+                const QVariant out = writeBySignature(
+                    QStringLiteral("{sv}"),
+                    QVariant(QVariantMap{{QStringLiteral("k"), QStringLiteral("v")}}));
+                qInfo("SIGVAL_DONE");
+                QVERIFY2(!out.isValid(), "a dict entry outside an array must be rejected");
+            }
+        } else if (scenario.startsWith(QLatin1String("sigarg-"))) {
+            // A QDBusSignature argument's content is a message signature —
+            // validated before the value can reach libdbus's 255-byte cap.
+            QString content;
+            if (scenario == QLatin1String("sigarg-len256"))
+                content =
+                    QStringLiteral("(") + QString(254, QLatin1Char('i')) + QStringLiteral(")");
+            else if (scenario == QLatin1String("sigarg-dict-bare"))
+                content = QStringLiteral("{sv}");
+            else // sigarg-valid-255
+                content =
+                    QStringLiteral("(") + QString(253, QLatin1Char('i')) + QStringLiteral(")");
+            DBusMessage msg;
+            msg.setService(QStringLiteral("org.dbusqml.SigEcho"));
+            msg.setPath(QStringLiteral("/"));
+            msg.setIface(QStringLiteral("org.dbusqml.SigEcho"));
+            msg.setMember(QStringLiteral("echo"));
+            msg.setArguments({QVariant::fromValue(QDBusSignature(content))});
+            qInfo("SIGVAL_READY");
+            SessionBusConnection bus;
+            auto *reply = bus.asyncCall(msg);
+            QSignalSpy spy(reply, &DBusPendingReply::finished);
+            QTRY_VERIFY_WITH_TIMEOUT(reply->isFinished(), 3000);
+            qInfo("SIGVAL_DONE");
+            if (scenario == QLatin1String("sigarg-valid-255")) {
+                QVERIFY2(!reply->isError(), qPrintable(reply->error().message()));
+                QCOMPARE(reply->value().toString(), QStringLiteral("g"));
+            } else {
+                QVERIFY(reply->isError());
+                QCOMPARE(reply->error().name(),
+                         QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+                QVERIFY(reply->error().message().contains(QStringLiteral("not marshalable")));
+            }
+        } else { // valid-aggregate-255
+            DBusMessage msg;
+            msg.setService(QStringLiteral("org.dbusqml.SigEcho"));
+            msg.setPath(QStringLiteral("/"));
+            msg.setIface(QStringLiteral("org.dbusqml.SigEcho"));
+            msg.setMember(QStringLiteral("echo"));
+            msg.setArguments(stringArgs(255));
+            qInfo("SIGVAL_READY");
+            SessionBusConnection bus;
+            auto *reply = bus.asyncCall(msg);
+            QSignalSpy spy(reply, &DBusPendingReply::finished);
+            QVERIFY(spy.wait(3000));
+            qInfo("SIGVAL_DONE");
+            QVERIFY2(!reply->isError(), qPrintable(reply->error().message()));
+            QCOMPARE(reply->value().toString(), QString(255, QLatin1Char('s')));
+        }
+    }
+
+    // >>> RED-BASELINE-STRIP-BEGIN: new-API unit tests.
+    // Direct unit matrix over the validator and the send boundary. These
+    // exercise the API this item ADDS, so they cannot compile against the
+    // pre-fix tree — the RED scratch copy deletes from this marker to
+    // RED-BASELINE-STRIP-END. Every rule they pin is also covered
+    // behaviourally by the testSignatureBoundary rows, except the per-kind
+    // depth separation, which the writers' pre-existing total-32 cap makes
+    // unobservable through the marshal path.
+    void testValidateSignature_data() {
+        QTest::addColumn<QString>("sig");
+        QTest::addColumn<bool>("single");
+        QTest::addColumn<bool>("message");
+        auto row = [](const char *sig, bool s, bool m) {
+            QTest::newRow(sig) << QString::fromLatin1(sig) << s << m;
+        };
+        row("i", true, true);
+        row("", false, true);   // a message signature may be empty
+        row("ii", false, true); // two complete types
+        row("a", false, false); // array without an element type
+        row("(ii", false, false);
+        row("ii)", false, false);
+        row("()", false, false); // an empty struct is not a type
+        row("(i)", true, true);
+        row("{sv}", false, false); // dict entry only as an array element
+        row("a{sv}", true, true);
+        row("a{vs}", false, false);    // dict key must be basic — no variant
+        row("a{(is)v}", false, false); // dict key must be basic — no container
+        row("a{svv}", false, false);   // exactly two members
+        row("a{s}", false, false);
+        row("aa{sv}", true, true);
+        row("a{sa{sv}}", true, true);
+        row("r", false, false); // the STRUCT code never appears in signatures
+        row("e", false, false); // nor DICT_ENTRY
+        row("m", false, false); // reserved codes
+        row("*", false, false);
+        row("v", true, true); // variant is valid in a general position
+        row("g", true, true);
+        // Encoded-length boundary: 255 bytes pass, 256 fail.
+        QTest::newRow("len255") << (QStringLiteral("(") + QString(253, QLatin1Char('i')) +
+                                    QStringLiteral(")"))
+                                << true << true;
+        QTest::newRow("len256") << (QStringLiteral("(") + QString(254, QLatin1Char('i')) +
+                                    QStringLiteral(")"))
+                                << false << false;
+        // Message-kind aggregate boundary.
+        QTest::newRow("agg255") << QString(255, QLatin1Char('s')) << false << true;
+        QTest::newRow("agg256") << QString(256, QLatin1Char('s')) << false << false;
+        // Per-kind depth: array and struct nesting are capped separately.
+        QTest::newRow("arrays32") << (QString(32, QLatin1Char('a')) + QStringLiteral("i")) << true
+                                  << true;
+        QTest::newRow("arrays33") << (QString(33, QLatin1Char('a')) + QStringLiteral("i")) << false
+                                  << false;
+        QTest::newRow("structs32")
+            << (QString(32, QLatin1Char('(')) + QStringLiteral("i") + QString(32, QLatin1Char(')')))
+            << true << true;
+        QTest::newRow("structs33")
+            << (QString(33, QLatin1Char('(')) + QStringLiteral("i") + QString(33, QLatin1Char(')')))
+            << false << false;
+        // 32 arrays + 32 structs = depth 64 — the spec's maximum.
+        QTest::newRow("mixed64") << (QString(32, QLatin1Char('a')) + QString(32, QLatin1Char('(')) +
+                                     QStringLiteral("i") + QString(32, QLatin1Char(')')))
+                                 << true << true;
+        QTest::newRow("mixed65") << (QString(32, QLatin1Char('a')) + QString(33, QLatin1Char('(')) +
+                                     QStringLiteral("i") + QString(33, QLatin1Char(')')))
+                                 << false << false;
+        // Dict entries nest like structs (the decode side counts the same).
+        QString dicts32 = QStringLiteral("i");
+        for (int i = 0; i < 32; ++i)
+            dicts32 = QStringLiteral("a{s") + dicts32 + QStringLiteral("}");
+        QTest::newRow("dictnest32") << dicts32 << true << true;
+        const QString dicts33 = QStringLiteral("a{s") + dicts32 + QStringLiteral("}");
+        QTest::newRow("dictnest33") << dicts33 << false << false;
+    }
+
+    void testValidateSignature() {
+        QFETCH(QString, sig);
+        QFETCH(bool, single);
+        QFETCH(bool, message);
+        QCOMPARE(validateSignature(sig, SignatureKind::Single), single);
+        QCOMPARE(validateSignature(sig, SignatureKind::Message), message);
+    }
+
+    void testCheckSendable() {
+        QString err;
+        QVERIFY(checkSendable({}, &err));
+        QVERIFY(checkSendable({QStringLiteral("x"), 42, true}, &err));
+        // A poison argument fails with the canonical local-error reason.
+        QObject poison;
+        QVERIFY(!checkSendable({QVariant::fromValue(&poison)}, &err));
+        QCOMPARE(err, QStringLiteral("argument 0 is not marshalable"));
+        QVERIFY(!checkSendable({QStringLiteral("ok"), QVariant::fromValue(&poison)}, &err));
+        QCOMPARE(err, QStringLiteral("argument 1 is not marshalable"));
+        // Aggregate boundary: 255 bytes pass, 256 fail.
+        QVariantList a255;
+        for (int i = 0; i < 255; ++i)
+            a255 << QStringLiteral("x");
+        const QVariantList a256 = QVariantList(a255) << QStringLiteral("x");
+        QVERIFY(checkSendable(a255, &err));
+        QVERIFY(!checkSendable(a256, &err));
+        QVERIFY(err.contains(QStringLiteral("255")));
+        // A QDBusArgument contributes its full contained signature: the
+        // 255-byte single type passes alone, one more aggregate byte fails.
+        QVariantList ints;
+        for (int i = 0; i < 253; ++i)
+            ints << i;
+        const QVariant wide = writeBySignature(
+            QStringLiteral("(") + QString(253, QLatin1Char('i')) + QStringLiteral(")"),
+            QVariant(ints));
+        QVERIFY(wide.isValid());
+        QVERIFY(checkSendable({wide}, &err));
+        QVERIFY(!checkSendable({wide, QStringLiteral("x")}, &err));
+        QVERIFY(!checkSendable({QStringLiteral("x"), wide}, &err));
+    }
+    // >>> RED-BASELINE-STRIP-END
 
     // ==================== P8→R3: failed-Set re-fetch ====================
     //

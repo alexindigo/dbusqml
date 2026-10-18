@@ -69,17 +69,14 @@ bool wireMarshalable(const QVariant &v) {
         return true;
     }
     if (t == qMetaTypeId<QDBusSignature>()) {
-        // A valid signature is one or more COMPLETE types — "s" and "i" are
-        // valid (the dot heuristic rejected them and broke typed calls).
+        // A 'g' value is a message signature — validated with the full
+        // spec rules (the 255-byte cap in particular: an over-long g value
+        // reaches the same libdbus assert as an over-long message
+        // signature). Empty stays rejected (the existing contract).
         const QString g = v.value<QDBusSignature>().signature();
         if (g.isEmpty())
             return false;
-        int pos = 0;
-        while (pos < g.size()) {
-            if (firstCompleteType(g, pos).isEmpty())
-                return false;
-        }
-        return true;
+        return validateSignature(g, SignatureKind::Message);
     }
     // Unix fds (plain ints after the walker round-trip) are marshalable —
     // but an INVALID fd is not: it would fail at marshal time with the
@@ -93,6 +90,42 @@ bool wireMarshalable(const QVariant &v) {
     // QStringList, QDBusObjectPath, QDBusSignature, registered types). QJSValue,
     // QObject*, and unregistered gadgets return null → false.
     return QDBusMetaType::typeToSignature(QMetaType(t)) != nullptr;
+}
+
+namespace {
+// The argument's contribution to the outgoing message signature, in encoded
+// bytes. A QDBusArgument carries its own signature (built by
+// writeBySignature, already validator-gated); a variant contributes "v";
+// everything else resolves through QtDBus's type table.
+int wireSignatureLength(const QVariant &v) {
+    if (v.userType() == qMetaTypeId<QDBusArgument>())
+        return v.value<QDBusArgument>().currentSignature().toUtf8().size();
+    if (v.userType() == qMetaTypeId<QDBusVariant>())
+        return 1;
+    const char *sig = QDBusMetaType::typeToSignature(QMetaType(v.userType()));
+    return sig ? static_cast<int>(qstrlen(sig)) : 0;
+}
+} // namespace
+
+bool checkSendable(const QVariantList &args, QString *err) {
+    int aggregate = 0;
+    for (int i = 0; i < args.size(); ++i) {
+        const QVariant &a = args.at(i);
+        if (!wireMarshalable(a)) {
+            if (err)
+                *err = QStringLiteral("argument %1 is not marshalable").arg(i);
+            return false;
+        }
+        aggregate += wireSignatureLength(a);
+        if (aggregate > 255) { // DBUS_MAXIMUM_SIGNATURE_LENGTH
+            if (err)
+                *err = QStringLiteral("message signature exceeds the 255-byte D-Bus limit "
+                                      "(argument %1)")
+                           .arg(i);
+            return false;
+        }
+    }
+    return true;
 }
 
 // Convert a QVariant into a native JS value, recursively unwrapping lists
@@ -278,8 +311,8 @@ QVariant toDbusVariantNested(const QVariant &v) {
 // uncapped — peer introspection XML flows verbatim into this walker,
 // so a 200k-deep "a…a" crashed the process (SIGSEGV, fork-VM-proven).
 // Depth-capped at 32 like every other walker (loud-fail, same message
-// shape); isStrictSignature (cap 64→32 per CF-18) is the second gate
-// at slot-mint time, and writeBySignature re-checks strictness per
+// shape); validateSignature (the full spec validator) is the second gate
+// at slot-mint time, and writeBySignature re-checks validity per
 // the PARITY §2 plan note.
 QString firstCompleteType(const QString &sig, int &pos, int depth) {
     if (pos >= sig.size())
@@ -366,28 +399,47 @@ const std::array<QMetaType, SignatureSlotPoolSize + 1> &signatureSlotTypes() {
 }
 } // namespace
 
-// Strict single-type validation: recursive descent over every char (basic
-// type codes only, containers balanced and non-empty). Depth-capped at 32
-// (CF-18: was 64 while the walkers cap at 32 — shapes at depth 33..64
-// passed validation but could never marshal, burning process-global
-// signature slots; CF-3: this is the second gate on the walker path).
-// Signatures can arrive from peer introspection XML. Exported via
-// dbusconnection.h for the fuzzer (CF-24).
-bool isStrictSignature(const QString &sig, int &pos, int depth) {
-    if (depth > 32 || pos >= sig.size())
+// D-Bus signature validation (spec, "Valid Signatures"; libdbus
+// _dbus_validate_signature_with_reason). Recursive descent over one
+// complete type with PER-KIND nesting heights — array and struct nesting
+// are capped separately at DBUS_MAXIMUM_TYPE_RECURSION_DEPTH (32), like
+// the decode side's DecodeDepth (dbusutils.cpp): a dict entry nests like
+// a struct, so '{' counts as struct height. Replaces isStrictSignature,
+// which missed the 255-byte length cap, the dict-entry placement and
+// key-basicness rules, and the per-kind depth split (findings #1/#4).
+namespace {
+constexpr int kMaxSignatureLength = 255; // DBUS_MAXIMUM_SIGNATURE_LENGTH
+constexpr int kMaxSignatureDepth = 32;   // DBUS_MAXIMUM_TYPE_RECURSION_DEPTH
+
+bool validateTypeAt(const QString &sig, int &pos, int arrays, int structs) {
+    if (pos >= sig.size() || arrays > kMaxSignatureDepth || structs > kMaxSignatureDepth)
         return false;
     const QChar c = sig.at(pos++);
     if (QStringLiteral("ybnqiuxtdhsogv").contains(c))
         return true;
-    if (c == QLatin1Char('a'))
-        return isStrictSignature(sig, pos, depth + 1);
+    if (c == QLatin1Char('a')) {
+        if (pos < sig.size() && sig.at(pos) == QLatin1Char('{')) {
+            // Dict entry: valid only as an array's element type, with
+            // exactly two members, the key a BASIC type (a variant is a
+            // container, not a basic type).
+            ++pos;
+            if (pos >= sig.size() || !QStringLiteral("ybnqiuxtdhsog").contains(sig.at(pos)))
+                return false;
+            ++pos;
+            if (!validateTypeAt(sig, pos, arrays + 1, structs + 1))
+                return false;
+            if (pos >= sig.size() || sig.at(pos) != QLatin1Char('}'))
+                return false;
+            ++pos;
+            return true;
+        }
+        return validateTypeAt(sig, pos, arrays + 1, structs);
+    }
     if (c == QLatin1Char('(')) {
         // "()" is not a valid D-Bus type — libdbus aborts on it.
-        if (pos < sig.size() && sig.at(pos) == QLatin1Char(')'))
-            return false;
         bool any = false;
         while (pos < sig.size() && sig.at(pos) != QLatin1Char(')')) {
-            if (!isStrictSignature(sig, pos, depth + 1))
+            if (!validateTypeAt(sig, pos, arrays, structs + 1))
                 return false;
             any = true;
         }
@@ -396,30 +448,34 @@ bool isStrictSignature(const QString &sig, int &pos, int depth) {
         ++pos; // ')'
         return true;
     }
-    if (c == QLatin1Char('{')) {
-        // Dict entry: exactly two complete member types. (Key-basicness is
-        // enforced loudly by beginMap itself.)
-        if (!isStrictSignature(sig, pos, depth + 1))
-            return false;
-        if (!isStrictSignature(sig, pos, depth + 1))
-            return false;
-        if (pos >= sig.size() || sig.at(pos) != QLatin1Char('}'))
-            return false;
-        ++pos;
-        return true;
-    }
     return false;
+}
+} // namespace
+
+bool validateSignature(const QString &sig, SignatureKind kind) {
+    // The wire cap applies to the whole signature string (message
+    // signature or standalone single type alike) — libdbus rejects longer
+    // ones, and its container-open check aborts the process.
+    if (sig.toUtf8().size() > kMaxSignatureLength)
+        return false;
+    int pos = 0;
+    if (kind == SignatureKind::Single)
+        return validateTypeAt(sig, pos, 0, 0) && pos == sig.size();
+    while (pos < sig.size()) {
+        if (!validateTypeAt(sig, pos, 0, 0))
+            return false;
+    }
+    return true;
 }
 
 QMetaType signatureSlotForSignature(const QString &sig) {
-    // Strict validation BEFORE touching Qt's registry: firstCompleteType is
-    // structural (it depth-counts (...) contents), but a bad header aborts
-    // inside libdbus — and element signatures can arrive from a peer's live
-    // introspection XML, so garbage here is remotely triggerable. Every char
-    // must be a valid type code, every container balanced and non-empty.
-    // Loud-fail (invalid metatype) on anything else.
-    int pos = 0;
-    if (!isStrictSignature(sig, pos) || pos != sig.size())
+    // Full spec validation BEFORE touching Qt's registry: a bad header
+    // aborts inside libdbus — and element signatures can arrive from a
+    // peer's live introspection XML, so garbage here is remotely
+    // triggerable (finding #1: a 256-byte element signature registered
+    // here and aborted the process at beginArray). Loud-fail (invalid
+    // metatype) on anything the validator rejects.
+    if (!validateSignature(sig, SignatureKind::Single))
         return QMetaType();
     static QMutex mutex;
     static QHash<QString, int> assigned;
@@ -1096,21 +1152,16 @@ static QVariant marshalContainerBySignature(const QString &sig, const QVariant &
 }
 
 QVariant writeBySignature(const QString &sig, const QVariant &value) {
-    // Reject malformed signatures BEFORE building anything: an unbalanced or
-    // empty container signature produces a QDBusArgument whose contained
-    // signature libdbus rejects with an assertion abort (remotely triggerable
-    // via variant(x, sig) — the 0.5.2-era crash class on the reply path).
-    // Loud-fail to the caller instead, which falls back to inference.
-    // CF-3/CF-18: strictness is the depth gate — isStrictSignature caps
-    // nesting at 32 (walkers can never marshal deeper), so unmarshalable
-    // shapes die here before reaching the slot pool or the walker.
+    // Reject invalid signatures BEFORE building anything: an unbalanced,
+    // over-long, or over-deep signature produces a QDBusArgument whose
+    // contained signature libdbus rejects with an assertion abort
+    // (remotely triggerable via variant(x, sig) or a peer's introspected
+    // in-arg types — the 0.5.2-era crash class on the reply path, and
+    // finding #1's peer-XML shape). Loud-fail to the caller instead.
+    // The writer's own depth-32 walker cap still applies after this gate.
     if (sig.isEmpty())
         return QVariant();
-    int spos = 0;
-    if (!isStrictSignature(sig, spos) || spos != sig.size())
-        return QVariant();
-    int pos = 0;
-    if (firstCompleteType(sig, pos) != sig || pos != sig.size())
+    if (!validateSignature(sig, SignatureKind::Single))
         return QVariant();
     QDBusArgument arg;
     if (!writeValueBySignature(arg, sig, value))
@@ -1237,22 +1288,20 @@ DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message) {
 
 DBusPendingReply *DBusConnection::startCall(const DBusMessage &message, bool gcHandoff) {
     auto qmsg = toQDBusMessage(message);
-    // Client-exit guard: an argument with no wire representation would abort
-    // inside QtDBus marshaling — the caller-side analogue of the 0.5.2
-    // property crash. Fail the call LOCALLY instead; never send garbage.
-    for (int i = 0; i < qmsg.arguments().size(); ++i) {
-        if (!wireMarshalable(qmsg.arguments().at(i))) {
-            qWarning("dbusqml: argument %d of %s is not marshalable (type %s) — failing call "
-                     "locally",
-                     i, qPrintable(message.member()),
-                     QMetaType(qmsg.arguments().at(i).userType()).name());
-            auto *fail = new DBusPendingReply(this);
-            fail->setEngine(qmlEngine(this));
-            fail->setGcHandoffEnabled(gcHandoff);
-            fail->completeLocalError(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
-                                     QStringLiteral("argument %1 is not marshalable").arg(i));
-            return fail;
-        }
+    // Client-exit guard: an argument with no wire representation — or an
+    // aggregate message signature over the 255-byte cap — would abort
+    // inside QtDBus/libdbus marshaling — the caller-side analogue of the
+    // 0.5.2 property crash. Fail the call LOCALLY instead; never send
+    // garbage.
+    QString sendErr;
+    if (!checkSendable(qmsg.arguments(), &sendErr)) {
+        qWarning("dbusqml: %s in call to %s — failing call locally", qPrintable(sendErr),
+                 qPrintable(message.member()));
+        auto *fail = new DBusPendingReply(this);
+        fail->setEngine(qmlEngine(this));
+        fail->setGcHandoffEnabled(gcHandoff);
+        fail->completeLocalError(QStringLiteral("org.freedesktop.DBus.Error.Failed"), sendErr);
+        return fail;
     }
     // Per-call timeout: the gadget's timeout (ms) drives QtDBus's asyncCall
     // timeout (−1 = Qt default, 25 s).
@@ -1268,16 +1317,14 @@ DBusPendingReply *DBusConnection::startCall(const DBusMessage &message, bool gcH
 void DBusConnection::send(const DBusMessage &message) {
     auto qmsg = toQDBusMessage(message);
     // Fire-and-forget: NO_REPLY_EXPECTED is implied by send(); the message
-    // goes out and nothing comes back. The client-exit marshalability guard
-    // still applies — a bad argument warns and drops (there is no reply
-    // channel to fail locally into).
-    for (int i = 0; i < qmsg.arguments().size(); ++i) {
-        if (!wireMarshalable(qmsg.arguments().at(i))) {
-            qWarning("dbusqml: argument %d of %s is not marshalable (type %s) — dropping send", i,
-                     qPrintable(message.member()),
-                     QMetaType(qmsg.arguments().at(i).userType()).name());
-            return;
-        }
+    // goes out and nothing comes back. The client-exit send boundary still
+    // applies — a bad argument or an over-long aggregate signature warns
+    // and drops (there is no reply channel to fail locally into).
+    QString sendErr;
+    if (!checkSendable(qmsg.arguments(), &sendErr)) {
+        qWarning("dbusqml: %s in call to %s — dropping send", qPrintable(sendErr),
+                 qPrintable(message.member()));
+        return;
     }
     m_connection.send(qmsg);
 }

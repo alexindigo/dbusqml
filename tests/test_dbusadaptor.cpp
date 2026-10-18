@@ -7426,8 +7426,8 @@ void TestDBusAdaptor::testWalkerDepthCap() {
     for (int i = 0; i < over; ++i)
         overSig += QStringLiteral(")");
 
-    // The 40-deep shape dies in the SILENT strict gate (isStrictSignature
-    // cap 32 — CF-18, no warning by design: unmarshalable shapes never reach
+    // The 40-deep shape dies in the SILENT validation gate (validateSignature
+    // struct cap 32 — no warning by design: unmarshalable shapes never reach
     // the walkers). The walker depth warnings below are the loud path.
     QVariant overPayload = writeBySignature(overSig, QVariant(5));
     QVERIFY2(!overPayload.isValid(), qPrintable(overSig));
