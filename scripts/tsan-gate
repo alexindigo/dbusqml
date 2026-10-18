@@ -52,7 +52,7 @@ python3 "$REPO/tests/tsan-classify-selftest.py" || {
 
 # ---------- step 3: live canary battery ----------
 step "live canary battery"
-WORK="$(mktemp -d /tmp/tsan-gate.XXXXXX)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/tsan-gate.XXXXXX")"
 # Evidence hygiene: the workdir (per-test logs, verdicts, foreign-block
 # dump) survives on FAILURE for triage; cleaned on green.
 gate_fail() {
@@ -141,7 +141,7 @@ for n in $(seq 1 "$RUNS"); do
         # shellcheck disable=SC2086
         set -- $spec
         log="$WORK/run$n-$1-$2.log"
-        dbus-run-session -- "$BUILD/$1" "$2" >"$log" 2>&1
+        dbus-run-session --dbus-daemon="$REPO/tests/dbus-daemon-with-tmpdir.py" -- "$BUILD/$1" "$2" >"$log" 2>&1
         echo "$?" >"$log.rc"
     done
 done

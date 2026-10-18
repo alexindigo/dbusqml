@@ -11,6 +11,12 @@ infrastructure that materially affects consumer trust).
 
 ## [Unreleased]
 
+### Quality
+
+- Tests and the TSan gate honor `TMPDIR` for fd fixtures, monitor logs,
+  scratch directories and every private D-Bus socket, including CTest/CI
+  session wrappers and the Quickshell comparison runtime.
+
 ## [1.0.0] - 2026-09-27
 
 ### Added

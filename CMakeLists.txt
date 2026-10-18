@@ -252,10 +252,11 @@ if(BUILD_TEST_MODE)
         endif()
     endif()
 
-    add_test(NAME test_types COMMAND dbus-run-session -- $<TARGET_FILE:test_types>)
+    set(DBUSQML_TEST_DAEMON "${CMAKE_CURRENT_SOURCE_DIR}/tests/dbus-daemon-with-tmpdir.py")
+    add_test(NAME test_types COMMAND dbus-run-session --dbus-daemon=${DBUSQML_TEST_DAEMON} -- $<TARGET_FILE:test_types>)
     add_test(NAME test_introspect COMMAND test_introspect)
-    add_test(NAME test_adaptor COMMAND dbus-run-session -- $<TARGET_FILE:test_adaptor>)
-    add_test(NAME test_dbus COMMAND dbus-run-session -- $<TARGET_FILE:test_dbus>)
+    add_test(NAME test_adaptor COMMAND dbus-run-session --dbus-daemon=${DBUSQML_TEST_DAEMON} -- $<TARGET_FILE:test_adaptor>)
+    add_test(NAME test_dbus COMMAND dbus-run-session --dbus-daemon=${DBUSQML_TEST_DAEMON} -- $<TARGET_FILE:test_dbus>)
     set_tests_properties(test_dbus PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
@@ -280,5 +281,4 @@ if(ENABLE_COVERAGE)
         target_link_libraries(test_dbus PRIVATE dbusqml)
     endif()
 endif()
-
 

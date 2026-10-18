@@ -28,7 +28,7 @@
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     QProcess daemon;
-    daemon.start(QStringLiteral("dbus-daemon"),
+    daemon.start(QFINDTESTDATA("dbus-daemon-with-tmpdir.py"),
                  {QStringLiteral("--session"), QStringLiteral("--print-address"),
                   QStringLiteral("--nofork")});
     if (!daemon.waitForStarted(3000) || !daemon.waitForReadyRead(3000)) {

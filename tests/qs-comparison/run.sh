@@ -28,16 +28,20 @@ docker run --rm \
   | grep -E 'WirelessEnabled|<node ' | head -5 >&2
 
 echo "=== Running spike (4s timeout) ===" >&2
+SPIKE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/dbusqml-qs.XXXXXX")"
+trap 'rm -rf "$SPIKE_TMP"' EXIT
 docker run --rm \
   --network=host \
   -v /run/dbus:/run/dbus \
   -v "$REPO_ROOT:/workspaces/dbusqml" \
+  -v "$SPIKE_TMP:$SPIKE_TMP" \
   -w /workspaces/dbusqml \
   -e DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
   -e QT_FORCE_STDERR_LOGGING=1 \
-  -e XDG_RUNTIME_DIR=/tmp/qs-runtime \
+  -e TMPDIR="$SPIKE_TMP" \
+  -e XDG_RUNTIME_DIR="$SPIKE_TMP/qs-runtime" \
   -e QT_QPA_PLATFORM=offscreen \
   "$IMAGE" \
-  bash -c 'mkdir -p /tmp/qs-runtime && chmod 700 /tmp/qs-runtime && timeout 4 quickshell -p tests/qs-comparison/shell.qml 2>&1 || true'
+  bash -c 'mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR" && timeout 4 quickshell -p tests/qs-comparison/shell.qml 2>&1 || true'
 
 echo "=== Done ===" >&2

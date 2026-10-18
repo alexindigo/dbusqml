@@ -59,7 +59,7 @@ jobs:
           # root; qmltestrunner lives under $QT_ROOT_DIR/bin.
           QMLTESTRUNNER=$(find "$QT_ROOT_DIR" -name qmltestrunner -type f | head -n1)
           test -n "$QMLTESTRUNNER" || { echo "qmltestrunner not found under $QT_ROOT_DIR"; exit 1; }
-          dbus-run-session -- "$QMLTESTRUNNER" -input tests/test_api.qml
+          dbus-run-session --dbus-daemon="$PWD/tests/dbus-daemon-with-tmpdir.py" -- "$QMLTESTRUNNER" -input tests/test_api.qml
 
       - name: qmllint (examples + tests)
         run: |

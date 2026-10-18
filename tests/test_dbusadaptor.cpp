@@ -255,7 +255,8 @@ static QString s_originalAddress;
 static bool startPrivateBus() {
     s_daemon = new QProcess();
     s_daemon->setProcessChannelMode(QProcess::ForwardedErrorChannel);
-    s_daemon->start("dbus-daemon", {"--session", "--print-address", "--nofork"});
+    s_daemon->start(QFINDTESTDATA("dbus-daemon-with-tmpdir.py"),
+                    {"--session", "--print-address", "--nofork"});
     if (!s_daemon->waitForStarted(3000))
         return false;
     if (!s_daemon->waitForReadyRead(3000))
@@ -5545,7 +5546,8 @@ void TestDBusAdaptor::testOwnerChangeDestroyDuringNotification() {
     // record.
     QProcess mon;
     const QString monLog =
-        QStringLiteral("/tmp/g1-monitor-%1.log").arg(QCoreApplication::applicationPid());
+        QDir(QDir::tempPath())
+            .filePath(QStringLiteral("g1-monitor-%1.log").arg(QCoreApplication::applicationPid()));
     mon.setProgram(QStringLiteral("dbus-monitor"));
     mon.setArguments({QStringLiteral("--address"),
                       QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS")),
@@ -5676,7 +5678,8 @@ void TestDBusAdaptor::testOwnerChangeWireOrdering() {
     // Tap the whole storm (the G1 diagnostics shape).
     QProcess mon;
     const QString monLog =
-        QStringLiteral("/tmp/g1-p8-%1.log").arg(QCoreApplication::applicationPid());
+        QDir(QDir::tempPath())
+            .filePath(QStringLiteral("g1-p8-%1.log").arg(QCoreApplication::applicationPid()));
     mon.setProgram(QStringLiteral("dbus-monitor"));
     mon.setArguments({QStringLiteral("--address"),
                       QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS")),

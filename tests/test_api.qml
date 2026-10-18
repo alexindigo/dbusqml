@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import QtCore
 import DBus 1.0
 import DBus 1.0 as DBusQML
 
@@ -7,6 +8,9 @@ TestCase {
     name: "DBusQmlApiTest"
 
     property DBusQML.DBusPendingReply pendingReply
+
+    // StandardPaths returns a file URL; fd helpers take a filesystem path.
+    readonly property string tempPath: decodeURIComponent(StandardPaths.writableLocation(StandardPaths.TempLocation).toString().replace(/^file:\/\//, ""))
 
     // Shared proxies declared inline (declarative form). Two paths cover
     // both shapes of test in this file. Declarative destruction (managed
@@ -349,7 +353,7 @@ TestCase {
     // fd quartet + fdUrl (0.9.0 blocker resolution): QML-side fd I/O —
     // open/write/read/close plus the file:///proc/self/fd/N URL form.
     function test_fd_quartet_roundtrip() {
-        var path = "/tmp/dbusqml-fd-quartet.txt"
+        var path = tempPath + "/dbusqml-fd-quartet.txt"
         var fd = DBusQML.DBusUtils.openFd(path, "w")
         verify(fd >= 0, "openFd w failed: " + fd)
         compare(DBusQML.DBusUtils.writeFd(fd, "fd-quartet-ok\n"), 14, "writeFd byte count")
@@ -363,7 +367,7 @@ TestCase {
         DBusQML.DBusUtils.closeFd(fd2)
     }
     function test_fd_url() {
-        var path = "/tmp/dbusqml-fdurl.txt"
+        var path = tempPath + "/dbusqml-fdurl.txt"
         var fd = DBusQML.DBusUtils.openFd(path, "rw")
         verify(fd >= 0, "openFd rw failed: " + fd)
         var url = DBusQML.DBusUtils.fdUrl(fd)

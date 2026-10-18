@@ -447,7 +447,8 @@ static QString s_privateBusAddress;
 static bool startPrivateBus() {
     s_daemon = new QProcess();
     s_daemon->setProcessChannelMode(QProcess::ForwardedErrorChannel);
-    s_daemon->start("dbus-daemon", {"--session", "--print-address", "--nofork"});
+    s_daemon->start(QFINDTESTDATA("dbus-daemon-with-tmpdir.py"),
+                    {"--session", "--print-address", "--nofork"});
     if (!s_daemon->waitForStarted(3000))
         return false;
 
@@ -915,7 +916,8 @@ private slots:
         // new bus and re-run the initial check.
         QProcess second;
         second.setProcessChannelMode(QProcess::ForwardedErrorChannel);
-        second.start("dbus-daemon", {"--session", "--print-address", "--nofork"});
+        second.start(QFINDTESTDATA("dbus-daemon-with-tmpdir.py"),
+                     {"--session", "--print-address", "--nofork"});
         QVERIFY2(second.waitForStarted(3000), "second dbus-daemon failed to start");
         QVERIFY2(second.waitForReadyRead(3000), "no address from second dbus-daemon");
         const QString addr2 = QString::fromLocal8Bit(second.readLine().trimmed());
@@ -3452,7 +3454,8 @@ private slots:
         // Spawn a SECOND private bus (the suite's own bus stays alive).
         QProcess *victimDaemon = new QProcess(this);
         victimDaemon->setProcessChannelMode(QProcess::ForwardedErrorChannel);
-        victimDaemon->start("dbus-daemon", {"--session", "--print-address", "--nofork"});
+        victimDaemon->start(QFINDTESTDATA("dbus-daemon-with-tmpdir.py"),
+                            {"--session", "--print-address", "--nofork"});
         QVERIFY(victimDaemon->waitForStarted(3000));
         QVERIFY(victimDaemon->waitForReadyRead(3000));
         const QByteArray victimAddr = victimDaemon->readLine().trimmed();

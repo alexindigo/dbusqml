@@ -38,7 +38,7 @@ echo "=== Running QML tests ==="
 # (E0: run-tests previously aborted here with SIGABRT outside a session).
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     QML_IMPORT_PATH="${BUILD_ABS}" QT_QPA_PLATFORM=offscreen \
-        dbus-run-session -- "${QMLTESTRUNNER}" -v2 -input "${PROJECT_DIR}/tests/test_api.qml"
+        dbus-run-session --dbus-daemon="${PROJECT_DIR}/tests/dbus-daemon-with-tmpdir.py" -- "${QMLTESTRUNNER}" -v2 -input "${PROJECT_DIR}/tests/test_api.qml"
 else
     QML_IMPORT_PATH="${BUILD_ABS}" "${QMLTESTRUNNER}" -v2 -input "${PROJECT_DIR}/tests/test_api.qml"
 fi
