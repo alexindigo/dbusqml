@@ -49,6 +49,13 @@ verbatim. Example (`~/.config/dbusqml/types/com.example.MyService.xml`):
 A file may contain multiple `<interface>` blocks. Interface names are matched
 independently of the filename.
 
+The parser is hardened the same way as the peer-introspection parser: a file
+larger than 4 MiB is refused before parsing, and a file whose DTD declares
+any entity (`<!ENTITY …>`) is refused at the DTD token — no entity expansion
+ever runs. The DOCTYPE shown above (no entity declarations) is fine. A
+refused file is discarded whole with one warning; a malformed file is
+likewise discarded whole.
+
 ## Bundled catalog
 
 dbusqml ships descriptors for these interfaces:

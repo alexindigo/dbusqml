@@ -296,6 +296,18 @@ signature fails the value and the boundary fails the send locally; each
 path keeps its own failure style (local error reply, warn+skip, error
 reply).
 
+### XML boundary
+
+Both XML parsers — the peer-introspection parser
+(`parseDBusIntrospection`) and the local catalog loader — go through one
+hardened reader (`DBusHardenedXmlReader`). Inputs larger than 4 MiB are
+refused before parsing; a DTD is allowed (real libdbus `Introspect()`
+replies carry one) but any entity declaration refuses the document at
+the DTD token — before any content is scanned, so no entity expansion
+can run. A refused document yields no data: the introspection parser
+returns empty (the catalog/inference tiers take over), the catalog
+loader discards the file whole; each path warns once.
+
 ## Dependencies (`DBus` proxy + `DBusAdaptor`)
 
 | Dependency | Why |

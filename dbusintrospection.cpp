@@ -1,6 +1,52 @@
 #include "dbusintrospection.h"
 
-#include <QXmlStreamReader>
+#include <QIODevice>
+
+DBusHardenedXmlReader::DBusHardenedXmlReader(const QString &xml) {
+    if (qint64(xml.size()) * qint64(sizeof(QChar)) > sizeLimitBytes) {
+        m_refusal = QStringLiteral("document exceeds the %1 MiB size limit")
+                        .arg(sizeLimitBytes / 1024 / 1024);
+        return;
+    }
+    m_reader.addData(xml);
+}
+
+DBusHardenedXmlReader::DBusHardenedXmlReader(QIODevice *device) {
+    if (!device) {
+        m_refusal = QStringLiteral("no input device");
+        return;
+    }
+    if (device->isSequential()) {
+        // Size unknown up front: bound the read instead.
+        m_bounded = device->read(sizeLimitBytes + 1);
+        if (m_bounded.size() > sizeLimitBytes) {
+            m_refusal = QStringLiteral("document exceeds the %1 MiB size limit")
+                            .arg(sizeLimitBytes / 1024 / 1024);
+            m_bounded.clear();
+            return;
+        }
+        m_reader.addData(m_bounded);
+    } else {
+        if (device->size() > sizeLimitBytes) {
+            m_refusal = QStringLiteral("document exceeds the %1 MiB size limit")
+                            .arg(sizeLimitBytes / 1024 / 1024);
+            return;
+        }
+        m_reader.setDevice(device);
+    }
+}
+
+QXmlStreamReader::TokenType DBusHardenedXmlReader::readNext() {
+    if (refused())
+        return QXmlStreamReader::Invalid;
+    const QXmlStreamReader::TokenType token = m_reader.readNext();
+    // The DTD token precedes all content tokens, and entity expansion runs
+    // only while scanning content — refusing here means nothing this
+    // document declares was ever expanded.
+    if (token == QXmlStreamReader::DTD && !m_reader.entityDeclarations().isEmpty())
+        m_refusal = QStringLiteral("document declares XML entities");
+    return token;
+}
 
 // A14/D5: the shared fold (see dbusintrospection.h for the two modes). The
 // client copy previously folded upper RUNS; the server copy folded the first
@@ -39,7 +85,7 @@ static bool isDBusInArg(const QXmlStreamAttributes &attrs) {
 
 DBusIntrospectionData parseDBusIntrospection(const QString &xml, const QString &iface) {
     DBusIntrospectionData data;
-    QXmlStreamReader reader(xml);
+    DBusHardenedXmlReader reader(xml);
     QString currentMethod;
     QStringList currentArgs;
     QStringList currentOutArgs;
@@ -106,6 +152,14 @@ DBusIntrospectionData parseDBusIntrospection(const QString &xml, const QString &
         }
 
         break; // only one target interface
+    }
+
+    // Refusal (size cap before parsing, entity declarations at the DTD
+    // token): no data from the document is used, one warning.
+    if (reader.refused()) {
+        qWarning("DBus: introspection XML refused for %s: %s", qPrintable(iface),
+                 qPrintable(reader.refusalReason()));
+        return {};
     }
 
     return data;

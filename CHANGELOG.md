@@ -13,6 +13,19 @@ infrastructure that materially affects consumer trust).
 
 ### Fixed
 
+- **Introspection and catalog XML could blow up via entity expansion** —
+  both parsers now share one hardened reader: documents larger than 4 MiB
+  are refused before parsing, and any XML entity declaration (`<!ENTITY
+  …>`) refuses the document at the DTD token, before any content — and
+  therefore any entity expansion — is scanned. A small DTD with internal
+  entity declarations could previously expand into very large attribute
+  values (a peer could wedge or exhaust a client through `Introspect()`).
+  Plain DOCTYPE declarations without entities — which every real libdbus
+  introspection reply carries — still parse normally. Refused documents
+  yield no data (one warning each): an introspection reply is treated as
+  if the interface were absent, and a catalog file is discarded whole
+  like any malformed file.
+
 - **Peer-supplied or oversized signatures could abort the process inside
   libdbus** — signatures are now validated with the complete spec rules
   before registration or use: type codes only, balanced non-empty structs,

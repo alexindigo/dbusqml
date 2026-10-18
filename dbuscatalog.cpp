@@ -1,10 +1,11 @@
 #include "dbuscatalog.h"
 
+#include "dbusintrospection.h"
+
 #include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QStandardPaths>
-#include <QXmlStreamReader>
 
 DBusCatalog &DBusCatalog::instance() {
     static DBusCatalog s;
@@ -86,7 +87,7 @@ void DBusCatalog::loadFile(const QString &filePath) {
     // (that directory contains arbitrary third-party content) must be
     // discarded whole, never partially merged into the catalog.
     QHash<QString, InterfaceSpec> parsed;
-    QXmlStreamReader reader(&f);
+    DBusHardenedXmlReader reader(&f);
     QString currentIface;
     InterfaceSpec spec;
     spec.source = filePath;
@@ -168,6 +169,14 @@ void DBusCatalog::loadFile(const QString &filePath) {
                 clearArgs();
             }
         }
+    }
+
+    if (reader.refused()) {
+        // Same discard-whole policy as a malformed file: oversize or
+        // entity-declaring documents are never merged.
+        qWarning() << "DBusCatalog: XML refused in" << filePath
+                   << "- skipping file:" << reader.refusalReason();
+        return;
     }
 
     if (reader.hasError()) {

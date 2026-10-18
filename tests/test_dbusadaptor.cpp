@@ -584,6 +584,9 @@ private slots:
     void testAliasJsPathPrecision64();
     void testCatalogSourcesAndPrecedence();
     void testCatalogMalformedXmlSkipped();
+    void testCatalogEntityDeclarationsRefused();
+    void testCatalogDoctypeWithoutEntitiesAccepted();
+    void testCatalogOversizeRefused();
 
     // 0.9.0 PropertiesChanged + relay retirement.
     void testPropertiesChangedReachesProxy();
@@ -8522,6 +8525,75 @@ void TestDBusAdaptor::testCatalogMalformedXmlSkipped() {
     qputenv("DBUSQML_TYPES_PATH", dir.path().toLocal8Bit());
     DBusCatalog::instance().reload();
     QVERIFY(!DBusCatalog::instance().lookup(QStringLiteral("org.dbusqml.Broken")).has_value());
+    qunsetenv("DBUSQML_TYPES_PATH");
+    DBusCatalog::instance().reload();
+}
+
+// XML hardening (P5): a catalog file that declares XML entities is refused
+// whole at the DTD token — the same policy as peer introspection XML (no
+// entity expansion ever runs), one warning, nothing merged.
+void TestDBusAdaptor::testCatalogEntityDeclarationsRefused() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    {
+        QFile f(dir.filePath(QStringLiteral("entities.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("<!DOCTYPE node [ <!ENTITY t \"s\"> ]>\n"
+                "<node><interface name=\"org.dbusqml.EntityCat\">"
+                "<method name=\"M\"><arg type=\"&t;\" direction=\"in\"/></method>"
+                "</interface></node>");
+    }
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("DBusCatalog: XML refused")));
+    qputenv("DBUSQML_TYPES_PATH", dir.path().toLocal8Bit());
+    DBusCatalog::instance().reload();
+    QVERIFY(!DBusCatalog::instance().lookup(QStringLiteral("org.dbusqml.EntityCat")).has_value());
+    qunsetenv("DBUSQML_TYPES_PATH");
+    DBusCatalog::instance().reload();
+}
+
+// The DOCTYPE itself is allowed — real libdbus introspection XML carries
+// one; only entity declarations refuse the file.
+void TestDBusAdaptor::testCatalogDoctypeWithoutEntitiesAccepted() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    {
+        QFile f(dir.filePath(QStringLiteral("doctype.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\"\n"
+                "  \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n"
+                "<node><interface name=\"org.dbusqml.DoctypeCat\">"
+                "<method name=\"Ping\"><arg type=\"s\" direction=\"in\"/></method>"
+                "</interface></node>");
+    }
+    qputenv("DBUSQML_TYPES_PATH", dir.path().toLocal8Bit());
+    DBusCatalog::instance().reload();
+    const auto spec = DBusCatalog::instance().lookup(QStringLiteral("org.dbusqml.DoctypeCat"));
+    QVERIFY(spec.has_value());
+    QVERIFY(spec->methods.contains(QStringLiteral("Ping")));
+    qunsetenv("DBUSQML_TYPES_PATH");
+    DBusCatalog::instance().reload();
+}
+
+// Files over the 4 MiB document cap are refused before parsing.
+void TestDBusAdaptor::testCatalogOversizeRefused() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    {
+        QFile f(dir.filePath(QStringLiteral("big.xml")));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("<node><!--");
+        const QByteArray chunk(1024 * 1024, 'x');
+        for (int i = 0; i < 5; ++i) // 5 MiB of comment padding > 4 MiB cap
+            QCOMPARE(f.write(chunk), qint64(chunk.size()));
+        f.write("--><interface name=\"org.dbusqml.BigCat\">"
+                "<method name=\"M\"/></interface></node>");
+    }
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral("DBusCatalog: XML refused")));
+    qputenv("DBUSQML_TYPES_PATH", dir.path().toLocal8Bit());
+    DBusCatalog::instance().reload();
+    QVERIFY(!DBusCatalog::instance().lookup(QStringLiteral("org.dbusqml.BigCat")).has_value());
     qunsetenv("DBUSQML_TYPES_PATH");
     DBusCatalog::instance().reload();
 }

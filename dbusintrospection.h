@@ -3,6 +3,54 @@
 #include <QHash>
 #include <QString>
 #include <QStringList>
+#include <QXmlStreamReader>
+
+class QIODevice;
+
+// One XML hardening policy for every document this library parses — peer
+// Introspect() replies and local type-catalog files alike:
+//
+//   * an input larger than 4 MiB (its encoded size: UTF-16 bytes for
+//     in-memory text, device bytes for files) is refused before parsing;
+//   * a DOCTYPE is allowed (real libdbus Introspect() replies carry one),
+//     but ANY entity declaration in it refuses the document at the DTD
+//     token.
+//
+// Refusing at the DTD token means no entity expansion can ever happen:
+// QXmlStreamReader guarantees the DTD token precedes every content token,
+// and declared entities are expanded only while scanning content and
+// attribute values (Qt 6.11.2: qxmlstreamparser_p.h emits the DTD token
+// after the internal subset is scanned; expansion runs from entityHash in
+// the content scanner only).
+//
+// A refused document yields no data: callers check refused() after the
+// parse loop (atEnd() covers refusal) and discard the whole document with
+// one warning.
+class DBusHardenedXmlReader {
+public:
+    static constexpr qint64 sizeLimitBytes = 4 * 1024 * 1024;
+
+    explicit DBusHardenedXmlReader(const QString &xml);
+    explicit DBusHardenedXmlReader(QIODevice *device);
+
+    bool refused() const { return !m_refusal.isEmpty(); }
+    QString refusalReason() const { return m_refusal; }
+
+    QXmlStreamReader::TokenType readNext();
+    bool atEnd() const { return refused() || m_reader.atEnd(); }
+
+    bool isStartElement() const { return m_reader.isStartElement(); }
+    bool isEndElement() const { return m_reader.isEndElement(); }
+    QStringView name() const { return m_reader.name(); }
+    QXmlStreamAttributes attributes() const { return m_reader.attributes(); }
+    bool hasError() const { return m_reader.hasError(); }
+    QString errorString() const { return m_reader.errorString(); }
+
+private:
+    QXmlStreamReader m_reader;
+    QByteArray m_bounded; // backing store for sequential devices
+    QString m_refusal;
+};
 
 // Parsed D-Bus introspection data for a single interface.
 struct DBusIntrospectionData {

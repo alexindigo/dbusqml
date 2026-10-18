@@ -19,6 +19,13 @@ static int runOne(const uint8_t *data, size_t size) {
         parseDBusIntrospection(xml, QStringLiteral("org.example.Nope"));
     (void)d1.methodNames.size();
     (void)d2.methodNames.size();
+    // Drive the shared hardened reader itself to the end of input — the
+    // parsers stop after the target interface, but the reader's size/DTD
+    // refusal must hold for arbitrary token streams.
+    DBusHardenedXmlReader reader(xml);
+    while (!reader.atEnd())
+        (void)reader.readNext();
+    (void)reader.refused();
     // CF-24: chain the parse→marshal trust crossing — every arg type the
     // parser extracted flows into the REAL signature walker + spec
     // validator + writeBySignature, exactly like production peer-XML

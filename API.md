@@ -799,6 +799,16 @@ would exceed the cap fails locally (`Failed` error reply / `InvalidArgs`)
 or is dropped with a warning on paths without a reply channel, instead of
 aborting inside libdbus.
 
+**Introspection and catalog XML limits** (one policy for both parsers):
+an XML document larger than 4 MiB (encoded size) is refused before
+parsing, and a document whose DTD declares any entity (`<!ENTITY …>`) is
+refused at the DTD token — before any content is scanned, so no entity
+expansion can ever run. A plain DOCTYPE without entity declarations
+(the kind every real libdbus `Introspect()` reply starts with) parses
+normally. A refused introspection reply is treated as if the interface
+were absent from the XML (the catalog/inference tiers take over), and a
+refused catalog file is discarded whole — each with exactly one warning.
+
 ---
 
 ## Data Types
