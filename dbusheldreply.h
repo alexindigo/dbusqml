@@ -9,12 +9,14 @@
 #include <qqmlregistration.h>
 
 class DBusAdaptor;
+class QQmlEngine;
 
 // A deferred method reply. Created only by DBusAdaptor::holdReply() during
 // method dispatch; the QML handler holds it and settles it later with send()
 // or sendError(). While pending it is the only handle that can answer the
 // caller, so it is parented to the adaptor with CppOwnership; after settle it
-// is handed to the JS garbage collector (JavaScriptOwnership).
+// is unparented and handed to the JS garbage collector (JavaScriptOwnership)
+// while its engine is alive. Without an engine it keeps adaptor ownership.
 class DBusHeldReply : public QObject {
     Q_OBJECT
     QML_NAMED_ELEMENT(DBusHeldReply)
@@ -43,6 +45,7 @@ private:
     friend class DBusAdaptor;
 
     QPointer<DBusAdaptor> m_adaptor;
+    QPointer<QQmlEngine> m_engine;
     QDBusMessage m_msg;
     QDBusConnection m_conn;
     QString m_member;

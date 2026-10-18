@@ -193,6 +193,12 @@ public:
         m_adaptor->m_inDispatch = true;
     }
     ~DispatchScope() {
+        // QDBusMessage copies are explicitly shared: clearing here also
+        // releases the held reply's request payload. Wait until the handler
+        // has returned; all dispatch arguments have independent list copies,
+        // and a held call returns handled without any further body consumers.
+        if (m_adaptor->m_currentCall.held)
+            m_adaptor->m_currentCall.msg.setArguments({});
         m_adaptor->m_currentCall = m_adaptor->m_callStack.pop();
         m_adaptor->m_inDispatch = m_savedInDispatch;
     }
@@ -2003,9 +2009,8 @@ DBusHeldReply *DBusAdaptor::holdReply() {
     reply->setContext(this, m_currentCall.msg, m_currentCall.conn, m_currentCall.member);
     // Ownership audit (0.7.0): CppOwnership while pending — the held reply is
     // the only handle that can answer the caller and must not be GC-collected
-    // mid-flight. After settle() it is handed to the JS GC (0.5.0 design,
-    // intended); it stays parented to this adaptor, so a parented JS-owned
-    // object is never collected and it is destroyed with the adaptor.
+    // mid-flight. Settle hands it to the JS GC while the engine is alive;
+    // after engine death it retains this owner (there is no heap to collect it).
     QQmlEngine::setObjectOwnership(reply, QQmlEngine::CppOwnership);
     m_currentCall.held = true;
     m_currentCall.reply = reply;

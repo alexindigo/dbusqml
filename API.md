@@ -549,6 +549,16 @@ automatically, and a bare `send()` sends an empty (void) reply.
 treated as the message with the generic
 `org.freedesktop.DBus.Error.Failed` name.
 
+While pending, the adaptor owns the held reply, so dropping all JavaScript
+references cannot collect it before it answers. Once settled, with its QML
+engine still alive, it is unparented and handed to the JavaScript garbage
+collector: keeping a reference keeps the handle; dropping every reference
+allows it to be collected without waiting for the adaptor to die. If the
+engine has already died (or there is no engine), it retains adaptor ownership
+and is destroyed with that adaptor. The held message releases its incoming
+arguments when the dispatch that called `holdReply()` ends; reply correlation
+headers and the captured `callerService()` remain available.
+
 Caveats:
 
 - `holdReply()` is valid **only synchronously** during the handler — before

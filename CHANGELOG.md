@@ -13,6 +13,12 @@ infrastructure that materially affects consumer trust).
 
 ### Fixed
 
+- **Settled held replies accumulated on long-lived adaptors** — settled
+  `DBusHeldReply` handles are now unparented and collectable once JavaScript
+  drops them, while their engine is alive. Without a live engine they retain
+  adaptor ownership for teardown. Held calls also release their incoming
+  message arguments at dispatch exit instead of retaining request payloads.
+
 - **Replies captured by their `finished` handler leaked** — the canonical
   `r.finished.connect(() => r.value)` kept every reply alive forever.
   `finished` is now delivered once and then all its receivers are

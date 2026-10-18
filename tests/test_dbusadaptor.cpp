@@ -455,6 +455,10 @@ private slots:
     void testHeldReplyTimeoutSettleCancels();
     void testHeldReplyTimeoutDisabledByDefault();
     void testHeldReplyTimeoutNoReplySilent();
+    void testSettledHeldReplyCollected_data();
+    void testSettledHeldReplyCollected();
+    void testSettledHeldReplyEngineTeardown_data();
+    void testSettledHeldReplyEngineTeardown();
     // Phase 10 (deferred-deletion window): call served inside the
     // window replies; path freed after destruction.
     void testDeferredDeletionWindowServesThenFrees();
@@ -3121,6 +3125,184 @@ void TestDBusAdaptor::testHeldReplyTimeoutNoReplySilent() {
     delete w;
     delete adaptor;
     QVERIFY(true);
+}
+
+// Settled held replies must stop belonging to a long-lived adaptor. Exercise
+// the QML send/error and TTL paths, with and without NO_REPLY_EXPECTED. There
+// is no message-internals hook: observe the input surviving holdReply(), the
+// caller's reply, pending lifetime, and final destruction instead.
+void TestDBusAdaptor::testSettledHeldReplyCollected_data() {
+    QTest::addColumn<QString>("outcome");
+    QTest::addColumn<bool>("noReply");
+    for (const QString &outcome :
+         {QStringLiteral("send"), QStringLiteral("error"), QStringLiteral("ttl")}) {
+        QTest::newRow(qPrintable(outcome)) << outcome << false;
+        QTest::newRow(qPrintable(outcome + QStringLiteral("-no-reply"))) << outcome << true;
+    }
+}
+
+void TestDBusAdaptor::testSettledHeldReplyCollected() {
+    QFETCH(QString, outcome);
+    QFETCH(bool, noReply);
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent comp(&engine);
+    comp.setData("import DBus 1.0\n"
+                 "DBusAdaptor {\n"
+                 "  service: 'org.dbusqml.HeldCollect'\n"
+                 "  path: '/HeldCollect'\n"
+                 "  iface: 'org.dbusqml.HeldCollect'\n"
+                 "  _signatures: ({ hold: 's' })\n"
+                 "  property var _saved: null\n"
+                 "  property string _payload: ''\n"
+                 "  function hold(payload) {\n"
+                 "    _saved = holdReply(); _payload = payload;\n"
+                 "  }\n"
+                 "  function finish(fail) {\n"
+                 "    if (fail) _saved.sendError('org.dbusqml.HeldError', _payload);\n"
+                 "    else _saved.send(_payload);\n"
+                 "    _saved = null; _payload = '';\n"
+                 "  }\n"
+                 "  function drop() { _saved = null; _payload = ''; }\n"
+                 "}",
+                 QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    std::unique_ptr<QObject> adaptor(comp.create());
+    QVERIFY(adaptor != nullptr);
+    const auto collect = [&] {
+        for (int i = 0; i < 5; ++i) {
+            engine.collectGarbage();
+            QCoreApplication::processEvents();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        }
+    };
+    QList<QPointer<DBusHeldReply>> probes;
+    // QV4 retains the latest receiver at a call site: one trailing call uses
+    // the SAME hold/finish sites without being counted (item 1 technique).
+    for (int i = 0; i < 5; ++i) {
+        const QString payload =
+            QStringLiteral("request-%1:").arg(i) + QString(8192, QLatin1Char('x'));
+        adaptor->setProperty("heldReplyTimeout", outcome == QStringLiteral("ttl") ? 400 : 0);
+        QDBusMessage call = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.HeldCollect"), QStringLiteral("/HeldCollect"),
+            QStringLiteral("org.dbusqml.HeldCollect"), QStringLiteral("Hold"));
+        call.setArguments({payload});
+        std::unique_ptr<QDBusPendingCallWatcher> watcher;
+        if (noReply)
+            QVERIFY(deferredCaller().send(call));
+        else
+            watcher = std::make_unique<QDBusPendingCallWatcher>(deferredCaller().asyncCall(call));
+        QTRY_VERIFY_WITH_TIMEOUT(adaptor->property("_saved").value<QObject *>() != nullptr, 3000);
+        QPointer<DBusHeldReply> held =
+            qobject_cast<DBusHeldReply *>(adaptor->property("_saved").value<QObject *>());
+        QVERIFY(held);
+        QVERIFY(!held->isSettled());
+        QCOMPARE(held->parent(), adaptor.get());
+        QCOMPARE(held->callerService(), deferredCaller().baseService());
+        // Clearing the shared message at dispatch exit must not clear the
+        // handler's argument snapshot: QML received the entire payload.
+        QCOMPARE(adaptor->property("_payload").toString(), payload);
+        if (outcome == QStringLiteral("ttl")) {
+            QTRY_VERIFY_WITH_TIMEOUT(held->isSettled(), 3000);
+            QVERIFY(QMetaObject::invokeMethod(adaptor.get(), "drop"));
+        } else {
+            collect();
+            QVERIFY(held && !held->isSettled()); // pending replies cannot be GC'd
+            QVERIFY(QMetaObject::invokeMethod(adaptor.get(), "finish",
+                                              Q_ARG(QVariant, outcome == QStringLiteral("error"))));
+        }
+        QVERIFY(held && held->isSettled());
+        QCOMPARE(held->callerService(), deferredCaller().baseService());
+        if (watcher) {
+            QTRY_VERIFY_WITH_TIMEOUT(watcher->isFinished(), 5000);
+            const QDBusMessage reply = watcher->reply();
+            if (outcome == QStringLiteral("send")) {
+                QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+                QCOMPARE(reply.signature(), QStringLiteral("s"));
+                QCOMPARE(reply.arguments(), QVariantList{payload});
+            } else {
+                QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+                QCOMPARE(reply.errorName(),
+                         outcome == QStringLiteral("error")
+                             ? QStringLiteral("org.dbusqml.HeldError")
+                             : QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+                QCOMPARE(reply.errorMessage(), outcome == QStringLiteral("error")
+                                                   ? payload
+                                                   : QStringLiteral("reply timed out"));
+            }
+        }
+        if (i < 4)
+            probes.append(held);
+    }
+    collect();
+    int alive = 0;
+    for (const auto &held : probes)
+        alive += held ? 1 : 0;
+    QCOMPARE(alive, 0);
+    // This assertion also pins that settled handles no longer participate in
+    // unregister/destructor/engine-teardown's pending-only child scans.
+    QVERIFY(adaptor->findChildren<DBusHeldReply *>().isEmpty());
+}
+
+// Component.onDestruction runs before the JS heap's final sweep; the queued
+// engine-destroyed hook runs after it. Both must answer and reclaim the reply.
+void TestDBusAdaptor::testSettledHeldReplyEngineTeardown_data() {
+    QTest::addColumn<bool>("duringDestruction");
+    QTest::newRow("during-component-destruction") << true;
+    QTest::newRow("after-engine-destruction") << false;
+}
+
+void TestDBusAdaptor::testSettledHeldReplyEngineTeardown() {
+    QFETCH(bool, duringDestruction);
+    auto engine = std::make_unique<QQmlEngine>();
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine->addImportPath(binDir.path());
+    engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent comp(engine.get());
+    comp.setData("import DBus 1.0\n"
+                 "import QtQml\n"
+                 "DBusAdaptor {\n"
+                 "  service: 'org.dbusqml.HeldEngineDeath'\n"
+                 "  path: '/HeldEngineDeath'\n"
+                 "  iface: 'org.dbusqml.HeldEngineDeath'\n"
+                 "  _signatures: ({ hang: 's' })\n"
+                 "  property var _saved: null\n"
+                 "  property bool _settleOnDestruction: false\n"
+                 "  function hang() { _saved = holdReply(); }\n"
+                 "  Component.onDestruction: {\n"
+                 "    if (_settleOnDestruction && _saved) _saved.send('from-destruction');\n"
+                 "  }\n"
+                 "}",
+                 QUrl());
+    QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+    std::unique_ptr<QObject> adaptor(comp.create());
+    QVERIFY(adaptor);
+    adaptor->setProperty("_settleOnDestruction", duringDestruction);
+    std::unique_ptr<QDBusPendingCallWatcher> watcher(asyncCallDeferred(
+        QStringLiteral("org.dbusqml.HeldEngineDeath"), QStringLiteral("/HeldEngineDeath"),
+        QStringLiteral("org.dbusqml.HeldEngineDeath"), QStringLiteral("Hang")));
+    QTRY_VERIFY_WITH_TIMEOUT(adaptor->property("_saved").value<QObject *>() != nullptr, 3000);
+    QPointer<DBusHeldReply> held =
+        qobject_cast<DBusHeldReply *>(adaptor->property("_saved").value<QObject *>());
+    QVERIFY(held && !held->isSettled());
+    engine.reset();
+    QTRY_VERIFY_WITH_TIMEOUT(watcher->isFinished(), 5000);
+    if (duringDestruction) {
+        QCOMPARE(watcher->reply().type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(watcher->reply().arguments(), QVariantList{QStringLiteral("from-destruction")});
+        QVERIFY2(held.isNull(), "reply settled during destruction must die in the final JS sweep");
+    } else {
+        QCOMPARE(watcher->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+        QCOMPARE(watcher->reply().errorMessage(),
+                 QStringLiteral("engine destroyed with reply pending"));
+    }
+    adaptor.reset();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    const bool reclaimed = held.isNull();
+    delete held.data(); // clean up a failed run without hiding the failed assertion
+    QVERIFY2(reclaimed, "settle after engine death orphaned a reply with no JS heap to collect it");
 }
 
 // ==================== P0 hold+throw contract (for-all-times Phase 0) ===

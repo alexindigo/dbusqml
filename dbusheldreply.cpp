@@ -13,6 +13,7 @@ DBusHeldReply::DBusHeldReply(QObject *parent)
 void DBusHeldReply::setContext(DBusAdaptor *adaptor, const QDBusMessage &msg,
                                const QDBusConnection &conn, const QString &member) {
     m_adaptor = adaptor;
+    m_engine = qmlEngine(adaptor);
     m_msg = msg;
     m_conn = conn;
     m_member = member;
@@ -71,10 +72,14 @@ void DBusHeldReply::settle() {
         m_ttlTimer->stop();
         m_ttlTimer = nullptr;
     }
-    // Ownership audit (0.7.0): CppOwnership while pending → JavaScriptOwnership
-    // after settle (0.5.0 design — intended). The adaptor keeps its own
-    // ownership through dispatch (0.8.0 preservation) — no notification needed.
-    QQmlEngine::setObjectOwnership(this, QQmlEngine::JavaScriptOwnership);
+    // Same lifetime policy as DBusPendingReply: hand off only while the
+    // engine is alive. The queued engine-destroyed tail runs after its final
+    // sweep, so those replies must keep their adaptor owner instead.
+    if (m_engine) {
+        // JavaScriptOwnership cannot collect an object that has a parent.
+        setParent(nullptr);
+        QQmlEngine::setObjectOwnership(this, QQmlEngine::JavaScriptOwnership);
+    }
 }
 
 void DBusHeldReply::expire() {
