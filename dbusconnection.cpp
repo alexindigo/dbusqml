@@ -1315,6 +1315,10 @@ DBusConnection *DBusConnection::connectToBus(const QString &address) {
 }
 
 DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message) {
+    return startCall(message, /*gcHandoff=*/true);
+}
+
+DBusPendingReply *DBusConnection::startCall(const DBusMessage &message, bool gcHandoff) {
     auto qmsg = toQDBusMessage(message);
     // Client-exit guard: an argument with no wire representation would abort
     // inside QtDBus marshaling — the caller-side analogue of the 0.5.2
@@ -1327,6 +1331,7 @@ DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message) {
                      QMetaType(qmsg.arguments().at(i).userType()).name());
             auto *fail = new DBusPendingReply(this);
             fail->setEngine(qmlEngine(this));
+            fail->setGcHandoffEnabled(gcHandoff);
             fail->completeLocalError(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
                                      QStringLiteral("argument %1 is not marshalable").arg(i));
             return fail;
@@ -1338,6 +1343,7 @@ DBusPendingReply *DBusConnection::asyncCall(const DBusMessage &message) {
     auto watcher = new QDBusPendingCallWatcher(pending, this);
     auto reply = new DBusPendingReply(this);
     reply->setEngine(qmlEngine(this));
+    reply->setGcHandoffEnabled(gcHandoff);
     reply->setWatcher(watcher);
     return reply;
 }
@@ -1366,16 +1372,12 @@ void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resol
     //     value (numbers, booleans, arrays, and dicts survive; nested D-Bus
     //     containers are unwrapped via unwrapDbus).
     //   reject is called with a single error object { name, message }.
-    auto reply = asyncCall(message);
     // R4: the promise path manages this reply C++-side (settled →
-    // deleteLater below) and never returns it to JS — opt it out of the
-    // completion GC handoff (unparenting it with no JS wrapper would leak
-    // it; its settle contract already covers deletion). Set BEFORE the
-    // early return so the no-callback call stays connection-parented too.
-    reply->setGcHandoffEnabled(false);
-    if (!resolve.isCallable() && !reject.isCallable())
-        return;
-
+    // deleteLater below) and never returns it to JS — opted out of the
+    // completion GC handoff before it can settle (unparenting it with no JS
+    // wrapper would leak it). With or without callbacks, the reply is
+    // deleted once it settles.
+    auto reply = startCall(message, /*gcHandoff=*/false);
     QPointer<QQmlEngine> engine = qmlEngine(this);
     connect(reply, &DBusPendingReply::finished, this,
             [reply, resolve = QJSValue(resolve), reject = QJSValue(reject), engine]() mutable {

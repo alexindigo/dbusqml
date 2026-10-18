@@ -5,6 +5,7 @@ import DBus 1.0
 import DBus 1.0 as DBusQML
 
 TestCase {
+    id: apiTest
     name: "DBusQmlApiTest"
 
     property DBusQML.DBusPendingReply pendingReply
@@ -284,6 +285,82 @@ TestCase {
         tryVerify(function() { return r.isFinished; }, 5000)
         verify(!r.isError, "post-gc call should not error: " + r.error.message)
         compare(r.value, true, "post-gc call should return real values")
+
+        // Capturing handlers — the canonical `r.finished.connect(() => r.value)`
+        // shape: after delivery the library disconnects finished's receivers,
+        // so the closure no longer roots its reply and gc() collects every one.
+        // Control first: non-capturing handlers (proves the probe observes
+        // collection). Each batch ends with one UNPROBED call through the
+        // same call site: V4's call-site lookup cache keeps the most recent
+        // receiver of `r.finished` alive, which must not be a probed reply.
+        replyDestroyedCount = 0
+        var plain = 0
+        for (var k = 0; k <= N; k++)
+            startPlainCall(k < N, function(names) { if (names.length > 0) plain++ })
+        tryVerify(function() { return plain === N + 1; }, 10000, "plain handlers should all run")
+        tryVerify(function() { gc(); return replyDestroyedCount === N; }, 10000,
+                  "control: replies with non-capturing handlers should be collected")
+
+        replyDestroyedCount = 0
+        var captured = 0
+        for (var j = 0; j <= N; j++)
+            startCapturingCall(j < N, function(names) { if (names.length > 0) captured++ })
+        tryVerify(function() { return captured === N + 1; }, 10000,
+                  "capturing handlers should all read their reply's value")
+        tryVerify(function() { gc(); return replyDestroyedCount === N; }, 10000,
+                  "replies captured by their finished handler should be collected")
+
+        // A binding on reply.value (finished is every reply property's
+        // NOTIFY) still updates once on completion.
+        boundReply = DBusQML.SessionBus.asyncCall({
+            service: "org.freedesktop.DBus",
+            path: "/org/freedesktop/DBus",
+            iface: "org.freedesktop.DBus",
+            member: "NameHasOwner",
+            arguments: ["org.freedesktop.DBus"]
+        })
+        tryVerify(function() { return boundReplyValue === true; }, 5000,
+                  "binding on reply.value should update on completion")
+        boundReply = null
+    }
+
+    property int replyDestroyedCount: 0
+    property DBusQML.DBusPendingReply boundReply
+    readonly property var boundReplyValue: boundReply ? boundReply.value : undefined
+
+    function countReplyDestroyed() { replyDestroyedCount++ }
+
+    // A child probe reports a reply's destruction (QML does not expose
+    // QObject::destroyed); a child never keeps its parent alive.
+    function probeReplyDestruction(reply) {
+        Qt.createQmlObject(
+            "import QtQml; QtObject { Component.onDestruction: apiTest.countReplyDestroyed() }",
+            reply, "replyDestroyedProbe")
+    }
+
+    function listNamesCall() {
+        return DBusQML.SessionBus.asyncCall({
+            service: "org.freedesktop.DBus",
+            path: "/org/freedesktop/DBus",
+            iface: "org.freedesktop.DBus",
+            member: "ListNames"
+        })
+    }
+
+    // Control: the handler does not reference its reply.
+    function startPlainCall(probed, onDone) {
+        var r = listNamesCall()
+        if (probed)
+            probeReplyDestruction(r)
+        r.finished.connect(function() { onDone([""]) })
+    }
+
+    // Own function scope: the handler's closure holds only `r` and `onValue`.
+    function startCapturingCall(probed, onValue) {
+        let r = listNamesCall()
+        if (probed)
+            probeReplyDestruction(r)
+        r.finished.connect(function() { onValue(r.value) })
     }
 
     function test_properties_get() {

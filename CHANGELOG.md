@@ -11,6 +11,19 @@ infrastructure that materially affects consumer trust).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Replies captured by their `finished` handler leaked** — the canonical
+  `r.finished.connect(() => r.value)` kept every reply alive forever.
+  `finished` is now delivered once and then all its receivers are
+  disconnected; one settle path applies the same GC handoff to every
+  completion (wire reply, `getProperty` owner and coalesced waiters, local
+  errors), and promise-style `asyncCall` without callbacks deletes its reply.
+  A local failure always delivers `finished` on the next loop turn, so the
+  promise `reject` now runs on connections without a QML context
+  (`connectToBus`). A `finished.connect` made after delivery never fires
+  (documented).
+
 ### Quality
 
 - Tests and the TSan gate honor `TMPDIR` for fd fixtures, monitor logs,

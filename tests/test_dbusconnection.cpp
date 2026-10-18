@@ -567,7 +567,50 @@ public:
         m.setMember(QStringLiteral("ListNames"));
         return m;
     }
+    // An argument with no wire representation: asyncCall fails it locally
+    // (completeLocalError) without a round-trip.
+    Q_INVOKABLE DBusMessage poison() {
+        DBusMessage m = echo();
+        m.setArguments({QVariant::fromValue(&m_poison)});
+        return m;
+    }
+
+private:
+    QObject m_poison;
 };
+
+// Exposes the protected QObject::isSignalConnected (settle-contract probe).
+struct ReplyProbe : DBusPendingReply {
+    using DBusPendingReply::DBusPendingReply;
+    using QObject::isSignalConnected;
+};
+
+// Records a reply handed in from JS (observes settle during engine teardown).
+class R4Recorder : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(int delivered MEMBER delivered)
+public:
+    Q_INVOKABLE void keep(QObject *o) {
+        last = qobject_cast<DBusPendingReply *>(o);
+        kept = !last.isNull();
+        handedOff = last && last->parent() == nullptr &&
+                    QQmlEngine::objectOwnership(last) == QQmlEngine::JavaScriptOwnership;
+    }
+    QPointer<DBusPendingReply> last;
+    bool kept = false;
+    bool handedOff = false;
+    int delivered = 0;
+};
+
+// Settle-path collection: gc() + the deferred deletes it queues, a few
+// rounds (a collected wrapper deletes its QObject via deleteLater).
+static void r4Collect(QQmlEngine *engine) {
+    for (int i = 0; i < 5; ++i) {
+        engine->collectGarbage();
+        QCoreApplication::processEvents();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    }
+}
 
 // Expose a C++ object to evaluate()d JS as a true global (context
 // properties are NOT in evaluate()'s scope chain). newQObject flips
@@ -2609,8 +2652,8 @@ private slots:
     // no wire representation must fail the call LOCALLY
     // (org.freedesktop.DBus.Error.Failed, "argument N is not marshalable")
     // instead of aborting inside QtDBus marshaling. completeLocalError
-    // delivers synchronously in C++ (no engine), so the reply is already
-    // cached when call() returns.
+    // caches synchronously, so the reply is already finished when call()
+    // returns; finished itself is delivered on the next loop turn.
 
     static DBusProxy *clientGuardProxy() {
         auto *proxy = new DBusProxy;
@@ -3180,7 +3223,7 @@ private slots:
     // (road-to-one, owner Call 4 = safe-A; spike pins green under ASan on
     // the fork BEFORE this landed — plans/road-to-one/artifacts/. Design:
     // in flight = parented, CppOwnership; at completion, synchronously in
-    // onFinished's stack frame: cache → delete watcher → emit finished →
+    // settle()'s stack frame: cache → deliver finished (queued or direct) →
     // QPointer self-check → setParent(nullptr) + JavaScriptOwnership. No
     // engine → keep the parent (pure C++ consumer behavior unchanged).
     // The promise-style overload opts out (library-managed lifetime).
@@ -3439,6 +3482,397 @@ private slots:
                  qPrintable(QStringLiteral("settled=%1")
                                 .arg(engine->evaluate(QStringLiteral("settled")).toString())));
         delete engine;
+        delete conn;
+    }
+
+    // ==================== Settle: finished once, then disconnected ====================
+    // Every completion path (wire reply, coalesced/owner Get, local error)
+    // goes through one settle routine: cache → deliver finished once →
+    // disconnect every receiver of finished → one lifetime policy (GC
+    // handoff when an engine exists). A JS handler that captures its reply
+    // — the canonical `r.finished.connect(() => r.value)` — no longer roots
+    // the reply after delivery, so gc() collects it on every path.
+
+    // Wire-reply path (onFinished): capturing handlers read r.value; after
+    // delivery every reply is collected. Control: non-capturing handlers.
+    void testReplySettleCapturingHandlerCollected() {
+        DelayEchoObject svc;
+        QVERIFY(QDBusConnection::sessionBus().registerObject(QStringLiteral("/R4Echo"), &svc,
+                                                             QDBusConnection::ExportAllSlots));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        r4ExposeConn(engine, conn);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+
+        const auto issue = [&](const char *js, int n) {
+            const QJSValue res = engine->evaluate(QString::fromLatin1(js).arg(n));
+            if (res.isError())
+                qWarning("%s", qPrintable(res.toString()));
+            QList<QPointer<DBusPendingReply>> ptrs;
+            for (DBusPendingReply *r : conn->findChildren<DBusPendingReply *>())
+                ptrs.append(r);
+            return ptrs;
+        };
+        // Control: handler does not reference its reply.
+        QList<QPointer<DBusPendingReply>> plain =
+            issue("var plainDone = 0;"
+                  "(function(){ for (var i = 0; i < %1; i++) {"
+                  "  let r = conn.asyncCall(msgFactory.echo());"
+                  "  r.finished.connect(function(){ plainDone++; }); } })(); 'ok'",
+                  4);
+        QCOMPARE(plain.size(), 4);
+        QTRY_VERIFY_WITH_TIMEOUT(engine->evaluate(QStringLiteral("plainDone === 4")).toBool(),
+                                 10000);
+        r4Collect(engine);
+        for (const auto &p : plain)
+            QVERIFY2(p.isNull(), "control: non-capturing reply not collected");
+
+        // Capturing handler: reads r.value inside finished.
+        QList<QPointer<DBusPendingReply>> captured =
+            issue("var capDone = 0; var capOk = 0;"
+                  "(function(){ for (var i = 0; i < %1; i++) {"
+                  "  let r = conn.asyncCall(msgFactory.echo());"
+                  "  r.finished.connect(function(){"
+                  "    if (r.value === 'spike-value-42') capOk++; capDone++; }); } })(); 'ok'",
+                  4);
+        QCOMPARE(captured.size(), 4);
+        QTRY_VERIFY_WITH_TIMEOUT(engine->evaluate(QStringLiteral("capDone === 4")).toBool(), 10000);
+        QVERIFY(engine->evaluate(QStringLiteral("capOk === 4")).toBool());
+        r4Collect(engine);
+        int alive = 0;
+        for (const auto &p : captured)
+            alive += p.isNull() ? 0 : 1;
+        QVERIFY2(alive == 0,
+                 qPrintable(QStringLiteral("%1/4 capturing replies leaked").arg(alive)));
+        delete engine;
+        delete conn;
+    }
+
+    // getProperty owner + coalesced waiter (completeFromReply): both settle
+    // through the same routine, are handed to the GC and collected.
+    void testReplySettleGetOwnerAndWaiterCollected() {
+        PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.SettleGet");
+        PropertyServerObject::s_level = 7u;
+        PropertyServerObject::s_getCount = 0;
+        PropertyServerObject server;
+        QVERIFY(QDBusConnection::sessionBus().registerVirtualObject(QStringLiteral("/SettleGet"),
+                                                                    &server));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.SettleGet")));
+
+        auto *engine = new QQmlEngine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine->addImportPath(binDir.path());
+        engine->addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        QQmlComponent comp(engine);
+        comp.setData("import QtQml\n"
+                     "import DBus 1.0\n"
+                     "QtObject {\n"
+                     "  property int done: 0\n"
+                     "  property int ok: 0\n"
+                     "  property DBus proxy: DBus {\n"
+                     "    service: 'org.dbusqml.SettleGet'\n"
+                     "    path: '/SettleGet'\n"
+                     "    iface: 'org.dbusqml.SettleGet'\n"
+                     "  }\n"
+                     "  function fire() {\n"
+                     "    let owner = proxy.getProperty('Level');\n"
+                     "    let waiter = proxy.getProperty('Level');\n"
+                     "    owner.finished.connect(function() {\n"
+                     "      if (owner.value === 7) ok++; done++; });\n"
+                     "    waiter.finished.connect(function() {\n"
+                     "      if (waiter.value === 7) ok++; done++; });\n"
+                     "  }\n"
+                     "}",
+                     QUrl());
+        QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+        QObject *root = comp.create();
+        QVERIFY(root != nullptr);
+        auto *proxy = qobject_cast<DBusProxy *>(root->property("proxy").value<QObject *>());
+        QVERIFY(proxy != nullptr);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->status() == DBusProxy::Ready, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(proxy->property("level").toUInt() == 7u, 10000);
+        QVERIFY(proxy->findChildren<DBusPendingReply *>().isEmpty());
+
+        PropertyServerObject::s_getCount = 0;
+        QVERIFY(QMetaObject::invokeMethod(root, "fire"));
+        QList<QPointer<DBusPendingReply>> ptrs;
+        for (DBusPendingReply *r : proxy->findChildren<DBusPendingReply *>())
+            ptrs.append(r);
+        QCOMPARE(ptrs.size(), 2); // owner + coalesced waiter
+        QTRY_VERIFY_WITH_TIMEOUT(root->property("done").toInt() == 2, 10000);
+        QCOMPARE(root->property("ok").toInt(), 2);
+        QCOMPARE(PropertyServerObject::s_getCount, 1); // the waiter really coalesced
+        // A second round through the same call sites: V4's call-site lookup
+        // cache keeps the most recent receiver of each `x.finished` alive,
+        // which must not be the pair under test.
+        QVERIFY(QMetaObject::invokeMethod(root, "fire"));
+        QTRY_VERIFY_WITH_TIMEOUT(root->property("done").toInt() == 4, 10000);
+
+        r4Collect(engine);
+        QVERIFY2(ptrs.at(0).isNull() && ptrs.at(1).isNull(),
+                 qPrintable(QStringLiteral("owner alive=%1 waiter alive=%2")
+                                .arg(!ptrs.at(0).isNull())
+                                .arg(!ptrs.at(1).isNull())));
+        delete root;
+        delete engine;
+        QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/SettleGet"));
+        QDBusConnection::sessionBus().unregisterService(QStringLiteral("org.dbusqml.SettleGet"));
+    }
+
+    // Local error (completeLocalError): delivery is queued (an engine
+    // listens), the handler connected after asyncCall returns still fires,
+    // and the reply is collected — the disconnect follows the queued
+    // emission, not the post.
+    void testReplySettleLocalErrorCollected() {
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        r4ExposeConn(engine, conn);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+        QPointer<DBusPendingReply> rp;
+        {
+            // The returned QJSValue is a strong root — scope it so only the
+            // QPointer survives.
+            const QJSValue res = engine->evaluate(
+                QStringLiteral("var errDone = 0; var errName = '';"
+                               "(function(){ let r = conn.asyncCall(msgFactory.poison());"
+                               " r.finished.connect(function(){"
+                               "   if (r.isError) errName = r.error.name; errDone++; });"
+                               " return r; })()"));
+            QVERIFY2(!res.isError(), qPrintable(res.toString()));
+            rp = qobject_cast<DBusPendingReply *>(res.toQObject());
+        }
+        QVERIFY(rp != nullptr);
+        QTRY_VERIFY_WITH_TIMEOUT(engine->evaluate(QStringLiteral("errDone === 1")).toBool(), 5000);
+        QCOMPARE(engine->evaluate(QStringLiteral("errName")).toString(),
+                 QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+        r4Collect(engine);
+        QVERIFY2(conn->findChildren<DBusPendingReply *>().isEmpty(),
+                 "local-error reply still parented to the connection");
+        QVERIFY(rp.isNull());
+        delete engine;
+        delete conn;
+    }
+
+    // Promise asyncCall WITHOUT callbacks: the library-managed reply is
+    // deleted on finish like the callback path (wire reply and local error).
+    void testReplySettlePromiseNoCallbacksDeleted() {
+        DelayEchoObject svc;
+        QVERIFY(QDBusConnection::sessionBus().registerObject(QStringLiteral("/R4Echo"), &svc,
+                                                             QDBusConnection::ExportAllSlots));
+        QVERIFY(
+            QDBusConnection::sessionBus().registerService(QStringLiteral("org.dbusqml.R4Echo")));
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        r4ExposeConn(engine, conn);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+        const QJSValue res = engine->evaluate(
+            QStringLiteral("conn.asyncCall(msgFactory.echo(), null, null);"
+                           "conn.asyncCall(msgFactory.poison(), undefined, undefined); 'ok'"));
+        QVERIFY2(!res.isError(), qPrintable(res.toString()));
+        QList<QPointer<DBusPendingReply>> ptrs;
+        for (DBusPendingReply *r : conn->findChildren<DBusPendingReply *>())
+            ptrs.append(r);
+        QCOMPARE(ptrs.size(), 2);
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < 5000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+            if (ptrs.at(0).isNull() && ptrs.at(1).isNull())
+                break;
+        }
+        r4Collect(engine);
+        QVERIFY2(ptrs.at(0).isNull(), "wire-reply promise without callbacks leaked");
+        QVERIFY2(ptrs.at(1).isNull(), "local-error promise without callbacks leaked");
+        delete engine;
+        delete conn;
+    }
+
+    // The settle contract on each completion path, C++-observed: finished
+    // is delivered exactly once, and afterwards nothing is connected to it
+    // (a late connect never fires). Queued delivery (engine present)
+    // disconnects only after the emission ran.
+    void testReplySettleDeliversOnceThenDisconnects() {
+        const QMetaMethod finishedSig = QMetaMethod::fromSignal(&DBusPendingReply::finished);
+        const QDBusMessage call =
+            QDBusMessage::createMethodCall(QStringLiteral("org.dbusqml.None"), QStringLiteral("/"),
+                                           QStringLiteral("org.dbusqml.None"), QStringLiteral("M"));
+
+        // completeFromReply, engine-less (direct delivery); a second
+        // completion attempt neither re-caches nor re-emits.
+        {
+            ReplyProbe r;
+            QSignalSpy spy(&r, &DBusPendingReply::finished);
+            r.completeFromReply(call.createReply(QVariantList{42}));
+            QCOMPARE(spy.count(), 1);
+            QVERIFY2(!r.isSignalConnected(finishedSig), "receivers still connected after settle");
+            r.completeFromReply(call.createReply(QVariantList{43}));
+            QCOMPARE(r.value().toInt(), 42);
+            int late = 0;
+            QObject::connect(&r, &DBusPendingReply::finished, [&late] { ++late; });
+            r.completeFromReply(call.createReply(QVariantList{44}));
+            QCOMPARE(late, 0);
+        }
+        // completeLocalError is always queued, with or without an engine:
+        // cached at once, still connected after the post, delivered once on
+        // the loop turn, then disconnected.
+        for (const bool withEngine : {false, true}) {
+            QQmlEngine engine;
+            QObject owner;
+            auto *r = new ReplyProbe(&owner);
+            if (withEngine)
+                r->setEngine(&engine);
+            QSignalSpy spy(r, &DBusPendingReply::finished);
+            r->completeLocalError(QStringLiteral("org.dbusqml.E"), QStringLiteral("m"));
+            QVERIFY(r->isFinished());
+            QVERIFY(r->isError());
+            QCOMPARE(spy.count(), 0);
+            QVERIFY2(r->isSignalConnected(finishedSig), "disconnected before the queued emission");
+            QTRY_COMPARE(spy.count(), 1);
+            QVERIFY2(!r->isSignalConnected(finishedSig),
+                     "receivers still connected after delivery");
+            QCoreApplication::processEvents();
+            QCOMPARE(spy.count(), 1);
+            delete r;
+        }
+    }
+
+    // A finished handler that destroys its reply: the settle routine must
+    // not touch the reply after the emission (QPointer guard), on both the
+    // direct and the queued delivery. ASan builds prove the absence of UAF.
+    void testReplySettleHandlerDestroysReply() {
+        {
+            const QDBusMessage call = QDBusMessage::createMethodCall(
+                QStringLiteral("org.dbusqml.None"), QStringLiteral("/"),
+                QStringLiteral("org.dbusqml.None"), QStringLiteral("M"));
+            QPointer<DBusPendingReply> r = new DBusPendingReply;
+            QObject::connect(r.data(), &DBusPendingReply::finished, r.data(),
+                             [&r] { delete r.data(); });
+            r->completeFromReply(call.createReply(QVariantList{1})); // direct delivery
+            QVERIFY(r.isNull());
+        }
+        {
+            QQmlEngine engine;
+            QPointer<DBusPendingReply> r = new DBusPendingReply;
+            r->setEngine(&engine);
+            QObject::connect(r.data(), &DBusPendingReply::finished, r.data(),
+                             [&r] { delete r.data(); });
+            r->completeLocalError(QStringLiteral("org.dbusqml.E"), QStringLiteral("m"));
+            QTRY_VERIFY(r.isNull());
+        }
+    }
+
+    // A local failure on an engine-less creator (a connectToBus connection
+    // has no QML context): finished is still queued, so receivers connected
+    // right after the call get it — the promise overload's reject runs
+    // exactly once and its reply is deleted; a C++ consumer's late-in-turn
+    // connect receives finished.
+    void testReplySettleLocalErrorEngineLessPromiseRejects() {
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        r4ExposeGlobal(engine, "conn", conn);
+        R4MsgFactory factory;
+        r4ExposeGlobal(engine, "msgFactory", &factory);
+        QCOMPARE(qmlEngine(conn), nullptr); // the geometry under test
+
+        // Promise overload, from JS, with only a reject callback.
+        const QJSValue res = engine->evaluate(QStringLiteral(
+            "var rejected = 0; var rejectArg = '';"
+            "conn.asyncCall(msgFactory.poison(), null,"
+            "  function(e){ rejected++; rejectArg = String(e && e.message ? e.message : e); });"
+            "'ok'"));
+        QVERIFY2(!res.isError(), qPrintable(res.toString()));
+        const auto kids = conn->findChildren<DBusPendingReply *>();
+        QCOMPARE(kids.size(), 1);
+        QPointer<DBusPendingReply> promiseReply(kids.first());
+        QTRY_VERIFY_WITH_TIMEOUT(engine->evaluate(QStringLiteral("rejected === 1")).toBool(), 5000);
+        QVERIFY2(engine->evaluate(QStringLiteral("rejectArg"))
+                     .toString()
+                     .contains(QStringLiteral("not marshalable")),
+                 qPrintable(engine->evaluate(QStringLiteral("rejectArg")).toString()));
+        for (int i = 0; i < 5; ++i) {
+            QCoreApplication::processEvents();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        }
+        QVERIFY(engine->evaluate(QStringLiteral("rejected === 1")).toBool()); // exactly once
+        QVERIFY2(promiseReply.isNull(), "promise reply not deleted after reject");
+        delete engine;
+        delete conn;
+    }
+
+    // Returned-pointer overload on the same engine-less connection: a C++
+    // consumer connecting right after the call receives finished.
+    void testReplySettleLocalErrorEngineLessLateConnect() {
+        DBusConnection *conn =
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        R4MsgFactory factory;
+        DBusPendingReply *r = conn->asyncCall(factory.poison());
+        QVERIFY(r != nullptr);
+        QVERIFY(r->isFinished());
+        QSignalSpy spy(r, &DBusPendingReply::finished);
+        QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+        QVERIFY(r->isError());
+        QCOMPARE(r->parent(), conn); // engine-less: keeps its parent
+        delete r;
+        delete conn;
+    }
+
+    // Observation pin: JS in Component.onDestruction runs inside
+    // ~QQmlEngine (Qt 6.11 qqmlengine.cpp: inShutdown, then emitDestruction,
+    // BEFORE any cleanup step). A reply that settles there (local failure)
+    // is handed off while the engine is still intact, ends up in the same
+    // state as a reply handed off just before teardown, and is deleted by
+    // the engine's final sweep — no crash, no leak.
+    void testReplySettleDuringEngineTeardown() {
+        auto *engine = new QQmlEngine;
+        DBusConnection *conn =
+            trackedConnectToBus(qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS"));
+        QVERIFY(conn != nullptr);
+        QQmlEngine::setContextForObject(conn, engine->rootContext());
+        R4MsgFactory factory;
+        R4Recorder recorder;
+        engine->rootContext()->setContextProperty(QStringLiteral("conn"), conn);
+        engine->rootContext()->setContextProperty(QStringLiteral("msgFactory"), &factory);
+        engine->rootContext()->setContextProperty(QStringLiteral("recorder"), &recorder);
+        QQmlComponent comp(engine);
+        comp.setData("import QtQml\n"
+                     "QtObject {\n"
+                     "  Component.onDestruction: {\n"
+                     "    let r = conn.asyncCall(msgFactory.poison());\n"
+                     "    r.finished.connect(function() { recorder.delivered++; });\n"
+                     "    recorder.keep(r);\n"
+                     "  }\n"
+                     "}",
+                     QUrl());
+        QVERIFY2(comp.isReady(), qPrintable(comp.errorString()));
+        QObject *obj = comp.create();
+        QVERIFY(obj != nullptr);
+        obj->setParent(engine); // alive until the engine's own teardown
+
+        delete engine; // onDestruction runs in here
+        QVERIFY2(recorder.kept, "onDestruction never ran during engine teardown");
+        QVERIFY(recorder.handedOff);
+        QVERIFY2(recorder.last.isNull(), "reply settled during teardown leaked");
+        for (int i = 0; i < 5; ++i) {
+            QCoreApplication::processEvents();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        }
+        QCOMPARE(recorder.delivered, 0); // the engine (and the reply) are gone
         delete conn;
     }
 

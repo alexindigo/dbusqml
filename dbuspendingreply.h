@@ -30,12 +30,12 @@ public:
     void setWatcher(QDBusPendingCallWatcher *watcher);
     void setEngine(QQmlEngine *engine) { m_engine = engine; }
 
-    // R4 (road-to-one, Call 4): completed replies are handed to the JS GC
-    // (see onFinished). A reply whose lifetime the LIBRARY manages C++-side
-    // opts out: the promise-style asyncCall overload settles its reply
-    // itself (deleteLater, CF-11) and never returns it to JS — handing it
-    // off would unparent it with no JS wrapper ever created (nothing to
-    // collect it → leak), and its C++ settle contract already covers it.
+    // Lifetime policy (applied once, by settle()): a completed reply with an
+    // engine is handed to the JS garbage collector (R4). A reply whose
+    // lifetime the LIBRARY manages C++-side opts out BEFORE it can complete:
+    // the promise-style asyncCall overload settles its reply itself
+    // (deleteLater, CF-11) and never returns it to JS — handing it off would
+    // unparent it with no JS wrapper ever created (nothing to collect it).
     void setGcHandoffEnabled(bool on) { m_gcHandoff = on; }
 
     // Complete LOCALLY with a D-Bus error — no wire round-trip. The
@@ -45,8 +45,7 @@ public:
     void completeLocalError(const QString &name, const QString &message);
 
     // P9 (features train, Phase 8): complete from an already-received
-    // wire reply (coalesced-Get waiters share one reply). Same caching
-    // + delivery convention as onFinished.
+    // wire reply (coalesced-Get waiters share one reply).
     void completeFromReply(const QDBusMessage &reply);
 
     bool isFinished() const { return m_finished; }
@@ -61,22 +60,41 @@ public:
     QVariantList values() const;
 
 signals:
+    // Delivered exactly once; every receiver is disconnected right after
+    // the emission returns (a settled reply never changes again, and a
+    // handler that captures its reply must not keep it alive). A
+    // connection made after delivery never fires.
     void finished();
 
 private:
+    struct Outcome {
+        bool isError = false;
+        bool isValid = false;
+        DBusError error;
+        QVariantList values; // unwrapped
+    };
+    enum class Delivery {
+        Queued,           // always on a later loop turn
+        QueuedWhenEngine, // queued if an engine may be listening, else direct
+        Direct,           // always in this stack frame
+    };
+
     void onFinished(QDBusPendingCallWatcher *watcher);
+    // The ONLY completion path: cache → mark finished → deliver finished
+    // once (deliverFinished) → lifetime policy. Every entry point calls it.
+    void settle(Outcome outcome, Delivery delivery);
+    // Emit finished, then disconnect all its receivers.
+    void deliverFinished();
 
     QPointer<QDBusPendingCallWatcher> m_watcher;
+    // Set by settle(); from then on the accessors answer from the cache —
+    // the reply is self-contained after the watcher is deleted.
     bool m_finished = false;
-
-    // Cached after watcher finishes — makes the reply self-contained
-    // so it can be safely accessed after the watcher is deleted.
     bool m_isError = false;
     bool m_isValid = false;
     DBusError m_error;
     QVariant m_value;
     QVariantList m_values;
-    bool m_cached = false;
     QPointer<QQmlEngine> m_engine;
     bool m_gcHandoff = true;
 };

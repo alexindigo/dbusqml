@@ -9,12 +9,13 @@
 
 DBusPendingReply::DBusPendingReply(QObject *parent) : QObject(parent) {}
 
-// Ownership audit (0.7.0): DBusPendingReply is created C++-side (by the
-// proxy's call/getProperty and DbusMethodHelper::callMethod, and by
-// DBusConnection::asyncCall) parented to its creator — parented ⇒ never
-// JS-GC collected, destroyed with its owner. No ownership flip exists on
-// this path (verified by the 0.7.0 sweep); the reply data survives past
-// finished() via caching, so the QML consumer can read it at leisure.
+// Ownership: DBusPendingReply is created C++-side (by the proxy's
+// call/getProperty and DbusMethodHelper::callMethod, and by
+// DBusConnection::asyncCall) parented to its creator — in flight it is never
+// JS-GC collected. settle() applies the one lifetime policy at completion:
+// with an engine (and the handoff enabled) the reply is handed to the JS GC;
+// without one it keeps its parent and dies with its owner. The reply data
+// survives past finished() via caching, so consumers read it at leisure.
 
 DBusPendingReply::~DBusPendingReply() {}
 
@@ -29,19 +30,19 @@ void DBusPendingReply::setWatcher(QDBusPendingCallWatcher *watcher) {
 }
 
 bool DBusPendingReply::isError() const {
-    if (m_cached)
+    if (m_finished)
         return m_isError;
     return m_watcher ? m_watcher->isError() : true;
 }
 
 bool DBusPendingReply::isValid() const {
-    if (m_cached)
+    if (m_finished)
         return m_isValid;
     return m_watcher && m_watcher->isValid() && !m_watcher->isError();
 }
 
 DBusError DBusPendingReply::error() const {
-    if (m_cached)
+    if (m_finished)
         return m_error;
     if (m_watcher)
         return DBusError(m_watcher->error());
@@ -70,7 +71,7 @@ QJSValue DBusPendingReply::valuesJs() {
 }
 
 QVariant DBusPendingReply::value() const {
-    if (m_cached)
+    if (m_finished)
         return m_value;
     if (!m_watcher || m_watcher->isError())
         return {};
@@ -84,7 +85,7 @@ QVariant DBusPendingReply::value() const {
 }
 
 QVariantList DBusPendingReply::values() const {
-    if (m_cached)
+    if (m_finished)
         return m_values;
     if (!m_watcher || m_watcher->isError())
         return {};
@@ -95,80 +96,41 @@ QVariantList DBusPendingReply::values() const {
     return args;
 }
 
+static QVariantList unwrapAll(QVariantList args) {
+    for (QVariant &arg : args)
+        arg = unwrapDbus(arg);
+    return args;
+}
+
 void DBusPendingReply::completeLocalError(const QString &name, const QString &message) {
-    m_isError = true;
-    m_isValid = false;
-    m_error = DBusError(name, message);
-    m_cached = true;
-    m_finished = true;
-    // Same delivery convention as onFinished: queued when an engine may be
-    // listening, direct otherwise.
-    if (m_engine)
-        QMetaObject::invokeMethod(this, "finished", Qt::QueuedConnection);
-    else
-        emit finished();
+    Outcome outcome;
+    outcome.isError = true;
+    outcome.error = DBusError(name, message);
+    // Always queued: a local failure settles inside the call that created
+    // the reply, before any caller (JS, the promise overload, or a C++
+    // consumer — with or without an engine) could connect to finished.
+    settle(std::move(outcome), Delivery::Queued);
 }
 
 void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
-    if (m_watcher && !m_cached) {
-        m_isError = watcher->isError();
-        m_isValid = watcher->isValid() && !watcher->isError();
-
-        if (m_isError) {
-            m_error = DBusError(watcher->error());
-        } else {
-            QDBusMessage reply = watcher->reply();
-            QVariantList args = reply.arguments();
-            for (int i = 0; i < args.size(); ++i)
-                args[i] = unwrapDbus(args[i]);
-            m_values = args;
-            m_value = args.isEmpty() ? QVariant() : args.first();
-        }
-
-        m_cached = true;
-    }
-
-    m_finished = true;
+    Outcome outcome;
+    outcome.isError = watcher->isError();
+    outcome.isValid = watcher->isValid() && !watcher->isError();
+    if (outcome.isError)
+        outcome.error = DBusError(watcher->error());
+    else
+        outcome.values = unwrapAll(watcher->reply().arguments());
     // Clean up the watcher. SingleShotConnection means this is the only
     // slot, so the signal emission completes before the destructor runs.
     // Immediate delete (not deleteLater) is safe here.
     delete watcher;
     m_watcher = nullptr;
-
-    // Queue the emission so a synchronous reply.finished.connect() right
-    // after call() always lands first. QPointer guard: if the engine is
-    // destroyed before the queued call runs, m_engine is null and the
-    // emission is skipped — no crash.
-    if (m_engine) {
-        QMetaObject::invokeMethod(this, "finished", Qt::QueuedConnection);
-    } else {
-        emit finished();
-    }
-
-    // R4 (road-to-one, owner Call 4 = safe-A): hand completed replies to
-    // the JS garbage collector — SYNCHRONOUSLY, in this same stack frame.
-    // The 27a5f72 attempt posted the handoff as a queued event and died in
-    // ccaade6 (the posted lambda ran during engine teardown, touching
-    // half-destroyed engine state). A synchronous handoff runs while the
-    // engine is verifiably alive (m_engine is a QPointer — nulled the
-    // moment ~QQmlEngine starts), so teardown never observes a reparent.
-    //
-    // Self-check first: in the direct-emit branch a re-entrant handler may
-    // have destroyed this reply inside finished — nothing left to hand off.
-    QPointer<DBusPendingReply> self(this);
-    if (!self)
-        return;
-    if (m_engine && m_gcHandoff) {
-        setParent(nullptr);
-        QQmlEngine::setObjectOwnership(this, QQmlEngine::JavaScriptOwnership);
-    }
-    // No engine (pure C++ consumer): keep the parent — current behavior.
-    // (27a5f72 had this branch; kept.)
+    settle(std::move(outcome), Delivery::QueuedWhenEngine);
 }
 
 void DBusPendingReply::completeFromReply(const QDBusMessage &reply) {
-    // P9: share one wire reply across coalesced waiters. Mirrors the
-    // onFinished caching exactly (error vs value split + unwrap).
+    // P9: share one wire reply across coalesced waiters (same error vs
+    // value split + unwrap as onFinished).
     // DELIVERY NOTE: onFinished queues finished() when an engine is
     // present (queued delivery needs the loop turning); coalesced
     // waiters complete SYNCHRONOUSLY here (direct emit) because the
@@ -176,22 +138,70 @@ void DBusPendingReply::completeFromReply(const QDBusMessage &reply) {
     // the waiters' data is cached and finished() observers fire
     // without another loop turn (probe-verified: queued-emit waiters
     // stall at 1/8 on one connection, direct-emit completes 8/8).
-    if (m_cached)
-        return;
+    Outcome outcome;
     if (reply.type() == QDBusMessage::ErrorMessage) {
-        m_isError = true;
-        m_isValid = false;
-        m_error = DBusError(reply.errorName(), reply.errorMessage());
+        outcome.isError = true;
+        outcome.error = DBusError(reply.errorName(), reply.errorMessage());
     } else {
-        m_isError = false;
-        QVariantList args = reply.arguments();
-        for (int i = 0; i < args.size(); ++i)
-            args[i] = unwrapDbus(args[i]);
-        m_values = args;
-        m_value = args.isEmpty() ? QVariant() : args.first();
-        m_isValid = true;
+        outcome.isValid = true;
+        outcome.values = unwrapAll(reply.arguments());
     }
-    m_cached = true;
+    settle(std::move(outcome), Delivery::Direct);
+}
+
+void DBusPendingReply::settle(Outcome outcome, Delivery delivery) {
+    if (m_finished)
+        return; // one-shot: a settled reply never changes again
+    m_isError = outcome.isError;
+    m_isValid = outcome.isValid;
+    m_error = outcome.error;
+    m_value = outcome.values.isEmpty() ? QVariant() : outcome.values.first();
+    m_values = std::move(outcome.values);
     m_finished = true;
+
+    // Queued delivery lets a synchronous reply.finished.connect() right
+    // after the call (or after a local failure) land first. The disconnect
+    // lives in deliverFinished, so it follows the emission, never the post.
+    QPointer<DBusPendingReply> self(this);
+    if (delivery == Delivery::Queued || (m_engine && delivery == Delivery::QueuedWhenEngine))
+        QMetaObject::invokeMethod(this, &DBusPendingReply::deliverFinished, Qt::QueuedConnection);
+    else
+        deliverFinished();
+    // A re-entrant handler in the direct delivery may have destroyed this
+    // reply — nothing left to hand off.
+    if (!self)
+        return;
+
+    // R4 (road-to-one, owner Call 4 = safe-A): hand completed replies to
+    // the JS garbage collector — SYNCHRONOUSLY, in this same stack frame.
+    // The 27a5f72 attempt posted the handoff as a queued event and died in
+    // ccaade6 (the posted lambda ran during engine teardown, touching
+    // half-destroyed engine state). A synchronous handoff runs while the
+    // engine is verifiably alive (m_engine is a QPointer), so teardown
+    // never observes a reparent. The queued finished posted above is
+    // delivered before any deferred delete a later collection posts.
+    // Settling DURING engine destruction is reachable only through JS run
+    // by Component.onDestruction (a call that fails locally): Qt runs those
+    // handlers first in ~QQmlEngine, before any cleanup step, so the handoff
+    // still meets an intact engine and the final sweep deletes the reply
+    // (pinned: testReplySettleDuringEngineTeardown). Wire completions
+    // arrive as queued watcher signals, never inside the destructor.
+    if (m_engine && m_gcHandoff) {
+        setParent(nullptr);
+        QQmlEngine::setObjectOwnership(this, QQmlEngine::JavaScriptOwnership);
+    }
+    // No engine (pure C++ consumer): keep the parent.
+}
+
+void DBusPendingReply::deliverFinished() {
+    QPointer<DBusPendingReply> self(this);
     emit finished();
+    // A handler may have destroyed the reply.
+    if (!self)
+        return;
+    // finished is one-shot: drop every receiver so a JS handler that
+    // captures this reply (r.finished.connect(() => r.value)) no longer
+    // roots it — the connection held the closure strongly, the closure held
+    // the reply's wrapper, and the cycle was never collected.
+    disconnect(this, &DBusPendingReply::finished, nullptr, nullptr);
 }

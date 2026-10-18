@@ -137,6 +137,10 @@ private:
     // disconnect (dead on a dead bus).
     void armLossProbe();
 
+    // Both asyncCall overloads: marshal guard, send, and a reply parented
+    // to this connection. gcHandoff is fixed before the reply can settle (a
+    // local failure settles inside this call).
+    DBusPendingReply *startCall(const DBusMessage &message, bool gcHandoff);
     // CF-5: minimum spacing between loss-probe pings. A constant, not
     // user-facing — it bounds idle bus traffic, not a UX timeout.
     static constexpr int kLossProbeRearmMs = 3000;

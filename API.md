@@ -817,19 +817,32 @@ Represents the result of an asynchronous D-Bus call.
 
 | Signal | Description |
 | :--- | :--- |
-| `finished` | Emitted when the reply arrives. |
+| `finished` | Emitted exactly once, when the reply arrives (or the call fails locally). |
+
+`finished` is one-shot: right after it is delivered, every receiver is
+disconnected. Connect your handler right after the call — it is delivered on
+a later event-loop turn, so a synchronous `finished.connect(...)` always lands
+first, even for a call that fails locally (on any connection, including one
+from `connectToBus`). A `finished.connect(...)` made
+after delivery never fires; check `isFinished` instead. `finished` is also the
+change signal of every reply property, so bindings on `reply.value` etc.
+update once on completion — a settled reply never changes again.
 
 #### Lifetime
 
 A reply's data is cached at completion, so `value`/`values`/`error` stay
 readable after `finished` — the reply is self-contained. Ownership: while the
 call is in flight the reply is parented to its creator; **at completion it is
-handed to the JavaScript garbage collector** (synchronously, before your
-`finished` handler can run). Keep a reference (`var r = ...; r.finished.connect(...)`)
-and the reply stays alive as long as you hold it; drop every reference and the
-next `gc()` collects it — fire-and-forget calls no longer accumulate on the
-connection. A pure C++ consumer (no QML engine) keeps the old behavior: the
-reply stays parented to its creator.
+handed to the JavaScript garbage collector** — on every completion path
+(`call`, `asyncCall`, `getProperty` including coalesced duplicates, and local
+failures). Keep a reference and the reply stays alive as long as you hold it;
+drop every reference and the next `gc()` collects it — fire-and-forget calls
+do not accumulate on the connection. A handler that captures its reply
+(`var r = ...; r.finished.connect(() => use(r.value))`, the example above) is
+safe: the one-shot disconnect releases the handler, so it does not keep the
+reply alive. A pure C++ consumer (no QML engine) keeps the reply parented to
+its creator. The promise-style `asyncCall(message, resolve, reject)` manages
+its own reply and deletes it once it settles, with or without callbacks.
 
 ---
 
