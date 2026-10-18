@@ -271,6 +271,17 @@ plus user/system drop-ins (`$XDG_CONFIG_HOME/dbusqml/types/`,
 `$XDG_DATA_DIRS/*/dbusqml/types/`, `$DBUSQML_TYPES_PATH` override) —
 see `docs/TYPES.md`.
 
+### Decode boundary
+
+All incoming argument consumers share `decodeMessage`: the recursive
+signature reader and native-container unwrapping carry one failure state and
+the same protocol depth budget. A failed read stops the enclosing walk and
+discards the whole message's decoded arguments. Replies settle as local
+`Failed` errors, signals warn once and are dropped, and adaptor calls answer
+`InvalidArgs` before dispatch or property mutation. `DBus::Struct` and the
+string-array demarshaller reuse that reader rather than maintaining separate
+container loops.
+
 ## Dependencies (`DBus` proxy + `DBusAdaptor`)
 
 | Dependency | Why |

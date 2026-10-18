@@ -4,6 +4,7 @@
 #include "dbusintrospection.h"
 #include "dbuspendingreply.h"
 #include "dbustypes.h"
+#include "dbusutils.h"
 
 #include <QDBusArgument>
 #include <QDBusConnection>
@@ -849,20 +850,27 @@ void DBusProxy::fetchProperties() {
     auto watcher = new QDBusPendingCallWatcher(pending, this);
 
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
+        // Keep Qt's existing top-level signature check without asking its
+        // container demarshaller to read the body. Our reader owns that walk.
         QDBusPendingReply<QVariantMap> reply = *w;
-        if (!reply.isError()) {
-            QVariantMap props = reply.value();
+        const bool replyError = reply.isError();
+        QVariantList args;
+        QDBusError error = reply.error();
+        if (!error.isValid() && decodeMessage(w->reply(), args, &error) && !args.isEmpty()) {
+            QVariantMap props = args.first().toMap();
             for (auto it = props.begin(); it != props.end(); ++it) {
                 QString qmlName = dbusPropToQml(it.key());
                 // Don't overwrite dynamic method callbacks with property values
                 if (!m_methodArgTypes.contains(it.key()) && !m_methodArgTypes.contains(qmlName)) {
                     m_qmlToDbusName.insert(qmlName, it.key());
-                    insert(qmlName, unwrapDbus(it.value()));
+                    insert(qmlName, it.value());
                 }
             }
             m_status = Ready;
         } else {
             m_status = Error;
+            if (!replyError && error.isValid())
+                qWarning("dbusqml: GetAll failed: %s", qPrintable(error.message()));
         }
         w->deleteLater();
         emit statusChanged();
@@ -873,8 +881,8 @@ void DBusProxy::fetchProperties() {
 void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
     if (msg.type() == QDBusMessage::SignalMessage) {
         QVariantList unwrapped;
-        for (const QVariant &arg : msg.arguments())
-            unwrapped.append(unwrapDbus(arg));
+        if (!decodeMessage(msg, unwrapped))
+            return;
         emit signalReceived(msg.member(), unwrapped);
 
         if (msg.member() == "PropertiesChanged") {
@@ -889,18 +897,18 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
                 // CF-21: unwrap FIRST (adaptor dispatch does the same) — a
                 // QDBusArgument-shaped a{sv} fails qdbus_cast to an empty
                 // map silently, leaving the UI stale with zero diagnostics.
-                QVariantMap changed = qdbus_cast<QVariantMap>(unwrapDbus(msg.arguments()[1]));
+                QVariantMap changed = unwrapped.at(1).toMap();
                 for (auto it = changed.begin(); it != changed.end(); ++it) {
                     QString qmlName = dbusPropToQml(it.key());
                     m_qmlToDbusName.insert(qmlName, it.key());
-                    insert(qmlName, unwrapDbus(it.value()));
+                    insert(qmlName, it.value());
                 }
             }
             // A3/D3: invalidated_properties re-Get — the client re-fetches
             // each name; on error the stale value is kept with one warning
             // (never silently dropped, never silently stale).
             if (msg.arguments().size() >= 3) {
-                const QStringList invalidated = qdbus_cast<QStringList>(msg.arguments()[2]);
+                const QStringList invalidated = unwrapped.at(2).toStringList();
                 if (!invalidated.isEmpty())
                     refetchInvalidated(invalidated);
             }
@@ -1073,24 +1081,27 @@ void DBusProxy::refetchInvalidated(const QStringList &names) {
         msg.setArguments({m_iface, wireName});
         auto pending = m_bus.asyncCall(msg, m_callTimeout);
         auto *watcher = new QDBusPendingCallWatcher(pending, this);
-        connect(watcher, &QDBusPendingCallWatcher::finished, this,
-                [this, wireName, service, path, iface, epoch](QDBusPendingCallWatcher *w) {
-                    QDBusPendingReply<QVariant> reply = *w;
-                    if (reply.isError()) {
-                        qWarning(
-                            "dbusqml: re-fetch of %s failed: %s — keeping the last known value",
-                            qPrintable(wireName), qPrintable(reply.error().message()));
-                    } else if (epoch == m_refetchEpoch && service == m_service && path == m_path &&
-                               iface == m_iface) {
-                        const QString qmlName = dbusPropToQml(wireName);
-                        m_qmlToDbusName.insert(qmlName, wireName);
-                        insert(qmlName, unwrapDbus(reply.value()));
-                    } else {
-                        qWarning("dbusqml: dropping stale re-fetch of %s (destination changed)",
-                                 qPrintable(wireName));
-                    }
-                    w->deleteLater();
-                });
+        connect(
+            watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, wireName, service, path, iface, epoch](QDBusPendingCallWatcher *w) {
+                QDBusPendingReply<QVariant> reply = *w;
+                QVariantList args;
+                QDBusError error = reply.error();
+                const bool decoded = !error.isValid() && decodeMessage(w->reply(), args, &error);
+                if (!decoded || args.isEmpty()) {
+                    qWarning("dbusqml: re-fetch of %s failed: %s — keeping the last known value",
+                             qPrintable(wireName), qPrintable(error.message()));
+                } else if (epoch == m_refetchEpoch && service == m_service && path == m_path &&
+                           iface == m_iface) {
+                    const QString qmlName = dbusPropToQml(wireName);
+                    m_qmlToDbusName.insert(qmlName, wireName);
+                    insert(qmlName, args.first());
+                } else {
+                    qWarning("dbusqml: dropping stale re-fetch of %s (destination changed)",
+                             qPrintable(wireName));
+                }
+                w->deleteLater();
+            });
     }
 }
 

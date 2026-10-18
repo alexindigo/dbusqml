@@ -1,4 +1,5 @@
 #include "dbusobjectmanager.h"
+#include "dbusutils.h"
 
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
@@ -79,25 +80,29 @@ void DBusObjectManager::fetchManagedObjects() {
     auto pending = conn.asyncCall(msg);
     auto *watcher = new QDBusPendingCallWatcher(pending, this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
-        if (!w->isError() && !w->reply().arguments().isEmpty()) {
-            m_objects = unwrapDbus(w->reply().arguments().first()).toMap();
+        QVariantList args;
+        QDBusError error = w->error();
+        const bool decoded = !error.isValid() && decodeMessage(w->reply(), args, &error);
+        if (decoded && !args.isEmpty()) {
+            m_objects = args.first().toMap();
             if (!m_ready) {
                 m_ready = true;
                 emit readyChanged();
             }
             emit managedObjectsChanged();
-        } else if (w->isError()) {
-            qWarning("dbusqml: GetManagedObjects failed: %s", qPrintable(w->error().message()));
+        } else if (error.isValid()) {
+            qWarning("dbusqml: GetManagedObjects failed: %s", qPrintable(error.message()));
         }
         w->deleteLater();
     });
 }
 
 void DBusObjectManager::onInterfacesAdded(const QDBusMessage &msg) {
-    if (msg.arguments().size() < 2)
+    QVariantList args;
+    if (!decodeMessage(msg, args) || args.size() < 2)
         return;
-    const QString objectPath = unwrapDbus(msg.arguments().at(0)).toString();
-    const QVariantMap ifaces = unwrapDbus(msg.arguments().at(1)).toMap();
+    const QString objectPath = args.at(0).toString();
+    const QVariantMap ifaces = args.at(1).toMap();
 
     QVariantMap entry = m_objects.value(objectPath).toMap();
     for (auto it = ifaces.cbegin(); it != ifaces.cend(); ++it)
@@ -108,10 +113,11 @@ void DBusObjectManager::onInterfacesAdded(const QDBusMessage &msg) {
 }
 
 void DBusObjectManager::onInterfacesRemoved(const QDBusMessage &msg) {
-    if (msg.arguments().size() < 2)
+    QVariantList args;
+    if (!decodeMessage(msg, args) || args.size() < 2)
         return;
-    const QString objectPath = unwrapDbus(msg.arguments().at(0)).toString();
-    const QStringList ifaces = unwrapDbus(msg.arguments().at(1)).toStringList();
+    const QString objectPath = args.at(0).toString();
+    const QStringList ifaces = args.at(1).toStringList();
 
     if (m_objects.contains(objectPath)) {
         QVariantMap entry = m_objects.value(objectPath).toMap();

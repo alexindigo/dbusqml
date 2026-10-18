@@ -1,4 +1,5 @@
 #include "dbussignalwatcher.h"
+#include "dbusutils.h"
 
 #include <QDBusConnection>
 
@@ -90,8 +91,8 @@ void DBusSignalWatcher::resubscribe() {
 
 void DBusSignalWatcher::onSignal(const QDBusMessage &msg) {
     QVariantList args;
-    for (const QVariant &a : msg.arguments())
-        args << unwrapDbus(a);
+    if (!decodeMessage(msg, args))
+        return;
     emit received(msg.member(), args);
 }
 

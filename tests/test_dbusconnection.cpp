@@ -18,9 +18,11 @@
 #include <QDBusVariant>
 #include <QDBusVirtualObject>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <iostream>
 #include <cstdio>
 #include <cstring>
+#include <csignal>
 #include <thread>
 #include <atomic>
 #include <vector>
@@ -32,6 +34,8 @@
 #include "../dbuspendingreply.h"
 #include "../dbus.h"
 #include "../dbusadaptor.h"
+#include "../dbussignalwatcher.h"
+#include "../dbusobjectmanager.h"
 #include "dbustypes.h"
 
 // a{sa{sv}}-ish container shapes for the test service replies.
@@ -639,8 +643,169 @@ public:
     Q_INVOKABLE void kill() { delete conn; }
 };
 
+class DecodeProbeAdaptor : public DBusAdaptor {
+    Q_OBJECT
+    Q_PROPERTY(QVariant payload MEMBER payload)
+public:
+    QVariant payload = QStringLiteral("unchanged");
+    int calls = 0;
+    Q_INVOKABLE QString accept(QVariant, QVariant) {
+        ++calls;
+        return QStringLiteral("accepted");
+    }
+};
+
+class DecodeInjectionObject : public QDBusVirtualObject {
+public:
+    QVariant poison;
+    DecodeProbeAdaptor *target = nullptr;
+    bool set = false;
+    bool mapReply = false;
+    bool wrongType = false;
+    int gets = 0;
+    QString introspect(const QString &) const override {
+        return QStringLiteral("<interface name='org.dbusqml.DecodeProbe'>"
+                              "<property name='Payload' type='v' access='readwrite'/>"
+                              "</interface>");
+    }
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.member() == QLatin1String("Introspect"))
+            return false;
+        if (target) {
+            QDBusMessage injected = msg;
+            injected.setArguments(set ? QVariantList{QStringLiteral("org.dbusqml.DecodeProbe"),
+                                                     QStringLiteral("Payload"), poison}
+                                      : QVariantList{QStringLiteral("prefix"), poison});
+            return target->handleMessage(injected, conn);
+        }
+        if (msg.member() == QLatin1String("Get"))
+            ++gets;
+        if (wrongType)
+            return conn.send(msg.createReply(QStringLiteral("not-a-container")));
+        if (mapReply)
+            return conn.send(msg.createReply(QVariantList{
+                QVariantMap{{QStringLiteral("Prefix"), 7}, {QStringLiteral("Payload"), poison}}}));
+        if (msg.member() == QLatin1String("Get"))
+            return conn.send(msg.createReply({poison}));
+        return conn.send(msg.createReply({QStringLiteral("prefix"), poison}));
+    }
+};
+
 class TestDBusConnection : public QObject {
     Q_OBJECT
+
+    void runDecodeConsumer(const QString &scenario, const QVariant &poison) {
+        DecodeInjectionObject service;
+        service.poison = poison;
+        service.wrongType = scenario.endsWith(QLatin1String("-type"));
+        auto bus = QDBusConnection::sessionBus();
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/DecodeProbe"), &service));
+        const auto cleanup =
+            qScopeGuard([bus]() mutable { bus.unregisterObject(QStringLiteral("/DecodeProbe")); });
+        if (scenario.startsWith(QLatin1String("adaptor"))) {
+            DecodeProbeAdaptor adaptor;
+            adaptor.setIface(QStringLiteral("org.dbusqml.DecodeProbe"));
+            service.target = &adaptor;
+            service.set = scenario == QLatin1String("adaptor-set");
+            auto call = QDBusMessage::createMethodCall(
+                bus.baseService(), QStringLiteral("/DecodeProbe"),
+                service.set ? QStringLiteral("org.freedesktop.DBus.Properties")
+                            : QStringLiteral("org.dbusqml.DecodeProbe"),
+                service.set ? QStringLiteral("Set") : QStringLiteral("Accept"));
+            const auto reply = bus.call(call, QDBus::Block, 500);
+            QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+            QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+            QCOMPARE(reply.errorMessage(), QStringLiteral("arguments could not be decoded"));
+            QCOMPARE(adaptor.calls, 0);
+            QCOMPARE(adaptor.payload.toString(), QStringLiteral("unchanged"));
+        } else if (scenario.startsWith(QLatin1String("getall")) ||
+                   scenario == QLatin1String("inventory")) {
+            ConnMessageCapture capture;
+            service.mapReply = true;
+            if (scenario.startsWith(QLatin1String("getall"))) {
+                DBusProxy proxy;
+                proxy.setService(bus.baseService());
+                proxy.setPath(QStringLiteral("/DecodeProbe"));
+                proxy.setIface(QStringLiteral("org.dbusqml.DecodeProbe"));
+                QTRY_VERIFY_WITH_TIMEOUT(
+                    proxy.status() == DBusProxy::Ready || proxy.status() == DBusProxy::Error, 500);
+                QCOMPARE(proxy.status(), DBusProxy::Error);
+                QVERIFY(!proxy.value(QStringLiteral("prefix")).isValid());
+            } else {
+                DBusObjectManager manager;
+                manager.setService(bus.baseService());
+                manager.setPath(QStringLiteral("/DecodeProbe"));
+                manager.componentComplete();
+                QTRY_VERIFY_WITH_TIMEOUT(
+                    capture.contains(QStringLiteral("reply could not be decoded")), 500);
+                QVERIFY(!manager.ready());
+                QVERIFY(manager.managedObjects().isEmpty());
+            }
+            if (!service.wrongType)
+                QVERIFY(capture.contains(QStringLiteral("reply could not be decoded")));
+        } else if (scenario == QLatin1String("coalesced-get") ||
+                   scenario.startsWith(QLatin1String("refetch"))) {
+            DBusProxy proxy;
+            proxy.setPropertiesEnabled(false);
+            proxy.setService(bus.baseService());
+            proxy.setPath(QStringLiteral("/DecodeProbe"));
+            proxy.setIface(QStringLiteral("org.dbusqml.DecodeProbe"));
+            if (scenario.startsWith(QLatin1String("refetch"))) {
+                proxy.insert(QStringLiteral("payload"), QStringLiteral("unchanged"));
+                auto signal =
+                    QDBusMessage::createSignal(QStringLiteral("/DecodeProbe"),
+                                               QStringLiteral("org.freedesktop.DBus.Properties"),
+                                               QStringLiteral("PropertiesChanged"));
+                signal.setArguments({QStringLiteral("org.dbusqml.DecodeProbe"), QVariantMap{},
+                                     QStringList{QStringLiteral("Payload")}});
+                ConnMessageCapture capture;
+                QVERIFY(QMetaObject::invokeMethod(&proxy, "onPropertiesChanged",
+                                                  Qt::DirectConnection,
+                                                  Q_ARG(QDBusMessage, signal)));
+                QTRY_VERIFY_WITH_TIMEOUT(
+                    capture.contains(QStringLiteral("re-fetch of Payload failed")) ||
+                        proxy.value(QStringLiteral("payload")).toString() !=
+                            QStringLiteral("unchanged"),
+                    500);
+                QCOMPARE(proxy.value(QStringLiteral("payload")).toString(),
+                         QStringLiteral("unchanged"));
+                QVERIFY(capture.contains(QStringLiteral("re-fetch of Payload failed")));
+                if (!service.wrongType)
+                    QVERIFY(capture.contains(QStringLiteral("reply could not be decoded")));
+                return;
+            }
+            auto *owner = proxy.getProperty(QStringLiteral("Payload"));
+            auto *waiter = proxy.getProperty(QStringLiteral("Payload"));
+            QTRY_VERIFY_WITH_TIMEOUT(owner->isFinished() && waiter->isFinished(), 500);
+            QCOMPARE(service.gets, 1);
+            for (auto *reply : {owner, waiter}) {
+                QVERIFY(reply->isError());
+                QCOMPARE(reply->error().message(), QStringLiteral("reply could not be decoded"));
+                QVERIFY(reply->values().isEmpty());
+            }
+        } else {
+            QQmlEngine engine;
+            SessionBusConnection connection;
+            r4ExposeConn(&engine, &connection);
+            DBusMessage call;
+            call.setService(bus.baseService());
+            call.setPath(QStringLiteral("/DecodeProbe"));
+            call.setIface(QStringLiteral("org.dbusqml.DecodeProbe"));
+            call.setMember(QStringLiteral("Reply"));
+            engine.evaluate(QStringLiteral("var resolved = 0, rejected = 0, failure;"));
+            connection.asyncCall(
+                call, engine.evaluate(QStringLiteral("(function() { ++resolved; })")),
+                engine.evaluate(QStringLiteral("(function(e) { ++rejected; failure = e; })")));
+            QTRY_COMPARE_WITH_TIMEOUT(
+                engine.globalObject().property(QStringLiteral("rejected")).toInt(), 1, 500);
+            QCOMPARE(engine.globalObject().property(QStringLiteral("resolved")).toInt(), 0);
+            const auto failure = engine.globalObject().property(QStringLiteral("failure"));
+            QCOMPARE(failure.property(QStringLiteral("name")).toString(),
+                     QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+            QCOMPARE(failure.property(QStringLiteral("message")).toString(),
+                     QStringLiteral("reply could not be decoded"));
+        }
+    }
 
 private slots:
     void initTestCase() {
@@ -657,7 +822,271 @@ private slots:
         QTest::qWait(200);
     }
 
-    void cleanupTestCase() { stopPrivateBus(); }
+    void cleanupTestCase() {
+        if (s_payloadEcho) {
+            s_payloadEcho->terminate();
+            s_payloadEcho->waitForFinished(3000);
+            delete s_payloadEcho;
+            s_payloadEcho = nullptr;
+        }
+        stopPrivateBus();
+    }
+
+    void testDecodeDepth_data() {
+        QTest::addColumn<QString>("scenario");
+        for (const char *name :
+             {"wire33",          "wire64",        "wire-struct64", "reply",
+              "watcher-reply",   "signal",        "properties",    "objects-added",
+              "objects-removed", "adaptor",       "adaptor-set",   "promise",
+              "coalesced-get",   "nested-map",    "nested-aa",     "nested-array-struct",
+              "variant64",       "empty-array64", "getall",        "inventory",
+              "nested-av32",     "nested-asv17",  "refetch",       "getall-type",
+              "refetch-type"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+    }
+
+    void testDecodeDepth() {
+        QFETCH(QString, scenario);
+        // Run each kill-class case in its own process. The one-second bound
+        // begins at the decode, after private-bus/helper startup; a wedged
+        // cursor cannot hang the suite or append indefinitely.
+        if (!qEnvironmentVariableIsSet("DBUSQML_DECODE_CHILD")) {
+            QProcess child;
+            auto env = QProcessEnvironment::systemEnvironment();
+            env.insert(QStringLiteral("DBUSQML_DECODE_CHILD"), QStringLiteral("1"));
+            child.setProcessEnvironment(env);
+            child.setProcessChannelMode(QProcess::MergedChannels);
+            child.setUnixProcessParameters(QProcess::UnixProcessFlag::CreateNewSession);
+            child.start(QCoreApplication::applicationFilePath(),
+                        {QStringLiteral("testDecodeDepth:") + scenario});
+            QVERIFY(child.waitForStarted(3000));
+            QByteArray output;
+            QElapsedTimer startup;
+            startup.start();
+            while (!output.contains("DECODE_READY") && startup.elapsed() < 10000 &&
+                   child.state() != QProcess::NotRunning) {
+                child.waitForReadyRead(100);
+                output += child.readAll();
+            }
+            const bool ready = output.contains("DECODE_READY");
+            QElapsedTimer decode;
+            decode.start();
+            while (!output.contains("DECODE_DONE") && decode.elapsed() < 1000 &&
+                   child.state() != QProcess::NotRunning) {
+                child.waitForReadyRead(10);
+                output += child.readAll();
+            }
+            const qint64 decodeMs = decode.elapsed();
+            const bool completed = output.contains("DECODE_DONE") && decodeMs < 1000;
+            if (!completed && child.state() != QProcess::NotRunning)
+                ::kill(-static_cast<pid_t>(child.processId()), SIGKILL);
+            child.waitForFinished(5000);
+            output += child.readAll();
+            qInfo().noquote() << output;
+            qInfo("decode outcome observed in %lld ms", static_cast<long long>(decodeMs));
+            QVERIFY2(ready, "decode subprocess never reached its ready barrier");
+            QVERIFY2(completed, "decode did not finish successfully within 1 second");
+            QCOMPARE(child.exitStatus(), QProcess::NormalExit);
+            QCOMPARE(child.exitCode(), 0);
+            return;
+        }
+
+        if (scenario.startsWith(QLatin1String("wire"))) {
+            QDBusMessage call = QDBusMessage::createMethodCall(
+                QStringLiteral("org.dbusqml.PayloadEcho"), QStringLiteral("/PayloadEcho"),
+                QStringLiteral("org.dbusqml.PayloadEcho"),
+                scenario == QLatin1String("wire33")   ? QStringLiteral("Deep33")
+                : scenario == QLatin1String("wire64") ? QStringLiteral("Deep64")
+                                                      : QStringLiteral("DeepStruct64"));
+            QDBusMessage wire = QDBusConnection::sessionBus().call(call, QDBus::Block, 3000);
+            QCOMPARE(wire.type(), QDBusMessage::ReplyMessage);
+            QVERIFY(wire.arguments().first().userType() == qMetaTypeId<QDBusArgument>());
+            const int arrays = scenario == QLatin1String("wire33") ? 1 : 32;
+            const bool outerStruct = scenario == QLatin1String("wire-struct64");
+            QCOMPARE(wire.signature(), (outerStruct ? QStringLiteral("(") : QString()) +
+                                           QString(arrays, QLatin1Char('a')) +
+                                           QString(outerStruct ? 31 : 32, QLatin1Char('(')) +
+                                           QStringLiteral("i") + QString(32, QLatin1Char(')')));
+            qInfo("DECODE_READY");
+            QVariant value;
+            if (outerStruct) {
+                const auto decoded =
+                    qdbus_cast<DBus::Struct>(wire.arguments().first().value<QDBusArgument>());
+                value = decoded.value;
+            } else {
+                DBusPendingReply reply;
+                reply.completeFromReply(wire);
+                QVERIFY(!reply.isError());
+                value = reply.value();
+            }
+            for (int i = 0; i < arrays + 32; ++i) {
+                const QVariantList level = value.toList();
+                QCOMPARE(level.size(), 1);
+                value = level.first();
+            }
+            QCOMPARE(value.toInt(), 42);
+        } else if (scenario == QLatin1String("variant64") ||
+                   scenario == QLatin1String("empty-array64") ||
+                   scenario == QLatin1String("nested-av32") ||
+                   scenario == QLatin1String("nested-asv17")) {
+            // Valid boundary shapes through NATIVE carriers (Qt-demarshaled
+            // QVariantList/QVariantMap of QDBusVariant). Depth is a per-path
+            // nesting count (libdbus validate_body_helper), never a
+            // per-element sum: 32 lists + 32 variants = 64; 17 maps + 17
+            // dict entries + 17 variants = 51.
+            QVariant value;
+            int levels = 0;
+            if (scenario == QLatin1String("variant64") ||
+                scenario == QLatin1String("empty-array64")) {
+                value = scenario == QLatin1String("variant64") ? QVariant(42)
+                                                               : QVariant(QVariantList{});
+                const int variants = scenario == QLatin1String("variant64") ? 64 : 63;
+                for (int i = 0; i < variants; ++i)
+                    value = QVariant::fromValue(QDBusVariant(value));
+            } else if (scenario == QLatin1String("nested-av32")) {
+                levels = 32;
+                value = QVariant(QVariantList{QVariant::fromValue(QDBusVariant(QVariant(42)))});
+                for (int i = 1; i < levels; ++i)
+                    value = QVariant(QVariantList{QVariant::fromValue(QDBusVariant(value))});
+            } else {
+                levels = 17;
+                value = QVariant(42);
+                for (int i = 0; i < levels; ++i)
+                    value = QVariant(QVariantMap{
+                        {QStringLiteral("k"), QVariant::fromValue(QDBusVariant(value))}});
+            }
+            auto call = QDBusMessage::createMethodCall(
+                QStringLiteral("org.dbusqml.Unused"), QStringLiteral("/"),
+                QStringLiteral("org.dbusqml.Unused"), QStringLiteral("Unused"));
+            qInfo("DECODE_READY");
+            DBusPendingReply reply;
+            reply.completeFromReply(call.createReply({value}));
+            QVERIFY(!reply.isError());
+            if (scenario == QLatin1String("variant64")) {
+                QCOMPARE(reply.value().toInt(), 42);
+            } else if (scenario == QLatin1String("empty-array64")) {
+                QCOMPARE(reply.value().toList().size(), 0);
+            } else {
+                value = reply.value();
+                for (int i = 0; i < levels; ++i) {
+                    if (scenario == QLatin1String("nested-av32")) {
+                        const QVariantList level = value.toList();
+                        QCOMPARE(level.size(), 1);
+                        value = level.first();
+                    } else {
+                        const QVariantMap level = value.toMap();
+                        QCOMPARE(level.size(), 1);
+                        value = level.value(QStringLiteral("k"));
+                    }
+                }
+                // Both native-carrier shapes bottom out at the same leaf.
+                QCOMPARE(value.toInt(), 42);
+            }
+        } else {
+            // Impossible on a validating bus, but possible through Qt's
+            // in-process delivery/public QDBusMessage APIs. Keep the same
+            // real consumers: no private decode-depth override/test hook.
+            QVariant poison;
+            int variants = 62;
+            if (scenario == QLatin1String("nested-map"))
+                poison =
+                    echoPayload(QStringLiteral("a{sv}"),
+                                QVariantList{QVariant(QVariantMap{{QStringLiteral("key"), 42}})});
+            else if (scenario == QLatin1String("nested-aa"))
+                poison =
+                    echoPayload(QStringLiteral("aa(i)"),
+                                QVariantList{QVariant(QVariantList{QVariant(QVariantList{42})})});
+            else if (scenario == QLatin1String("nested-array-struct")) {
+                poison =
+                    echoPayload(QStringLiteral("a(i)"), QVariantList{QVariant(QVariantList{42})});
+                variants = 63;
+            } else
+                poison = echoPayload(QStringLiteral("(iav)"),
+                                     QVariantList{7, QVariant(QVariantList{9, 10})});
+            QVERIFY(poison.userType() == qMetaTypeId<QDBusArgument>());
+            for (int i = 0; i < variants; ++i)
+                poison = QVariant::fromValue(QDBusVariant(poison));
+            QDBusMessage call = QDBusMessage::createMethodCall(
+                QDBusConnection::sessionBus().baseService(), QStringLiteral("/DecodeProbe"),
+                QStringLiteral("org.dbusqml.DecodeProbe"), QStringLiteral("Accept"));
+            QDBusMessage wire = call.createReply({QStringLiteral("prefix"), poison});
+            qInfo("DECODE_READY");
+            if (scenario == QLatin1String("reply") || scenario == QLatin1String("watcher-reply") ||
+                scenario.startsWith(QLatin1String("nested-"))) {
+                DBusPendingReply reply;
+                QSignalSpy finished(&reply, &DBusPendingReply::finished);
+                if (scenario != QLatin1String("watcher-reply"))
+                    reply.completeFromReply(wire);
+                else
+                    reply.setWatcher(
+                        new QDBusPendingCallWatcher(QDBusPendingCall::fromCompletedCall(wire)));
+                QTRY_VERIFY_WITH_TIMEOUT(reply.isFinished(), 500);
+                QVERIFY(reply.isError());
+                QVERIFY(!reply.isValid());
+                QCOMPARE(reply.error().name(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+                QCOMPARE(reply.error().message(), QStringLiteral("reply could not be decoded"));
+                QVERIFY(!reply.value().isValid());
+                QVERIFY(reply.values().isEmpty());
+                QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 500);
+            } else if (scenario == QLatin1String("signal") ||
+                       scenario == QLatin1String("properties") ||
+                       scenario.startsWith(QLatin1String("objects-"))) {
+                QDBusMessage signal = QDBusMessage::createSignal(
+                    QStringLiteral("/DecodeProbe"), QStringLiteral("org.dbusqml.DecodeProbe"),
+                    QStringLiteral("Changed"));
+                signal.setArguments({QStringLiteral("prefix"), poison});
+                ConnMessageCapture capture;
+                if (scenario == QLatin1String("signal")) {
+                    DBusSignalWatcher receiver;
+                    QSignalSpy delivered(&receiver, &DBusSignalWatcher::received);
+                    QVERIFY(QMetaObject::invokeMethod(&receiver, "onSignal", Qt::DirectConnection,
+                                                      Q_ARG(QDBusMessage, signal)));
+                    QCOMPARE(delivered.count(), 0);
+                } else if (scenario == QLatin1String("properties")) {
+                    DBusProxy receiver;
+                    receiver.insert(QStringLiteral("prefix"), 11);
+                    signal = QDBusMessage::createSignal(
+                        QStringLiteral("/DecodeProbe"),
+                        QStringLiteral("org.freedesktop.DBus.Properties"),
+                        QStringLiteral("PropertiesChanged"));
+                    signal.setArguments({QString(),
+                                         QVariantMap{{QStringLiteral("Prefix"), 99},
+                                                     {QStringLiteral("Payload"), poison}},
+                                         QStringList{}});
+                    QSignalSpy delivered(&receiver, &DBusProxy::signalReceived);
+                    QVERIFY(QMetaObject::invokeMethod(&receiver, "onPropertiesChanged",
+                                                      Qt::DirectConnection,
+                                                      Q_ARG(QDBusMessage, signal)));
+                    QCOMPARE(delivered.count(), 0);
+                    QCOMPARE(receiver.value(QStringLiteral("prefix")).toInt(), 11);
+                    QCOMPARE(receiver.keys().size(), 1);
+                } else {
+                    DBusObjectManager receiver;
+                    QSignalSpy delivered(&receiver, &DBusObjectManager::managedObjectsChanged);
+                    QSignalSpy added(&receiver, &DBusObjectManager::interfacesAdded);
+                    QSignalSpy removed(&receiver, &DBusObjectManager::interfacesRemoved);
+                    const char *slot = scenario.endsWith(QLatin1String("added"))
+                                           ? "onInterfacesAdded"
+                                           : "onInterfacesRemoved";
+                    QVERIFY(QMetaObject::invokeMethod(&receiver, slot, Qt::DirectConnection,
+                                                      Q_ARG(QDBusMessage, signal)));
+                    QCOMPARE(delivered.count(), 0);
+                    QCOMPARE(added.count(), 0);
+                    QCOMPARE(removed.count(), 0);
+                    QVERIFY(receiver.managedObjects().isEmpty());
+                }
+                QCOMPARE(capture.messages.size(), 1);
+                QVERIFY(capture.contains(QStringLiteral("signal could not be decoded")));
+            } else {
+                // Further consumer cases use the same synthetic payload via
+                // a real local-loop reply/call (implemented by the fixture).
+                runDecodeConsumer(scenario, poison);
+                if (QTest::currentTestFailed())
+                    return;
+            }
+        }
+        qInfo("DECODE_DONE");
+    }
 
     // ---- Walker parity (B2/B3/B4/B5/B6, fix-parity) ----
     // Position-parity matrix: the same value read/written at a top-level and

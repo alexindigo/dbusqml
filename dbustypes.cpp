@@ -9,7 +9,13 @@ QDBusArgument &operator<<(QDBusArgument &arg, const DBusAsArray &a) {
 }
 
 const QDBusArgument &operator>>(const QDBusArgument &arg, DBusAsArray &a) {
-    const QVariant got = readBySignature(arg);
+    DecodeState state;
+    const QVariant got = readBySignature(arg, state);
+    if (!state.ok) {
+        a.value.clear();
+        qWarning("dbusqml: array could not be decoded");
+        return arg;
+    }
     if (got.userType() == QMetaType::QStringList)
         a.value = got.toStringList();
     else {
@@ -84,10 +90,9 @@ QDBusArgument &operator<<(QDBusArgument &arg, const DBus::Struct &s) {
 }
 
 const QDBusArgument &operator>>(const QDBusArgument &arg, DBus::Struct &s) {
-    arg.beginStructure();
-    s.value.clear();
-    while (!arg.atEnd())
-        s.value.append(readBySignature(arg));
-    arg.endStructure();
+    DecodeState state;
+    s.value = readBySignature(arg, state).toList();
+    if (!state.ok)
+        qWarning("dbusqml: struct could not be decoded");
     return arg;
 }

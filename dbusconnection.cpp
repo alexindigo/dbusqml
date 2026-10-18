@@ -134,10 +134,8 @@ QJSValue precisionSafeToScriptValue(QQmlEngine *engine, const QVariant &v) {
             obj.setProperty(it.key(), precisionSafeToScriptValue(engine, it.value()));
         return obj;
     }
-    if (v.userType() == qMetaTypeId<QDBusArgument>())
+    if (v.userType() == qMetaTypeId<QDBusArgument>() || v.userType() == qMetaTypeId<QDBusVariant>())
         return precisionSafeToScriptValue(engine, unwrapDbus(v));
-    if (v.userType() == qMetaTypeId<QDBusVariant>())
-        return precisionSafeToScriptValue(engine, v.value<QDBusVariant>().variant());
     return engine->toScriptValue(v);
 }
 
@@ -165,92 +163,11 @@ QJSValue variantToJs(QQmlEngine *engine, const QVariant &v) {
 // containers so QML can traverse them as JavaScript objects. Handles nested
 // a{sv}, a{ss}, av, as, ao, etc.
 QVariant unwrapDbus(const QVariant &v) {
-    if (v.userType() == qMetaTypeId<QDBusVariant>())
-        return unwrapDbus(v.value<QDBusVariant>().variant());
-
-    if (v.userType() == qMetaTypeId<QDBusUnixFileDescriptor>()) {
-        // Unix fd delivered as a plain int (dbus-next + Nemo shape). The
-        // RECEIVER closes the fd — takeFileDescriptor() transfers ownership.
-        // CF-25: -1 on invalid, same as the read path (one sentinel).
-        QDBusUnixFileDescriptor fd = v.value<QDBusUnixFileDescriptor>();
-        if (!fd.isValid())
-            return QVariant::fromValue(-1);
-        return QVariant::fromValue(fd.takeFileDescriptor());
-    }
-
-    if (v.userType() == qMetaTypeId<QDBusArgument>()) {
-        const QDBusArgument arg = v.value<QDBusArgument>();
-        const QString sig = arg.currentSignature();
-
-        // Top-level dict with string keys — fast path via the concrete
-        // QVariantMap read. Nested dicts (a{sa{sv}} etc.) are handled by
-        // the recursive readBySignature branch below.
-        if (sig.startsWith("a{") && sig.length() == 4 && sig[2] == 's') {
-            QVariantMap map;
-            arg >> map;
-            QVariantMap out;
-            for (auto it = map.begin(); it != map.end(); ++it)
-                out.insert(it.key(), unwrapDbus(it.value()));
-            return out;
-        }
-        // Array of variants — safe to iterate with QVariant target at top level.
-        if (sig == "av") {
-            QVariantList list;
-            arg.beginArray();
-            while (!arg.atEnd()) {
-                QVariant elem;
-                arg >> elem;
-                list.append(unwrapDbus(elem));
-            }
-            arg.endArray();
-            return list;
-        }
-        // Concrete-type arrays: demarshal via the C++ type, then flatten
-        // to QVariantList. Iterating a concrete-typed QDBusArgument with
-        // an untyped QVariant target crashes inside libdbus.
-        if (sig == "ao") {
-            QList<QDBusObjectPath> paths;
-            arg >> paths;
-            QVariantList out;
-            out.reserve(paths.size());
-            for (const auto &p : paths)
-                out.append(p.path());
-            return out;
-        }
-        if (sig == "as") {
-            QStringList list;
-            arg >> list;
-            QVariantList out;
-            out.reserve(list.size());
-            for (const auto &s : list)
-                out.append(s);
-            return out;
-        }
-        if (sig == "ay") {
-            QByteArray bytes;
-            arg >> bytes;
-            return bytes;
-        }
-        // B6: bare object-path / signature carriers (e.g. the a{so} fast
-        // path's values) unwrap to plain strings — no opaque gadgets in QML
-        // (nested positions already arrive as strings via readBySignature).
-        if (sig == "o") {
-            QDBusObjectPath p;
-            arg >> p;
-            return p.path();
-        }
-        if (sig == "g") {
-            QDBusSignature g;
-            arg >> g;
-            return g.signature();
-        }
-
-        // Everything else — nested containers, dict arrays, structs,
-        // tuples, deep nesting. readBySignature recurses per-element and
-        // never touches operator>>(QDBusArgument, QVariant&).
-        return readBySignature(arg);
-    }
-    return v;
+    DecodeState state;
+    const QVariant result = unwrapDbus(v, state);
+    if (!state.ok)
+        qWarning("dbusqml: value could not be decoded");
+    return result;
 }
 
 // Normalize DBus.* gadgets to marshalable values, recursing into containers.
@@ -1407,8 +1324,7 @@ void DBusConnection::asyncCall(const DBusMessage &message, const QJSValue &resol
                                      qPrintable(thrown.toString()));
                     }
                 } else if (resolve.isCallable()) {
-                    QVariant unwrapped = unwrapDbus(reply->value());
-                    QJSValue val = engine ? variantToJs(engine.data(), unwrapped)
+                    QJSValue val = engine ? variantToJs(engine.data(), reply->value())
                                           : QJSValue(reply->value().toString());
                     QJSValue thrown = resolve.call({val});
                     if (thrown.isError())

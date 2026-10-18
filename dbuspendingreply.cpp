@@ -1,5 +1,6 @@
 #include "dbuspendingreply.h"
 #include "dbusconnection.h"
+#include "dbusutils.h"
 
 #include <QDBusMessage>
 #include <QDBusPendingReply>
@@ -76,12 +77,8 @@ QVariant DBusPendingReply::value() const {
     if (!m_watcher || m_watcher->isError())
         return {};
 
-    QDBusMessage reply = m_watcher->reply();
-    if (reply.arguments().isEmpty())
-        return {};
-
-    QVariant val = reply.arguments().first();
-    return unwrapDbus(val);
+    const QVariantList decoded = values();
+    return decoded.isEmpty() ? QVariant() : decoded.first();
 }
 
 QVariantList DBusPendingReply::values() const {
@@ -90,15 +87,8 @@ QVariantList DBusPendingReply::values() const {
     if (!m_watcher || m_watcher->isError())
         return {};
 
-    QVariantList args = m_watcher->reply().arguments();
-    for (int i = 0; i < args.size(); ++i)
-        args[i] = unwrapDbus(args[i]);
-    return args;
-}
-
-static QVariantList unwrapAll(QVariantList args) {
-    for (QVariant &arg : args)
-        arg = unwrapDbus(arg);
+    QVariantList args;
+    decodeMessage(m_watcher->reply(), args);
     return args;
 }
 
@@ -118,8 +108,14 @@ void DBusPendingReply::onFinished(QDBusPendingCallWatcher *watcher) {
     outcome.isValid = watcher->isValid() && !watcher->isError();
     if (outcome.isError)
         outcome.error = DBusError(watcher->error());
-    else
-        outcome.values = unwrapAll(watcher->reply().arguments());
+    else {
+        QDBusError error;
+        if (!decodeMessage(watcher->reply(), outcome.values, &error)) {
+            outcome.isError = true;
+            outcome.isValid = false;
+            outcome.error = DBusError(error);
+        }
+    }
     // Clean up the watcher. SingleShotConnection means this is the only
     // slot, so the signal emission completes before the destructor runs.
     // Immediate delete (not deleteLater) is safe here.
@@ -144,7 +140,12 @@ void DBusPendingReply::completeFromReply(const QDBusMessage &reply) {
         outcome.error = DBusError(reply.errorName(), reply.errorMessage());
     } else {
         outcome.isValid = true;
-        outcome.values = unwrapAll(reply.arguments());
+        QDBusError error;
+        if (!decodeMessage(reply, outcome.values, &error)) {
+            outcome.isError = true;
+            outcome.isValid = false;
+            outcome.error = DBusError(error);
+        }
     }
     settle(std::move(outcome), Delivery::Direct);
 }

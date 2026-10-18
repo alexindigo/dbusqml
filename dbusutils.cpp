@@ -218,15 +218,34 @@ QString DBusUtils::fdUrl(int fd) {
     return QStringLiteral("file:///proc/self/fd/%1").arg(fd);
 }
 
-QVariant readBySignature(const QDBusArgument &arg, int depth) {
-    // B1: recursion depth cap 32 (Nemo precedent) — remote signature data
-    // flows into these walkers verbatim; unbounded recursion would exhaust
-    // the stack. Over the cap: warn + loud fail (never silent).
-    if (depth > 32) {
-        qWarning("dbusqml: readBySignature: recursion depth cap (32) exceeded — failing loud");
+// D-Bus specification, "Valid Signatures" and "Container types";
+// libdbus dbus-protocol.h: DBUS_MAXIMUM_TYPE_RECURSION_DEPTH == 32.
+// dbus-marshal-validate.c validate_body_helper caps dynamic nesting (including
+// variants and dict entries) at twice that value. A variant starts a new
+// signature, but does not reset the body's total depth.
+static bool enterDecodeContainer(DecodeState &state, DecodeDepth &depth, QChar kind) {
+    constexpr int maximumTypeRecursionDepth = 32;
+    ++depth.total;
+    if (kind == QLatin1Char('a'))
+        ++depth.arrays;
+    else if (kind == QLatin1Char('('))
+        ++depth.structs;
+    else if (kind == QLatin1Char('v'))
+        depth.arrays = depth.structs = 0;
+    state.ok = state.ok && depth.arrays <= maximumTypeRecursionDepth &&
+               depth.structs <= maximumTypeRecursionDepth &&
+               depth.total <= 2 * maximumTypeRecursionDepth;
+    return state.ok;
+}
+
+QVariant readBySignature(const QDBusArgument &arg, DecodeState &state, DecodeDepth depth) {
+    if (!state.ok)
         return {};
-    }
     const QString sig = arg.currentSignature();
+    if (!sig.isEmpty() &&
+        (sig[0] == QLatin1Char('a') || sig[0] == QLatin1Char('(') || sig[0] == QLatin1Char('v')) &&
+        !enterDecodeContainer(state, depth, sig[0]))
+        return {};
 
     // Basic types — single char signatures
     if (sig == "y") {
@@ -292,7 +311,7 @@ QVariant readBySignature(const QDBusArgument &arg, int depth) {
     if (sig == "v") {
         QDBusVariant v;
         arg >> v;
-        return unwrapDbus(v.variant());
+        return unwrapDbus(v.variant(), state, depth);
     }
     if (sig == "ay") {
         QByteArray v;
@@ -412,40 +431,35 @@ QVariant readBySignature(const QDBusArgument &arg, int depth) {
     // close it. Never touches operator>>(QDBusArgument, QVariant&).
     if (sig.startsWith(QStringLiteral("a{"))) {
         // Array of dict entries — a{KV}. Read entries one by one.
+        // Every begin* pairs with its end* even on failure: QDBusArgument
+        // frees the parser state a begin* allocates only in the matching
+        // end* — an early return without it leaks (CI ASan gate).
         QVariantMap map;
         arg.beginMap();
         while (!arg.atEnd()) {
+            DecodeDepth entryDepth = depth;
+            if (!enterDecodeContainer(state, entryDepth, QLatin1Char('{'))) {
+                arg.endMap();
+                return {};
+            }
             arg.beginMapEntry();
-            QVariant key = readBySignature(arg, depth + 1);
-            QVariant value = readBySignature(arg, depth + 1);
-            map.insert(key.toString(), unwrapDbus(value));
+            const QVariant key = readBySignature(arg, state, entryDepth);
+            if (!state.ok) {
+                arg.endMapEntry();
+                arg.endMap();
+                return {};
+            }
+            const QVariant value = readBySignature(arg, state, entryDepth);
+            if (!state.ok) {
+                arg.endMapEntry();
+                arg.endMap();
+                return {};
+            }
+            map.insert(key.toString(), value);
             arg.endMapEntry();
         }
         arg.endMap();
         return map;
-    }
-    if (sig.startsWith(QStringLiteral("a(")) || sig.startsWith(QStringLiteral("a["))) {
-        // Array of structs — a(...). Elements are structs.
-        QVariantList out;
-        arg.beginArray();
-        while (!arg.atEnd())
-            out.append(readBySignature(arg, depth + 1));
-        arg.endArray();
-        return out;
-    }
-    // B2: nested av/ao — the top-level twin (unwrapDbus) handles these; the
-    // nested positions ((sav), a{sav}, a{sao}, …) previously fell through to
-    // the unsupported-signature warning and DROPPED the element.
-    if (sig == QLatin1String("av")) {
-        QVariantList out;
-        arg.beginArray();
-        while (!arg.atEnd()) {
-            QVariant elem;
-            arg >> elem;
-            out.append(unwrapDbus(elem));
-        }
-        arg.endArray();
-        return out;
     }
     if (sig == QLatin1String("ao")) {
         QList<QDBusObjectPath> paths;
@@ -456,12 +470,20 @@ QVariant readBySignature(const QDBusArgument &arg, int depth) {
             out.append(p.path());
         return out;
     }
-    if (sig.startsWith(QStringLiteral("aa"))) {
-        // Array of arrays — aa* (including aa{...}). Elements are arrays.
+    if (sig.startsWith(QStringLiteral("aa")) || sig.startsWith(QStringLiteral("a(")) ||
+        sig == QLatin1String("av")) {
+        // One recursive array walk for structs, arrays and variants. It is
+        // shared by top-level and nested positions, with no depth reset.
         QVariantList out;
         arg.beginArray();
-        while (!arg.atEnd())
-            out.append(readBySignature(arg, depth + 1));
+        while (!arg.atEnd()) {
+            const QVariant value = readBySignature(arg, state, depth);
+            if (!state.ok) {
+                arg.endArray();
+                return {};
+            }
+            out.append(value);
+        }
         arg.endArray();
         return out;
     }
@@ -469,8 +491,14 @@ QVariant readBySignature(const QDBusArgument &arg, int depth) {
         // Struct / tuple — (...). Members read per-signature.
         QVariantList members;
         arg.beginStructure();
-        while (!arg.atEnd())
-            members.append(readBySignature(arg, depth + 1));
+        while (!arg.atEnd()) {
+            const QVariant value = readBySignature(arg, state, depth);
+            if (!state.ok) {
+                arg.endStructure();
+                return {};
+            }
+            members.append(value);
+        }
         arg.endStructure();
         return members;
     }
@@ -488,7 +516,86 @@ QVariant readBySignature(const QDBusArgument &arg, int depth) {
         return QVariant::fromValue(fd.takeFileDescriptor());
     }
 
-    // Unrecognized signature — make the gap visible in logs.
-    qWarning("DBus: readBySignature: unsupported signature %s", qPrintable(sig));
+    // Never retry an unconsumed value. The message boundary owns reporting.
+    state.ok = false;
     return {};
+}
+
+QVariant unwrapDbus(const QVariant &v, DecodeState &state, DecodeDepth depth) {
+    if (!state.ok)
+        return {};
+    const int type = v.userType();
+    if (type == qMetaTypeId<QDBusArgument>())
+        return readBySignature(v.value<QDBusArgument>(), state, depth);
+    if (type == qMetaTypeId<QDBusVariant>()) {
+        if (!enterDecodeContainer(state, depth, QLatin1Char('v')))
+            return {};
+        return unwrapDbus(v.value<QDBusVariant>().variant(), state, depth);
+    }
+    if (type == qMetaTypeId<QVariantMap>() || type == qMetaTypeId<QVariantList>()) {
+        if (!enterDecodeContainer(state, depth, QLatin1Char('a')))
+            return {};
+        if (type == qMetaTypeId<QVariantMap>()) {
+            const auto map = v.toMap();
+            QVariantMap result;
+            for (auto it = map.cbegin(); it != map.cend(); ++it) {
+                // One dict-entry container per entry; the value (always a
+                // variant on the wire) counts itself in the recursive call.
+                DecodeDepth child = depth;
+                if (!enterDecodeContainer(state, child, QLatin1Char('{')))
+                    return {};
+                const QVariant value = unwrapDbus(it.value(), state, child);
+                if (!state.ok)
+                    return {};
+                result.insert(it.key(), value);
+            }
+            return result;
+        }
+        QVariantList result;
+        for (const auto &item : v.toList()) {
+            const QVariant value = unwrapDbus(item, state, depth);
+            if (!state.ok)
+                return {};
+            result.append(value);
+        }
+        return result;
+    }
+    // Preserve native scalar carriers for C++ consumers, as before. The
+    // signature reader still normalizes o/g inside raw container carriers.
+    if (type == qMetaTypeId<QDBusUnixFileDescriptor>()) {
+        QDBusUnixFileDescriptor fd = v.value<QDBusUnixFileDescriptor>();
+        return fd.isValid() ? fd.takeFileDescriptor() : -1;
+    }
+    if ((type == QMetaType::QStringList || type == QMetaType::QByteArray) &&
+        !enterDecodeContainer(state, depth, QLatin1Char('a')))
+        return {};
+    if (!v.isValid())
+        state.ok = false;
+    return state.ok ? v : QVariant();
+}
+
+bool decodeMessage(const QDBusMessage &message, QVariantList &args, QDBusError *error) {
+    args.clear();
+    if (error)
+        *error = QDBusError();
+    DecodeState state;
+    QVariantList decoded;
+    for (const auto &arg : message.arguments()) {
+        const QVariant value = unwrapDbus(arg, state);
+        if (!state.ok) {
+            if (message.type() == QDBusMessage::SignalMessage)
+                qWarning("dbusqml: signal could not be decoded — dropping message");
+            else if (error)
+                *error = QDBusError(message.type() == QDBusMessage::MethodCallMessage
+                                        ? QDBusError::InvalidArgs
+                                        : QDBusError::Failed,
+                                    message.type() == QDBusMessage::MethodCallMessage
+                                        ? QStringLiteral("arguments could not be decoded")
+                                        : QStringLiteral("reply could not be decoded"));
+            return false;
+        }
+        decoded.append(value);
+    }
+    args = std::move(decoded);
+    return true;
 }

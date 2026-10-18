@@ -1415,7 +1415,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
     QDBusConnection conn = bus();
     const QString interface = msg.interface();
     const QString member = msg.member();
-    const QVariantList args = msg.arguments();
+    QVariantList args;
     const QMetaObject *meta = metaObject();
     const bool replyRequired = msg.isReplyRequired();
     // B4: honor NO_REPLY_EXPECTED — the handler runs, but no reply (success
@@ -1441,6 +1441,12 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
     // Properties interface
     if (interface == QStringLiteral("org.freedesktop.DBus.Introspectable"))
         return false;
+
+    QDBusError decodeError;
+    if (!decodeMessage(msg, args, &decodeError)) {
+        sendReply(msg.createErrorReply(decodeError));
+        return true;
+    }
 
     if (interface == QStringLiteral("org.freedesktop.DBus.Properties")) {
         // Validate the interface name if provided
@@ -1565,7 +1571,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                                          QStringLiteral("No such property: %1").arg(propName)));
                 return true;
             }
-            QVariant value = unwrapDbus(args[2]);
+            QVariant value = args[2];
             // A2: same dual lookup as Get — exact QML name, then folded wire name.
             // A14/D5: both folds accepted on lookup (client vs server fold).
             const QStringList propCandidates = candidateQmlNames(propName);
@@ -1599,11 +1605,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
     }
 
     // Method dispatch
-    QVariantList dbusArgs = msg.arguments();
-    // Unwrap D-Bus containers so QML/JS receives traversable data
-    // (arrays, dicts, structs) instead of opaque QDBusArgument objects.
-    for (QVariant &a : dbusArgs)
-        a = unwrapDbus(a);
+    QVariantList dbusArgs = args;
 
     // P10a: served option-whitelist. When the method declares an _options
     // entry AND the last in-arg is a{sv}, filter the dict BEFORE dispatch:

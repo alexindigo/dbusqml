@@ -28,7 +28,10 @@ Every signature-walking mechanism (marshal, unmarshal, coerce, guard) must
 behave identically at top level and at every nested position:
 
 - Test matrix: same value × top-level/nested × read/write.
-- A walker that recurses needs the depth cap (32) and loud failure —
+- A walker that recurses needs a protocol-appropriate depth cap and loud failure
+  (decode: arrays ≤32 and structs ≤32 per signature, total containers ≤64,
+  including variants and dict entries). A failed read stops the enclosing walk
+  and discards the partial result —
   unbounded recursion is a hang, not a bug report.
 - Declared signatures drive; inference is the fallback, never the silent
   override (D4: gadget passthrough only on signature equality).

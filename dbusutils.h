@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDBusConnection>
+#include <QDBusError>
 #include <QDBusMessage>
 #include <QJSValue>
 #include <QObject>
@@ -74,9 +75,23 @@ private:
     QJSValue makeArrayBuffer(const QByteArray &bytes);
 };
 
-// Library-internal (not QML API). Signature-driven demarshaller; never
-// operator>>(QDBusArgument, QVariant) inside a container.
-QVariant readBySignature(const QDBusArgument &arg, int depth = 0);
+// Library-internal (not QML API). The same failure state crosses every
+// recursive reader; a failed read never yields a partial container.
+struct DecodeState {
+    bool ok = true;
+};
+struct DecodeDepth {
+    int arrays = 0;
+    int structs = 0;
+    int total = 0;
+};
+QVariant readBySignature(const QDBusArgument &arg, DecodeState &state, DecodeDepth depth = {});
+QVariant unwrapDbus(const QVariant &value, DecodeState &state, DecodeDepth depth = {});
+
+// Atomic message boundary shared by replies, signals and adaptor dispatch.
+// On failure, args is empty. Signals warn once here; callers of replies/calls
+// receive Failed/InvalidArgs respectively, without a recursive warning storm.
+bool decodeMessage(const QDBusMessage &message, QVariantList &args, QDBusError *error = nullptr);
 
 inline void checkedSend(const QDBusConnection &c, const QDBusMessage &m, const char *what,
                         const QString &member = {}) {

@@ -156,6 +156,18 @@ falls back to inference.
 
 #### Data Signals
 
+**Decode failures:** incoming messages are decoded atomically: no partial
+argument list or property update is delivered. A method reply that cannot
+be decoded completes its `DBusPendingReply` with the local error
+`org.freedesktop.DBus.Error.Failed`, message `"reply could not be decoded"`
+(empty `value`/`values`); promise-style calls invoke `reject`. This includes
+coalesced `getProperty` waiters. Undecodable signals (including
+`PropertiesChanged`, ObjectManager notifications and `DBusSignalWatcher`)
+are dropped with one warning per delivery. Internal property/inventory
+fetches keep their existing data on decode failure and report the failure;
+an initial proxy fetch enters `Error`, and an initial ObjectManager fetch
+does not set `ready`.
+
 | Signal | Arguments | Description |
 | :--- | :--- | :--- |
 | `signalReceived(name, args)` | `string name`, `list args` | Emitted when a D-Bus signal is received. |
@@ -381,6 +393,12 @@ points at `_members`.
 `{dbusError, name, message}` shape with a dotted `name`) produces an error
 reply with exactly that name; any other thrown value produces
 `org.freedesktop.DBus.Error.Failed` with the exception message.
+
+An incoming method call whose arguments cannot be decoded is answered with
+`org.freedesktop.DBus.Error.InvalidArgs` (`"arguments could not be decoded"`)
+before the handler runs. This also covers `Properties.Set`: its property is
+left unchanged. As with other adaptor errors, `NO_REPLY_EXPECTED` suppresses
+the reply.
 
 **Name acquisition:** `allowReplacement`, `replaceExisting`, and
 `queueOnBusy` map onto the D-Bus `RequestName` flags (all default false).
@@ -1009,9 +1027,14 @@ watchers, ObjectManager, fds, lossless 64-bit).
   death usually ends the session; custom-bus consumers rebuild on their own
   signal). If the bus ITSELF dies and returns, destroy and recreate the
   proxy/connection.
-- **Signature recursion depth is capped at 32.** Hostile or pathological
-  signatures (remote-influenced) fail loud with a warning instead of
-  exhausting the stack.
+- **Decode nesting follows the D-Bus limits:** up to 32 array levels and 32
+  struct levels per signature, independently, and up to 64 total container
+  levels in a message value (including variants and dict entries). A variant
+  starts a new signature but retains the total-depth budget. These follow
+  libdbus's `DBUS_MAXIMUM_TYPE_RECURSION_DEPTH` (32) and its doubled body-depth
+  limit. The send-side signature walkers currently retain their depth-32
+  guard; exceeding a decode limit takes the failure paths above, never a
+  non-advancing loop.
 
 ### Signal handlers on `DBus` elements run in C++-object context
 

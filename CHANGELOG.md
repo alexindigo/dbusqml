@@ -13,6 +13,14 @@ infrastructure that materially affects consumer trust).
 
 ### Fixed
 
+- **Deep incoming messages could hang the decoder** — recursive readers now
+  propagate failure and discard partial results instead of repeatedly reading
+  the same argument. Decode limits follow D-Bus: 32 array and 32 struct levels
+  independently, up to 64 total including dynamic variant nesting. Undecodable
+  replies become local `Failed` errors (including coalesced Gets and promises),
+  signals are dropped with one warning, and adaptor calls/Set reply
+  `InvalidArgs` before invoking a handler or changing a property.
+
 - **Settled held replies accumulated on long-lived adaptors** — settled
   `DBusHeldReply` handles are now unparented and collectable once JavaScript
   drops them, while their engine is alive. Without a live engine they retain

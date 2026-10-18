@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "dbusconnection.h"
+#include "deep_payload.h"
 
 class PayloadEchoObject : public QDBusVirtualObject {
 public:
@@ -25,25 +26,32 @@ public:
     }
 
     bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.member() == QLatin1String("Deep33")) {
+            conn.send(msg.createReply({QVariant::fromValue(DeepPayload<1, 32>{})}));
+            return true;
+        }
+        if (msg.member() == QLatin1String("Deep64")) {
+            conn.send(msg.createReply({QVariant::fromValue(DeepPayload<32, 32>{})}));
+            return true;
+        }
+        if (msg.member() == QLatin1String("DeepStruct64")) {
+            QDBusArgument payload;
+            payload.beginStructure();
+            payload << DeepPayload<32, 31>{};
+            payload.endStructure();
+            conn.send(msg.createReply({QVariant::fromValue(payload)}));
+            return true;
+        }
         if (msg.member() != QLatin1String("Echo") || msg.arguments().size() < 2)
             return false;
         const QString sig = msg.arguments().at(0).toString();
-        QVariantList values;
-        const QVariant raw = msg.arguments().at(1);
-        if (raw.userType() == qMetaTypeId<QDBusArgument>()) {
-            QDBusArgument a = raw.value<QDBusArgument>();
-            a.beginArray();
-            while (!a.atEnd()) {
-                QVariant e;
-                a >> e;
-                // Nested elements demarshal as QDBusArgument carriers —
-                // unwrap to plain QVariants or the writer sees empty lists.
-                values.append(unwrapDbus(e));
-            }
-            a.endArray();
-        } else {
-            values = raw.toList();
+        const QVariant decoded = unwrapDbus(msg.arguments().at(1));
+        if (!decoded.isValid()) {
+            conn.send(msg.createErrorReply(QStringLiteral("org.dbusqml.Error.BadPayload"),
+                                           QStringLiteral("cannot decode payload")));
+            return true;
         }
+        const QVariantList values = decoded.toList();
         QVariant payload = writeBySignature(sig, values.size() == 1 ? values.first() : values);
         if (!payload.isValid()) {
             conn.send(msg.createErrorReply(QStringLiteral("org.dbusqml.Error.BadPayload"),
@@ -57,6 +65,9 @@ public:
 
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
+    registerDeepPayload<1, 32>();
+    registerDeepPayload<32, 32>();
+    registerDeepPayload<32, 31>();
     if (argc < 2)
         return 2;
     const QString service = argv[1];
