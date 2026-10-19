@@ -220,7 +220,8 @@ private:
     QString m_iface;
     QPointer<DBusConnection> m_conn;
     // CF-29: the attach-time connection BY VALUE — teardown tails
-    // (destructor, engine-teardown, unregister) detach on this, never by
+    // (destructor, engine-teardown, unregister) detach on this, and the
+    // broadcast paths (emitSignal, PropertiesChanged) send on it, never by
     // re-resolving through the null-able m_conn above.
     QDBusConnection m_teardownConn = QDBusConnection::sessionBus();
     QVariantMap m_signatures;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDBusConnection>
 #include <QDBusMessage>
 #include <QObject>
 #include <QPointer>
@@ -64,6 +65,7 @@ Q_SIGNALS:
 
 private:
     void resubscribe();
+    void unsubscribe();
 
 private slots:
     void onSignal(const QDBusMessage &msg);
@@ -77,4 +79,16 @@ private:
     bool m_enabled = true;
     bool m_connected = false;
     bool m_complete = false;
+    // Recorded identity of the live subscription (Class D): the exact
+    // connection + tuple passed to connect(). Disconnect ALWAYS uses this —
+    // QtDBus requires exact-arg match — never the re-resolved current
+    // fields (which may name a different tuple or, through a dead/null
+    // m_conn, an entirely different bus). The session-bus initializer is
+    // only a placeholder: it is overwritten at every successful connect
+    // and never used while m_connected is false.
+    QDBusConnection m_subConn = QDBusConnection::sessionBus();
+    QString m_subService;
+    QString m_subPath;
+    QString m_subIface;
+    QString m_subMember;
 };

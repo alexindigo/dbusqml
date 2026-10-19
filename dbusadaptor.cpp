@@ -721,6 +721,10 @@ void DBusAdaptor::nameLostInternal() {
     emit nameLost();
 }
 
+// Pre-attach resolution ONLY (componentComplete): the configured connection
+// wrapper, else the session bus. Post-attach code NEVER re-resolves —
+// broadcasts use m_teardownConn (recorded here), replies use the delivery
+// connection passed into handleMessage.
 QDBusConnection DBusAdaptor::bus() const {
     if (m_conn)
         return static_cast<QDBusConnection>(*m_conn);
@@ -742,10 +746,11 @@ void DBusAdaptor::componentComplete() {
 
     QDBusConnection conn = bus();
     // CF-29: capture the attach-time connection BY VALUE for the teardown
-    // tails below — re-resolving through the null-able m_conn QPointer at
-    // teardown falls back to the SESSION bus when the connection QML
-    // sibling died first, leaking the registry entry + claim on the
-    // attach connection.
+    // tails below AND the broadcast paths (emitSignal, PropertiesChanged)
+    // — re-resolving through the null-able m_conn QPointer falls back to
+    // the SESSION bus when the connection QML sibling died first, leaking
+    // the registry entry + claim on the attach connection and rerouting
+    // broadcasts to the wrong bus.
     m_teardownConn = conn;
     m_attached = DBusPathDispatcher::attach(conn, m_path, m_service, this, m_allowReplacement,
                                             m_replaceExisting, m_queueOnBusy, m_captureSubtree);
@@ -906,9 +911,12 @@ void DBusAdaptor::emitPropertiesChanged(int propIndex) {
                  qPrintable(qmlName), qPrintable(m_iface), QMetaType(val.userType()).name());
         msg.setArguments({m_iface, QVariantMap(), QStringList{advertisedName(qmlName)}});
     }
-    QDBusConnection conn = bus();
-    if (!conn.send(msg))
-        qmlInfo(this) << conn.lastError();
+    // Broadcasts go out on the ATTACH connection (recorded by value at
+    // componentComplete): the null-able m_conn wrapper may already be
+    // dead — bus()'s session fallback would emit the signal on the wrong
+    // bus while the object stays attached on the custom connection.
+    if (!m_teardownConn.send(msg))
+        qmlInfo(this) << m_teardownConn.lastError();
 }
 
 QString DBusAdaptor::introspect(const QString &) const {
@@ -1026,9 +1034,9 @@ void DBusAdaptor::emitSignal(const QString &name, const QJSValue &arguments) {
         }
         msg.setArguments(args);
     }
-    QDBusConnection conn = bus();
-    if (!conn.send(msg))
-        qmlInfo(this) << conn.lastError();
+    // Same attach-connection discipline as emitPropertiesChanged above.
+    if (!m_teardownConn.send(msg))
+        qmlInfo(this) << m_teardownConn.lastError();
 }
 // Map a QMetaType to its D-Bus type signature.
 static QString metaTypeToDbusSignature(int typeId) {
@@ -1441,8 +1449,12 @@ QStringList DBusAdaptor::declaredOutTypes(const QString &member, bool *found) co
     return {};
 }
 
-bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &) {
-    QDBusConnection conn = bus();
+bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) {
+    // Replies go out on the connection the call was DELIVERED on (the
+    // dispatcher passes it in) — never re-resolved through bus(), whose
+    // session fallback would answer a custom-bus caller on the wrong bus
+    // once the connection wrapper is gone. The DispatchScope below captures
+    // the same connection for holdReply().
     const QString interface = msg.interface();
     const QString member = msg.member();
     QVariantList args;

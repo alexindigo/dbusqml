@@ -9,21 +9,13 @@
 DBusObjectManager::DBusObjectManager(QObject *parent) : QObject(parent) {}
 
 DBusObjectManager::~DBusObjectManager() {
-    if (m_subscribed) {
-        QDBusConnection conn =
-            m_conn ? static_cast<QDBusConnection>(*m_conn) : QDBusConnection::sessionBus();
-        conn.disconnect(m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
-                        QStringLiteral("InterfacesAdded"), this,
-                        SLOT(onInterfacesAdded(QDBusMessage)));
-        conn.disconnect(m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
-                        QStringLiteral("InterfacesRemoved"), this,
-                        SLOT(onInterfacesRemoved(QDBusMessage)));
-    }
+    unsubscribe();
 }
 
 void DBusObjectManager::setConnection(DBusConnection *v) {
     if (m_conn == v)
         return;
+    unsubscribe();
     m_conn = v;
     emit connectionChanged();
     setup();
@@ -32,6 +24,7 @@ void DBusObjectManager::setConnection(DBusConnection *v) {
 void DBusObjectManager::setService(const QString &v) {
     if (m_service == v)
         return;
+    unsubscribe();
     m_service = v;
     emit serviceChanged();
     setup();
@@ -40,6 +33,7 @@ void DBusObjectManager::setService(const QString &v) {
 void DBusObjectManager::setPath(const QString &v) {
     if (m_path == v)
         return;
+    unsubscribe();
     m_path = v;
     emit pathChanged();
     setup();
@@ -48,6 +42,20 @@ void DBusObjectManager::setPath(const QString &v) {
 void DBusObjectManager::componentComplete() {
     m_complete = true;
     setup();
+}
+
+// The ONE disconnect path (setters and the destructor): drops the recorded
+// subscription with the exact connection + tuple it was made with.
+void DBusObjectManager::unsubscribe() {
+    if (!m_subscribed)
+        return;
+    m_subConn.disconnect(
+        m_subService, m_subPath, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
+        QStringLiteral("InterfacesAdded"), this, SLOT(onInterfacesAdded(QDBusMessage)));
+    m_subConn.disconnect(
+        m_subService, m_subPath, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
+        QStringLiteral("InterfacesRemoved"), this, SLOT(onInterfacesRemoved(QDBusMessage)));
+    m_subscribed = false;
 }
 
 void DBusObjectManager::setup() {
@@ -63,8 +71,12 @@ void DBusObjectManager::setup() {
                          SLOT(onInterfacesAdded(QDBusMessage))) &&
             conn.connect(m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
                          QStringLiteral("InterfacesRemoved"), this,
-                         SLOT(onInterfacesRemoved(QDBusMessage))))
+                         SLOT(onInterfacesRemoved(QDBusMessage)))) {
+            m_subConn = conn;
+            m_subService = m_service;
+            m_subPath = m_path;
             m_subscribed = true;
+        }
     }
 
     fetchManagedObjects();

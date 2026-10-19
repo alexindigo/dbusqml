@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDBusConnection>
 #include <QDBusMessage>
 #include <QObject>
 #include <QPointer>
@@ -59,6 +60,7 @@ Q_SIGNALS:
 
 private:
     void setup();
+    void unsubscribe();
     void fetchManagedObjects();
 
 private slots:
@@ -72,5 +74,13 @@ private:
     bool m_ready = false;
     bool m_complete = false;
     bool m_subscribed = false;
+    // Recorded identity of the live subscription (Class D): the exact
+    // connection + service/path tuple passed to connect(). Disconnect
+    // ALWAYS uses this — never the re-resolved current fields. The
+    // session-bus initializer is only a placeholder: overwritten at every
+    // successful connect, never used while m_subscribed is false.
+    QDBusConnection m_subConn = QDBusConnection::sessionBus();
+    QString m_subService;
+    QString m_subPath;
     QVariantMap m_objects;
 };

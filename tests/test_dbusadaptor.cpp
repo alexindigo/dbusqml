@@ -46,6 +46,7 @@
 #include "dbuscatalog.h"
 #include "dbuspathdispatcher.h"
 #include "dbustypes.h"
+#include "dbusutils.h"
 
 // Test adaptor with QML-exposed properties (simulates QML usage)
 class TestAdaptor : public DBusAdaptor {
@@ -625,8 +626,22 @@ private slots:
     void testSignalWatcherWildcardMember();
     void testServiceWatcherAppearDisappear();
 
+    // Recorded subscription identity (Class D): reconfiguration and
+    // teardown act on the connection + tuple recorded at connect time.
+    void testSignalWatcherServiceChangeDropsOld();
+    void testSignalWatcherConnectionChangeDropsOld();
+    void testSignalWatcherCustomConnectionDestroyed();
+
     // 0.9.0 ObjectManager client (B6).
     void testObjectManagerClient();
+
+    // Class D: ObjectManager reconfiguration resubscribes + refetches.
+    void testObjectManagerPathChange();
+
+    // Class D: adaptor broadcasts on the attach connection and replies on
+    // the delivery connection — never the session-bus fallback.
+    void testAdaptorBroadcastOnAttachConnection();
+    void testAdaptorRepliesOnDeliveryConnection();
 
     // 0.9.0 unix fd (h) passing (B1/S3).
     void testFdRoundTripSend();
@@ -9666,6 +9681,511 @@ void TestDBusAdaptor::testObjectManagerClient() {
     QVERIFY(after.contains(QStringLiteral("/org/obj/2")));
 
     delete client;
+}
+
+// ==================== Class D — recorded subscription identity ============
+
+// Changing `service` at runtime must disconnect the RECORDED subscription
+// (the old tuple on the old connection) before applying the new one: the old
+// sender's signal is never delivered after the change, and the new sender's
+// arrives exactly once. Two emitters share path/iface/member and differ only
+// in service — the daemon matches a well-known sender against the emitting
+// connection's OWNED names, so each emitter sits on its OWN connection
+// (both names on one connection would match either emitter).
+void TestDBusAdaptor::testSignalWatcherServiceChangeDropsOld() {
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *connA = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    DBusConnection *connB = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(connA != nullptr && connB != nullptr);
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+
+    auto emitterQml = [](const char *service) {
+        return QByteArray("import DBus 1.0\n"
+                          "DBusAdaptor {\n"
+                          "  service: '") +
+               service +
+               QByteArray("'\n"
+                          "  path: '/SWChange'\n"
+                          "  iface: 'org.dbusqml.SWChange'\n"
+                          "  function fire() { emitSignal('StateChanged', []) }\n"
+                          "}");
+    };
+    QQmlComponent compA(&engine);
+    compA.setData(emitterQml("org.dbusqml.SWA"), QUrl());
+    QQmlComponent compB(&engine);
+    compB.setData(emitterQml("org.dbusqml.SWB"), QUrl());
+    QVERIFY2(compA.isReady() && compB.isReady(),
+             qPrintable(compA.errorString() + compB.errorString()));
+    QObject *emitA = compA.beginCreate(engine.rootContext());
+    QObject *emitB = compB.beginCreate(engine.rootContext());
+    QVERIFY(emitA != nullptr && emitB != nullptr);
+    emitA->setProperty("connection", QVariant::fromValue<DBusConnection *>(connA));
+    emitB->setProperty("connection", QVariant::fromValue<DBusConnection *>(connB));
+    compA.completeCreate();
+    compB.completeCreate();
+
+    QQmlComponent compW(&engine);
+    compW.setData("import DBus 1.0\n"
+                  "DBusSignalWatcher {\n"
+                  "  service: 'org.dbusqml.SWA'\n"
+                  "  path: '/SWChange'\n"
+                  "  iface: 'org.dbusqml.SWChange'\n"
+                  "  member: 'StateChanged'\n"
+                  "}",
+                  QUrl());
+    QVERIFY2(compW.isReady(), qPrintable(compW.errorString()));
+    QObject *watcher = compW.create();
+    QVERIFY(watcher != nullptr);
+
+    WatcherCatcher catcher;
+    QVERIFY(QObject::connect(watcher, SIGNAL(received(QString, QVariantList)), &catcher,
+                             SLOT(onReceived(QString, QVariantList))));
+
+    // Baseline: the subscribed sender's signal is delivered.
+    QVERIFY(QMetaObject::invokeMethod(emitA, "fire"));
+    QTRY_COMPARE_WITH_TIMEOUT(catcher.count, 1, 5000);
+
+    // Change the service: the recorded (old) subscription is dropped.
+    QVERIFY(watcher->setProperty("service", QStringLiteral("org.dbusqml.SWB")));
+
+    // The old sender's signal is never delivered after the change.
+    QVERIFY(QMetaObject::invokeMethod(emitA, "fire"));
+    QTest::qWait(400);
+    QCOMPARE(catcher.count, 1);
+
+    // The new sender's signal arrives exactly once (no stacked duplicates).
+    QVERIFY(QMetaObject::invokeMethod(emitB, "fire"));
+    QTRY_COMPARE_WITH_TIMEOUT(catcher.count, 2, 5000);
+    QTest::qWait(300);
+    QCOMPARE(catcher.count, 2);
+
+    delete watcher;
+    delete emitA;
+    delete emitB;
+    delete connA;
+    delete connB;
+}
+
+// Switching `connection` at runtime must disconnect the RECORDED
+// subscription on the OLD connection before subscribing on the new one.
+// Pre-fix the old (session-bus) subscription survives alongside the new
+// (custom) one, so one emitted signal is delivered twice — once per
+// connection (the daemon dedups per connection, never across connections).
+void TestDBusAdaptor::testSignalWatcherConnectionChangeDropsOld() {
+    QObject *emitter = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.SWConn'\n"
+                                        "  path: '/SWConn'\n"
+                                        "  iface: 'org.dbusqml.SWConn'\n"
+                                        "  function fire() { emitSignal('StateChanged', []) }\n"
+                                        "}");
+    QVERIFY(emitter != nullptr);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *connC = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(connC != nullptr);
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent compW(&engine);
+    compW.setData("import DBus 1.0\n"
+                  "DBusSignalWatcher {\n"
+                  "  service: 'org.dbusqml.SWConn'\n"
+                  "  path: '/SWConn'\n"
+                  "  iface: 'org.dbusqml.SWConn'\n"
+                  "  member: 'StateChanged'\n"
+                  "}",
+                  QUrl());
+    QVERIFY2(compW.isReady(), qPrintable(compW.errorString()));
+    QObject *watcher = compW.create();
+    QVERIFY(watcher != nullptr);
+
+    WatcherCatcher catcher;
+    QVERIFY(QObject::connect(watcher, SIGNAL(received(QString, QVariantList)), &catcher,
+                             SLOT(onReceived(QString, QVariantList))));
+
+    // Baseline on the default (session-bus) connection.
+    QVERIFY(QMetaObject::invokeMethod(emitter, "fire"));
+    QTRY_COMPARE_WITH_TIMEOUT(catcher.count, 1, 5000);
+
+    // Switch to the custom connection: the recorded session-bus subscription
+    // must be dropped — one emission is delivered exactly once.
+    QVERIFY(watcher->setProperty("connection", QVariant::fromValue<DBusConnection *>(connC)));
+    QVERIFY(QMetaObject::invokeMethod(emitter, "fire"));
+    QTRY_VERIFY_WITH_TIMEOUT(catcher.count >= 2, 5000);
+    QTest::qWait(300);
+    QCOMPARE(catcher.count, 2);
+
+    // And back: only the new session-bus subscription may deliver.
+    QVERIFY(watcher->setProperty("connection", QVariant::fromValue<DBusConnection *>(nullptr)));
+    QVERIFY(QMetaObject::invokeMethod(emitter, "fire"));
+    QTRY_VERIFY_WITH_TIMEOUT(catcher.count >= 3, 5000);
+    QTest::qWait(300);
+    QCOMPARE(catcher.count, 3);
+
+    delete watcher;
+    delete connC;
+    delete emitter;
+}
+
+// Destroying a watcher that subscribed on a CUSTOM connection must tear the
+// subscription down on THAT connection (recorded at connect time) — never a
+// session-bus disconnect of a subscription that never existed there, which
+// leaks the custom connection's match rule on the daemon. A leaked rule
+// keeps no receiver alive (Qt disconnects dead receivers) and the daemon
+// dedups deliveries per connection, so the leak is observed in the daemon's
+// own match-rule table (org.freedesktop.DBus.Debug.Stats.GetAllMatchRules).
+void TestDBusAdaptor::testSignalWatcherCustomConnectionDestroyed() {
+    QObject *emitter = createQmlAdaptor("import DBus 1.0\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.SWC'\n"
+                                        "  path: '/SWCustom'\n"
+                                        "  iface: 'org.dbusqml.SWCustom'\n"
+                                        "  function fire() { emitSignal('StateChanged', []) }\n"
+                                        "}");
+    QVERIFY(emitter != nullptr);
+
+    const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+    DBusConnection *connC = trackedConnectToBus(QString::fromLocal8Bit(addr));
+    QVERIFY(connC != nullptr);
+    const QString connCBase = QDBusConnection(*connC).baseService();
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent compW(&engine);
+    compW.setData("import DBus 1.0\n"
+                  "DBusSignalWatcher {\n"
+                  "  service: 'org.dbusqml.SWC'\n"
+                  "  path: '/SWCustom'\n"
+                  "  iface: 'org.dbusqml.SWCustom'\n"
+                  "  member: 'StateChanged'\n"
+                  "}",
+                  QUrl());
+    QVERIFY2(compW.isReady(), qPrintable(compW.errorString()));
+    QObject *watcher = compW.beginCreate(engine.rootContext());
+    QVERIFY(watcher != nullptr);
+    watcher->setProperty("connection", QVariant::fromValue<DBusConnection *>(connC));
+    compW.completeCreate();
+
+    WatcherCatcher catcher;
+    QVERIFY(QObject::connect(watcher, SIGNAL(received(QString, QVariantList)), &catcher,
+                             SLOT(onReceived(QString, QVariantList))));
+    QVERIFY(QMetaObject::invokeMethod(emitter, "fire"));
+    QTRY_COMPARE_WITH_TIMEOUT(catcher.count, 1, 5000);
+
+    // The Stats interface is a dbus-daemon build option.
+    {
+        QDBusMessage probe = QDBusMessage::createMethodCall(
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+            QStringLiteral("org.freedesktop.DBus.Debug.Stats"), QStringLiteral("GetAllMatchRules"));
+        if (QDBusConnection::sessionBus().call(probe, QDBus::Block, 3000).type() !=
+            QDBusMessage::ReplyMessage)
+            QSKIP("dbus-daemon without Stats.GetAllMatchRules");
+    }
+
+    // The daemon's own match-rule table: rules of one connection by unique
+    // name. Decoded through the library's own message boundary.
+    auto rulesOf = [](const QString &uniqueName) -> QStringList {
+        QDBusMessage call = QDBusMessage::createMethodCall(
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+            QStringLiteral("org.freedesktop.DBus.Debug.Stats"), QStringLiteral("GetAllMatchRules"));
+        const QDBusMessage reply = QDBusConnection::sessionBus().call(call, QDBus::Block, 3000);
+        QVariantList args;
+        if (reply.type() != QDBusMessage::ReplyMessage || !decodeMessage(reply, args) ||
+            args.isEmpty())
+            return {};
+        return args.first().toMap().value(uniqueName).toStringList();
+    };
+    auto hasWatchRule = [&rulesOf](const QString &uniqueName) {
+        const QStringList rules = rulesOf(uniqueName);
+        for (const QString &r : rules) {
+            if (r.contains(QStringLiteral("path='/SWCustom'")))
+                return true;
+        }
+        return false;
+    };
+    // Sanity: the subscription is a live match rule on the custom connection.
+    QTRY_VERIFY_WITH_TIMEOUT(hasWatchRule(connCBase), 5000);
+
+    // Destroy the watcher: the rule dies with it ON THE CUSTOM CONNECTION.
+    delete watcher;
+    QTRY_VERIFY_WITH_TIMEOUT(!hasWatchRule(connCBase), 5000);
+
+    delete connC;
+    delete emitter;
+}
+
+// Changing service/path at runtime must resubscribe (dropping the recorded
+// old subscription) AND refetch the inventory: signals keep arriving from
+// the new target only, never from the old one.
+void TestDBusAdaptor::testObjectManagerPathChange() {
+    auto serverQml = [](const char *service, const char *path, const char *initialObj) {
+        return QByteArray("import DBus 1.0\n"
+                          "DBusAdaptor {\n"
+                          "  service: '") +
+               service +
+               QByteArray("'\n"
+                          "  path: '") +
+               path +
+               QByteArray("'\n"
+                          "  iface: 'org.freedesktop.DBus.ObjectManager'\n"
+                          "  _members: ({ GetManagedObjects: 'getManagedObjects' })\n"
+                          "  _signatures: ({ GetManagedObjects: 'a{oa{sv}}' })\n"
+                          "  property var objects: ({ '") +
+               initialObj +
+               QByteArray("': { 'org.dbusqml.Device': { name: 'x' } } })\n"
+                          "  function getManagedObjects() { return objects }\n"
+                          "  function add(path, iface, props) {\n"
+                          "    var next = {}\n"
+                          "    for (var k in objects) next[k] = objects[k]\n"
+                          "    var ifaces = {}\n"
+                          "    ifaces[iface] = props\n"
+                          "    next[path] = ifaces\n"
+                          "    objects = next\n"
+                          "    emitSignal('InterfacesAdded', [path, ifaces])\n"
+                          "  }\n"
+                          "}");
+    };
+    QObject *server1 = createQmlAdaptor(serverQml("org.dbusqml.OM1", "/OM1", "/org/obj/1"));
+    QObject *server2 = createQmlAdaptor(serverQml("org.dbusqml.OM2", "/OM2", "/org/obj/9"));
+    QVERIFY(server1 != nullptr && server2 != nullptr);
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusObjectManager {\n"
+                      "  service: 'org.dbusqml.OM1'\n"
+                      "  path: '/OM1'\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    QObject *client = component.create();
+    QVERIFY(client != nullptr);
+
+    QTRY_COMPARE_WITH_TIMEOUT(client->property("ready").toBool(), true, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        client->property("managedObjects").toMap().contains(QStringLiteral("/org/obj/1")), 5000);
+
+    struct Added {
+        QString path;
+        QVariantMap ifaces;
+    };
+    QList<Added> addedList;
+    QObject::connect(static_cast<DBusObjectManager *>(client), &DBusObjectManager::interfacesAdded,
+                     client, [&addedList](const QString &p, const QVariantMap &ifaces) {
+                         addedList.append({p, ifaces});
+                     });
+
+    // Reconfigure: resubscribe on the new (service, path) and refetch.
+    QVERIFY(client->setProperty("service", QStringLiteral("org.dbusqml.OM2")));
+    QVERIFY(client->setProperty("path", QStringLiteral("/OM2")));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        client->property("managedObjects").toMap().contains(QStringLiteral("/org/obj/9")), 5000);
+    QVERIFY(!client->property("managedObjects").toMap().contains(QStringLiteral("/org/obj/1")));
+
+    // The OLD target's signals are never delivered after the change.
+    QDBusMessage staleAdd = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.OM1"), QStringLiteral("/OM1"),
+        QStringLiteral("org.freedesktop.DBus.ObjectManager"), QStringLiteral("add"));
+    staleAdd.setArguments({QVariant::fromValue(QDBusObjectPath(QStringLiteral("/org/obj/stale"))),
+                           QVariant(QStringLiteral("org.dbusqml.Device")),
+                           QVariant(QVariantMap{{QStringLiteral("name"), QStringLiteral("s")}})});
+    QCOMPARE(QDBusConnection::sessionBus().call(staleAdd, QDBus::Block, 3000).type(),
+             QDBusMessage::ReplyMessage);
+    QTest::qWait(400);
+    QCOMPARE(addedList.count(), 0);
+    QVERIFY(!client->property("managedObjects").toMap().contains(QStringLiteral("/org/obj/stale")));
+
+    // The NEW target's signals arrive live.
+    QDBusMessage freshAdd = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.OM2"), QStringLiteral("/OM2"),
+        QStringLiteral("org.freedesktop.DBus.ObjectManager"), QStringLiteral("add"));
+    freshAdd.setArguments({QVariant::fromValue(QDBusObjectPath(QStringLiteral("/org/obj/fresh"))),
+                           QVariant(QStringLiteral("org.dbusqml.Device")),
+                           QVariant(QVariantMap{{QStringLiteral("name"), QStringLiteral("f")}})});
+    QCOMPARE(QDBusConnection::sessionBus().call(freshAdd, QDBus::Block, 3000).type(),
+             QDBusMessage::ReplyMessage);
+    QTRY_COMPARE_WITH_TIMEOUT(addedList.count(), 1, 5000);
+    QCOMPARE(addedList.first().path, QStringLiteral("/org/obj/fresh"));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        client->property("managedObjects").toMap().contains(QStringLiteral("/org/obj/fresh")),
+        5000);
+
+    delete client;
+    delete server1;
+    delete server2;
+}
+
+// Broadcasts (emitSignal and PropertiesChanged) go out on the ATTACH
+// connection — recorded by value at componentComplete — so destroying the
+// custom DBusConnection wrapper while the adaptor lives must NOT reroute
+// them to the session bus (bus()'s fallback). A second private bus makes the
+// two connections observable: a broadcast on the attach connection is seen
+// only there, one misrouted to the session bus only here.
+void TestDBusAdaptor::testAdaptorBroadcastOnAttachConnection() {
+    QProcess second;
+    second.setProcessChannelMode(QProcess::ForwardedErrorChannel);
+    second.start(QFINDTESTDATA("dbus-daemon-with-tmpdir.py"),
+                 {"--session", "--print-address", "--nofork"});
+    QVERIFY2(second.waitForStarted(3000), "second dbus-daemon failed to start");
+    QVERIFY2(second.waitForReadyRead(3000), "no address from second dbus-daemon");
+    const QString addr2 = QString::fromLocal8Bit(second.readLine().trimmed());
+    QVERIFY2(!addr2.isEmpty(), "empty second bus address");
+
+    DBusConnection *connC = trackedConnectToBus(addr2);
+    QVERIFY(connC != nullptr);
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent compA(&engine);
+    compA.setData("import DBus 1.0\n"
+                  "DBusAdaptor {\n"
+                  "  service: 'org.dbusqml.ACast'\n"
+                  "  path: '/ACast'\n"
+                  "  iface: 'org.dbusqml.ACast'\n"
+                  "  property int level: 1\n"
+                  "  function fire() { emitSignal('StateChanged', []) }\n"
+                  "}",
+                  QUrl());
+    QVERIFY2(compA.isReady(), qPrintable(compA.errorString()));
+    QObject *adaptor = compA.beginCreate(engine.rootContext());
+    QVERIFY(adaptor != nullptr);
+    adaptor->setProperty("connection", QVariant::fromValue<DBusConnection *>(connC));
+    compA.completeCreate();
+
+    // Wildcard-sender watchers on BOTH buses: the attach bus must see every
+    // broadcast, the session bus must see none — regardless of which bus
+    // owns the service name.
+    QDBusConnection bus2 = QDBusConnection::connectToBus(addr2, QStringLiteral("item7-cast-watch"));
+    QVERIFY(bus2.isConnected());
+    QDBusConnection sessionBus = QDBusConnection::sessionBus();
+    SignalCatcher sigBus2, sigSession, pcBus2, pcSession;
+    QVERIFY(bus2.connect(QString(), QStringLiteral("/ACast"), QStringLiteral("org.dbusqml.ACast"),
+                         QStringLiteral("StateChanged"), &sigBus2, SLOT(onSignal(QDBusMessage))));
+    QVERIFY(sessionBus.connect(QString(), QStringLiteral("/ACast"),
+                               QStringLiteral("org.dbusqml.ACast"), QStringLiteral("StateChanged"),
+                               &sigSession, SLOT(onSignal(QDBusMessage))));
+    QVERIFY(bus2.connect(
+        QString(), QStringLiteral("/ACast"), QStringLiteral("org.freedesktop.DBus.Properties"),
+        QStringLiteral("PropertiesChanged"), &pcBus2, SLOT(onSignal(QDBusMessage))));
+    QVERIFY(sessionBus.connect(
+        QString(), QStringLiteral("/ACast"), QStringLiteral("org.freedesktop.DBus.Properties"),
+        QStringLiteral("PropertiesChanged"), &pcSession, SLOT(onSignal(QDBusMessage))));
+
+    // Sanity: broadcasts land on the attach bus only.
+    QVERIFY(QMetaObject::invokeMethod(adaptor, "fire"));
+    QTRY_COMPARE_WITH_TIMEOUT(sigBus2.count, 1, 5000);
+    QTest::qWait(300);
+    QCOMPARE(sigSession.count, 0);
+
+    // Destroy the custom-connection WRAPPER; the adaptor (and its recorded
+    // attach connection) lives on. Broadcasts must stay on the attach bus.
+    delete connC;
+
+    QVERIFY(QMetaObject::invokeMethod(adaptor, "fire"));
+    QTRY_COMPARE_WITH_TIMEOUT(sigBus2.count, 2, 5000);
+    QVERIFY(adaptor->setProperty("level", 2));
+    QTRY_COMPARE_WITH_TIMEOUT(pcBus2.count, 1, 5000);
+    QTest::qWait(300);
+    QCOMPARE(sigSession.count, 0);
+    QCOMPARE(pcSession.count, 0);
+
+    delete adaptor;
+    QDBusConnection::disconnectFromBus(QStringLiteral("item7-cast-watch"));
+    second.kill();
+    second.waitForFinished(3000);
+}
+
+// Immediate and held replies travel on the connection the call was DELIVERED
+// on (passed into handleMessage / captured by DispatchScope for holdReply),
+// never the session-bus fallback of a dead connection wrapper. Pre-fix a
+// caller on the attach bus never gets its reply once the wrapper is gone.
+void TestDBusAdaptor::testAdaptorRepliesOnDeliveryConnection() {
+    QProcess second;
+    second.setProcessChannelMode(QProcess::ForwardedErrorChannel);
+    second.start(QFINDTESTDATA("dbus-daemon-with-tmpdir.py"),
+                 {"--session", "--print-address", "--nofork"});
+    QVERIFY2(second.waitForStarted(3000), "second dbus-daemon failed to start");
+    QVERIFY2(second.waitForReadyRead(3000), "no address from second dbus-daemon");
+    const QString addr2 = QString::fromLocal8Bit(second.readLine().trimmed());
+    QVERIFY2(!addr2.isEmpty(), "empty second bus address");
+
+    DBusConnection *connC = trackedConnectToBus(addr2);
+    QVERIFY(connC != nullptr);
+
+    QQmlEngine engine;
+    QDir binDir(QCoreApplication::applicationDirPath());
+    engine.addImportPath(binDir.path());
+    engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+    QQmlComponent compA(&engine);
+    compA.setData("import DBus 1.0\n"
+                  "DBusAdaptor {\n"
+                  "  service: 'org.dbusqml.AReply'\n"
+                  "  path: '/AReply'\n"
+                  "  iface: 'org.dbusqml.AReply'\n"
+                  "  property var held: null\n"
+                  "  function ping() { return 'pong' }\n"
+                  "  function openWait() { held = holdReply() }\n"
+                  "  function resolveHeld() { if (held) held.send('done') }\n"
+                  "}",
+                  QUrl());
+    QVERIFY2(compA.isReady(), qPrintable(compA.errorString()));
+    QObject *adaptor = compA.beginCreate(engine.rootContext());
+    QVERIFY(adaptor != nullptr);
+    adaptor->setProperty("connection", QVariant::fromValue<DBusConnection *>(connC));
+    compA.completeCreate();
+
+    // The wrapper goes away; the recorded attach connection keeps the
+    // adaptor reachable. A caller on the ATTACH bus must still be answered.
+    delete connC;
+
+    QDBusConnection caller =
+        QDBusConnection::connectToBus(addr2, QStringLiteral("item7-reply-caller"));
+    QVERIFY(caller.isConnected());
+
+    // Immediate reply on the delivery connection.
+    QDBusMessage ping = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.AReply"), QStringLiteral("/AReply"),
+        QStringLiteral("org.dbusqml.AReply"), QStringLiteral("ping"));
+    auto *pingWatcher = new QDBusPendingCallWatcher(caller.asyncCall(ping));
+    QSignalSpy pingSpy(pingWatcher, &QDBusPendingCallWatcher::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(pingSpy.count(), 1, 5000);
+    QVERIFY(!pingWatcher->isError());
+    QCOMPARE(pingWatcher->reply().arguments().first().toString(), QStringLiteral("pong"));
+    delete pingWatcher;
+
+    // Held reply: settled later, still on the delivery connection.
+    QDBusMessage openWait = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.AReply"), QStringLiteral("/AReply"),
+        QStringLiteral("org.dbusqml.AReply"), QStringLiteral("openWait"));
+    auto *heldWatcher = new QDBusPendingCallWatcher(caller.asyncCall(openWait));
+    QSignalSpy heldSpy(heldWatcher, &QDBusPendingCallWatcher::finished);
+    QDBusMessage resolve = QDBusMessage::createMethodCall(
+        QStringLiteral("org.dbusqml.AReply"), QStringLiteral("/AReply"),
+        QStringLiteral("org.dbusqml.AReply"), QStringLiteral("resolveHeld"));
+    caller.asyncCall(resolve);
+    QTRY_COMPARE_WITH_TIMEOUT(heldSpy.count(), 1, 5000);
+    QVERIFY(!heldWatcher->isError());
+    QCOMPARE(heldWatcher->reply().arguments().first().toString(), QStringLiteral("done"));
+    delete heldWatcher;
+
+    delete adaptor;
+    QDBusConnection::disconnectFromBus(QStringLiteral("item7-reply-caller"));
+    second.kill();
+    second.waitForFinished(3000);
 }
 
 // ==================== 0.9.0 lossless 64-bit delivery (C2) ==================

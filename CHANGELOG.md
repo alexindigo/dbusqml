@@ -22,6 +22,26 @@ infrastructure that materially affects consumer trust).
 
 ### Fixed
 
+- **Subscriptions and adaptor sends could act on the wrong connection** —
+  every component now uses exactly the connection and filter identity it
+  connected or attached with. (1) `DBusSignalWatcher` reconfiguration
+  disconnected the NEW tuple (possibly on the new connection), so the old
+  subscription survived: a signal matching only the old `service` was still
+  delivered after the change, and one signal was delivered twice after a
+  `connection` change; the destructor always disconnected on the session
+  bus even when the subscription lived on a custom connection.
+  (2) `DBusObjectManager` never resubscribed when `service`, `path` or
+  `connection` changed — the inventory refetched but live
+  `InterfacesAdded`/`InterfacesRemoved` kept arriving from the old target;
+  it now resubscribes and refetches. Both elements record the connection
+  and exact filter at connect time and disconnect that identity in every
+  setter and in their destructors. (3) `DBusAdaptor` broadcasts
+  (`emitSignal`, `PropertiesChanged`) and replies fell back to the session
+  bus once a custom `DBusConnection` wrapper was destroyed, while the
+  object stayed attached on the custom connection: broadcasts now send on
+  the recorded attach connection, and immediate and held replies travel on
+  the connection each call was delivered on.
+
 - **Adaptor access, options and privacy policy was checked against the
   caller's spelling instead of the resolved member** — one rule now:
   resolve the target member first, then apply policy to the resolved
