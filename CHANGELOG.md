@@ -13,6 +13,22 @@ infrastructure that materially affects consumer trust).
 
 ### Changed
 
+- **Breaking: file descriptors are `DBusQML.unixFd` values that own their
+  descriptor, in both directions.** Sending an `h` (top level, `ah`,
+  struct member, dict value, variant payload) requires a `unixFd` (C++:
+  also a `QDBusUnixFileDescriptor`); every received `h` arrives as a
+  `unixFd` holding its own duplicate, with `valid === false` for an
+  invalid fd (was: the `-1` sentinel). `close()` closes it for every copy;
+  `take()` hands out a caller-owned duplicate number; a `unixFd` that
+  reached JS and is collected unclosed is closed by the garbage collector
+  with a warning, and a process-wide pressure valve queues a collection
+  when wrapper-owned fds pile up. `DBusUtils.openFd` returns a `unixFd`;
+  `readFd`/`writeFd`/`fdUrl` take one and refuse a number; `closeFd` is now
+  only for numbers from `take()` and refuses 0–2 and `unixFd` values. An
+  `_options` key declared `h` accepts only a received fd. C++ consumers get
+  `DBus::UnixFd` in `QVariant`s, convertible to `QDBusUnixFileDescriptor`.
+  Migration table in API.md ("Unix file descriptors").
+
 - **A proxy accepts signals only from the configured service's current
   owner.** Every per-signal subscription now passes the configured
   `service` as the match-rule sender (previously a wildcard), and the
@@ -34,7 +50,22 @@ infrastructure that materially affects consumer trust).
   (previously reported as `InvalidArgs` "No such property" — the property
   exists and is advertised, so the refusal now names the real reason).
 
+### Removed
+
+- **Plain-int fd send.** A number at a declared `h` was `dup()`ed and sent
+  as a descriptor; it is now a local error naming `DBusQML.unixFd`, on every
+  path, whatever declared the `h`.
+
 ### Fixed
+
+- **Received fds leaked, and only the first listener got one** (finding
+  #9). A decoded fd was detached from its message into a plain int that
+  nothing closed when it went unread — the values after the first in a
+  promise-style `asyncCall`, a promise without callbacks, a rejected
+  `Properties.Set`, an option the whitelist dropped. Because detaching did
+  not copy the shared descriptor, a second listener on the same signal
+  received `-1`. Every decode now owns its own duplicate inside a `unixFd`,
+  which closes with its last copy.
 
 - **Subscriptions and adaptor sends could act on the wrong connection** —
   every component now uses exactly the connection and filter identity it
@@ -127,6 +158,13 @@ infrastructure that materially affects consumer trust).
   (documented).
 
 ### Security
+
+- **A declared `h` turned any number into a transferred descriptor**
+  (finding #4). A peer's introspection could advertise `h` for an argument
+  the program passes a number to (a cookie, a count), and the call then
+  duplicated that number as an fd of the calling process — possibly stdin,
+  a socket or a secret file — and handed it to the peer. fds now cross the
+  bus only as an explicit `DBusQML.unixFd`.
 
 - **Any bus peer could inject a proxy's interface signals** — the
   per-signal subscriptions used a wildcard sender, so any process

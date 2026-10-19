@@ -2,12 +2,15 @@
 
 #include <QDBusObjectPath>
 #include <QDBusSignature>
+#include <QDBusUnixFileDescriptor>
 #include <QDBusVariant>
+#include <QExplicitlySharedDataPointer>
 #include <QJSValue>
 #include <QVariantMap>
 #include <qqmlregistration.h>
 
 class QDBusArgument;
+class QJSEngine;
 
 #define DBUS_QML_TYPE(TYPE, NAME, CTOR, STORE, SIG)                                                \
     class TYPE {                                                                                   \
@@ -124,6 +127,69 @@ public:
     Q_INVOKABLE QString toString() const { return QVariant::fromValue(value).toString(); }
     operator QVariant() const { return QVariant::fromValue(*this); }
     QVariantList value;
+};
+
+class UnixFdPrivate;
+
+// DBusQML.unixFd — the only fd value. A unixFd OWNS its descriptor (prior
+// art: Node FileHandle, Go os.File, Qt QDBusUnixFileDescriptor, dbus-python
+// UnixFd). Sending an `h` requires one (a plain number is a local error on
+// every path); every received `h` arrives as one, holding its own dup() —
+// two listeners never share a descriptor. Copies (JS copies, QVariant
+// copies) share ONE state: close() on any copy closes it for all.
+//   valid    — false after close(), and for a received invalid fd
+//   close()  — closes now (the contract; idempotent)
+//   take()   — a caller-owned DUPLICATE number (closeFd() it); the unixFd
+//              itself stays open
+// The last copy's destruction closes a still-open fd; for one that reached
+// JS this is the garbage-collector fallback and warns. A process-wide
+// pressure valve queues a JS collection when wrapper-owned fds pile up.
+// Not for concurrent use from several threads.
+class UnixFd {
+    Q_GADGET
+    QML_VALUE_TYPE(unixFd)
+    QML_CONSTRUCTIBLE_VALUE
+    Q_PROPERTY(bool valid READ isValid)
+public:
+    UnixFd();
+    // JS: new DBusQML.unixFd(n) — duplicates n; the caller keeps (and
+    // closes) its own number.
+    Q_INVOKABLE explicit UnixFd(const QJSValue &fd);
+    // C++: duplicates fd (the caller keeps its own).
+    explicit UnixFd(int fd);
+    // C++ / receive path: duplicates the descriptor (never shares it); an
+    // invalid descriptor gives an invalid unixFd.
+    explicit UnixFd(const QDBusUnixFileDescriptor &fd);
+    UnixFd(const UnixFd &other);
+    UnixFd &operator=(const UnixFd &other);
+    ~UnixFd();
+
+    bool isValid() const;
+    Q_INVOKABLE void close();
+    Q_INVOKABLE int take() const;
+    Q_INVOKABLE QString toString() const;
+
+    // Borrowed number (-1 when invalid); valid only while this unixFd stays
+    // open. For I/O inside the library and C++ consumers.
+    int fileDescriptor() const;
+    // A QDBusUnixFileDescriptor sharing this descriptor (P6: what C++
+    // consumers and the wire get). Invalid when this unixFd is invalid.
+    QDBusUnixFileDescriptor descriptor() const;
+    operator QVariant() const { return QVariant::fromValue(*this); }
+
+    // Delivery into JS: marks every unixFd inside v (lists/maps recurse) as
+    // escaped (GC-fallback warning armed) and registers engine for the
+    // pressure valve; no-op without an engine. A missed site only loses the
+    // warning.
+    static void noteDelivered(const QVariant &v, QJSEngine *engine);
+    void noteDelivered(QJSEngine *engine) const;
+
+    static int liveCount();         // wrapper-owned open fds, process-wide
+    static int pressureThreshold(); // clamp(RLIMIT_NOFILE soft / 4, 64, 1024)
+
+private:
+    void init(const QDBusUnixFileDescriptor &owned);
+    QExplicitlySharedDataPointer<UnixFdPrivate> d;
 };
 
 } // namespace DBus

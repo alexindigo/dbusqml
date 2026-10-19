@@ -1,5 +1,6 @@
 #include "dbusutils.h"
 #include "dbusconnection.h"
+#include "dbustypes.h"
 
 #include <QJSEngine>
 #include <QDBusArgument>
@@ -8,6 +9,8 @@
 #include <QDBusUnixFileDescriptor>
 #include <QDBusVariant>
 #include <cerrno>
+#include <climits>
+#include <cmath>
 #include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
@@ -147,7 +150,24 @@ QJSValue DBusUtils::makeArrayBuffer(const QByteArray &bytes) {
     return buf;
 }
 
-int DBusUtils::openFd(const QString &path, const QString &mode) {
+// The one rule for the helpers' fd argument: a valid DBusQML.unixFd, never a
+// number (a number is not proof of ownership — 3 might be anything, 0 is
+// stdin). Returns the borrowed descriptor, or -1 with a warning.
+static int helperFd(const char *fn, const QVariant &fd) {
+    if (fd.userType() != qMetaTypeId<DBus::UnixFd>()) {
+        qWarning("DBusUtils::%s: expects a DBusQML.unixFd, got %s", fn,
+                 fd.isValid() ? fd.metaType().name() : "undefined");
+        return -1;
+    }
+    const DBus::UnixFd unixFd = fd.value<DBus::UnixFd>();
+    if (!unixFd.isValid()) {
+        qWarning("DBusUtils::%s: the DBusQML.unixFd is not valid (closed)", fn);
+        return -1;
+    }
+    return unixFd.fileDescriptor();
+}
+
+DBus::UnixFd DBusUtils::openFd(const QString &path, const QString &mode) {
     int flags = -1;
     if (mode == QLatin1String("r"))
         flags = O_RDONLY;
@@ -159,62 +179,78 @@ int DBusUtils::openFd(const QString &path, const QString &mode) {
     if (flags < 0) {
         qWarning("DBusUtils::openFd: unknown mode '%s' for %s — use r, w or rw", qPrintable(mode),
                  qPrintable(path));
-        return -1;
+        return DBus::UnixFd();
     }
 
-    const int fd = ::open(path.toLocal8Bit().constData(), flags, 0644);
-    if (fd < 0)
+    const int fd = ::open(path.toLocal8Bit().constData(), flags | O_CLOEXEC, 0644);
+    if (fd < 0) {
         qWarning("DBusUtils::openFd: failed to open %s (mode %s): %s", qPrintable(path),
                  qPrintable(mode), std::strerror(errno));
-    return fd;
+        return DBus::UnixFd();
+    }
+    DBus::UnixFd owned(fd); // dups; the wrapper owns its copy
+    ::close(fd);
+    if (QJSEngine *engine = qjsEngine(this))
+        owned.noteDelivered(engine);
+    return owned;
 }
 
-int DBusUtils::writeFd(int fd, const QJSValue &data) {
-    if (fd < 0) {
-        qWarning("DBusUtils::writeFd: invalid fd %d", fd);
+int DBusUtils::writeFd(const QVariant &fdValue, const QJSValue &data) {
+    const int fd = helperFd("writeFd", fdValue);
+    if (fd < 0)
         return -1;
-    }
     const QByteArray bytes = jsToBytes(data);
     const ssize_t n = ::write(fd, bytes.constData(), size_t(bytes.size()));
     if (n < 0) {
-        qWarning("DBusUtils::writeFd: write on fd %d failed: %s", fd, std::strerror(errno));
+        qWarning("DBusUtils::writeFd: write failed: %s", std::strerror(errno));
         return -1;
     }
     return int(n);
 }
 
-QJSValue DBusUtils::readFd(int fd, int maxBytes) {
-    if (fd < 0) {
-        qWarning("DBusUtils::readFd: invalid fd %d", fd);
-        return makeArrayBuffer({});
-    }
-    if (maxBytes <= 0)
+QJSValue DBusUtils::readFd(const QVariant &fdValue, int maxBytes) {
+    const int fd = helperFd("readFd", fdValue);
+    if (fd < 0 || maxBytes <= 0)
         return makeArrayBuffer({});
 
     QByteArray bytes(maxBytes, Qt::Uninitialized);
     const ssize_t n = ::read(fd, bytes.data(), size_t(maxBytes));
     if (n < 0) {
-        qWarning("DBusUtils::readFd: read on fd %d failed: %s", fd, std::strerror(errno));
+        qWarning("DBusUtils::readFd: read failed: %s", std::strerror(errno));
         return makeArrayBuffer({});
     }
     bytes.resize(int(n));
     return makeArrayBuffer(bytes);
 }
 
-void DBusUtils::closeFd(int fd) {
-    if (fd < 0) {
-        qWarning("DBusUtils::closeFd: invalid fd %d", fd);
+void DBusUtils::closeFd(const QJSValue &fdValue) {
+    // Only for a number unixFd.take() handed out. A unixFd closes itself;
+    // 0-2 are the process's stdio, never a take()n number (take() dups to
+    // >= 3) — refusing them keeps a stray 0 (e.g. Number(unixFd) → NaN → 0)
+    // from closing stdin.
+    if (fdValue.toVariant().userType() == qMetaTypeId<DBus::UnixFd>()) {
+        qWarning("DBusUtils::closeFd: refusing a DBusQML.unixFd — call its close()");
+        return;
+    }
+    const double n = fdValue.isNumber() ? fdValue.toNumber() : -1.0;
+    if (!(n >= 0 && n <= INT_MAX && std::floor(n) == n)) {
+        qWarning("DBusUtils::closeFd: expects a number from unixFd.take(), got %s",
+                 qPrintable(fdValue.toString()));
+        return;
+    }
+    const int fd = static_cast<int>(n);
+    if (fd <= 2) {
+        qWarning("DBusUtils::closeFd: refusing to close fd %d (stdin/stdout/stderr)", fd);
         return;
     }
     if (::close(fd) != 0)
         qWarning("DBusUtils::closeFd: close on fd %d failed: %s", fd, std::strerror(errno));
 }
 
-QString DBusUtils::fdUrl(int fd) {
-    if (fd < 0) {
-        qWarning("DBusUtils::fdUrl: invalid fd %d", fd);
+QString DBusUtils::fdUrl(const QVariant &fdValue) {
+    const int fd = helperFd("fdUrl", fdValue);
+    if (fd < 0)
         return {};
-    }
     return QStringLiteral("file:///proc/self/fd/%1").arg(fd);
 }
 
@@ -363,13 +399,14 @@ QVariant readBySignature(const QDBusArgument &arg, DecodeState &state, DecodeDep
             return out;
         }
         if (elemType == QLatin1Char('h')) {
-            // Unix fds — delivered as plain ints (receiver closes).
+            // Unix fds — each element becomes its own DBusQML.unixFd (a
+            // fresh dup, P1; invalid → valid:false, P2).
             QVariantList out;
             arg.beginArray();
             while (!arg.atEnd()) {
                 QDBusUnixFileDescriptor fd;
                 arg >> fd;
-                out.append(fd.isValid() ? fd.takeFileDescriptor() : -1);
+                out.append(QVariant::fromValue(DBus::UnixFd(fd)));
             }
             arg.endArray();
             return out;
@@ -504,16 +541,13 @@ QVariant readBySignature(const QDBusArgument &arg, DecodeState &state, DecodeDep
     }
 
     if (sig == QLatin1String("h")) {
-        // Unix fd — delivered as a plain int (dbus-next + Nemo double
-        // precedent). The RECEIVER closes the fd. CF-25: invalid fds are
-        // -1 here AND in the ah-array path (was: invalid QVariant / JS
-        // undefined here) — one sentinel, branch-testable in JS either
-        // way (D4, owner-vetoable at V1).
+        // Unix fd — a DBusQML.unixFd owning a fresh dup() of the message's
+        // descriptor (P1: every decode, hence every listener, owns its own;
+        // the message keeps and closes its copy). An invalid fd arrives as
+        // a unixFd with valid === false (P2).
         QDBusUnixFileDescriptor fd;
         arg >> fd;
-        if (!fd.isValid())
-            return QVariant::fromValue(-1);
-        return QVariant::fromValue(fd.takeFileDescriptor());
+        return QVariant::fromValue(DBus::UnixFd(fd));
     }
 
     // Never retry an unconsumed value. The message boundary owns reporting.
@@ -562,10 +596,8 @@ QVariant unwrapDbus(const QVariant &v, DecodeState &state, DecodeDepth depth) {
     }
     // Preserve native scalar carriers for C++ consumers, as before. The
     // signature reader still normalizes o/g inside raw container carriers.
-    if (type == qMetaTypeId<QDBusUnixFileDescriptor>()) {
-        QDBusUnixFileDescriptor fd = v.value<QDBusUnixFileDescriptor>();
-        return fd.isValid() ? fd.takeFileDescriptor() : -1;
-    }
+    if (type == qMetaTypeId<QDBusUnixFileDescriptor>())
+        return QVariant::fromValue(DBus::UnixFd(v.value<QDBusUnixFileDescriptor>()));
     if ((type == QMetaType::QStringList || type == QMetaType::QByteArray) &&
         !enterDecodeContainer(state, depth, QLatin1Char('a')))
         return {};

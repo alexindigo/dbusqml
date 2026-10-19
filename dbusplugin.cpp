@@ -72,6 +72,11 @@ static void registerTypeConverters() {
         [](const DBus::Bytes &b) { return b.value; });
     QMetaType::registerConverter<DBus::Struct, QVariantList>(
         [](const DBus::Struct &s) { return s.value; });
+    // P6: C++ consumers receive DBus::UnixFd; it converts to a
+    // QDBusUnixFileDescriptor sharing its descriptor. Deliberately NO
+    // conversion to int — a number is never an fd (finding #4).
+    QMetaType::registerConverter<DBus::UnixFd, QDBusUnixFileDescriptor>(
+        [](const DBus::UnixFd &fd) { return fd.descriptor(); });
 }
 
 // Static initializer — runs when the shared library is loaded

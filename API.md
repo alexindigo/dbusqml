@@ -938,6 +938,10 @@ reply alive. A pure C++ consumer (no QML engine) keeps the reply parented to
 its creator. The promise-style `asyncCall(message, resolve, reject)` manages
 its own reply and deletes it once it settles, with or without callbacks.
 
+A reply owns its fds: a received `h` in its values is a
+[`DBusQML.unixFd`](#unix-file-descriptors-h) that closes when the reply and
+every copy read from it are gone (or at once, on `close()`).
+
 ---
 
 ### `DBusError` (Structured Value)
@@ -998,6 +1002,7 @@ container supplies the `v`); `variant(variant(x))` produces an explicit inner
 variant.
 | `DBus::Bytes` | `bytes` | Byte array (`ay`). |
 | `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. It works in every position — variant payloads, map/list values, signal args, call args. The outermost struct carries the wire signature; inner structs compose naturally. |
+| `DBus::UnixFd` | `unixFd` | An owned Unix file descriptor (`h`) — see [Unix file descriptors](#unix-file-descriptors-h). The only way to send an fd; every received fd arrives as one. |
 
 When the method signature is known (from introspection or
 catalog), plain JS values are marshaled correctly — no wrapper types needed.
@@ -1035,30 +1040,103 @@ lossless end-to-end.
 
 ## Unix file descriptors (`h`)
 
-fds pass in both directions as plain integers with a declared `h`
-signature (or an `ah` array). The **receiver** closes the fd; the sender
-keeps ownership of its own end. Works over session/system/custom buses on
-unix sockets (the ScreenCast/Camera `OpenPipeWireRemote` scenario). An fd
-that arrives **invalid** reads as `-1` — one sentinel in both the scalar
-and array paths, branch-testable in JS (`if (fd === -1)`).
+A file descriptor crosses D-Bus only as a **`DBusQML.unixFd`** — a value that
+**owns** its descriptor (prior art: Node `FileHandle`, Go `os.File`, Qt
+`QDBusUnixFileDescriptor`, dbus-python `UnixFd`). This works in both
+directions, over session, system and custom buses (the ScreenCast/Camera
+`OpenPipeWireRemote` scenario).
 
-### The fd quartet + `fdUrl` (`DBusUtils`)
+- **Sending.** An `h` position (top level, `ah`, struct member, dict value,
+  variant payload) accepts only a `unixFd` (C++: also a
+  `QDBusUnixFileDescriptor`). A plain number fails the call **locally**, with
+  an error naming `DBusQML.unixFd`, and nothing is sent. This holds whatever
+  declared the `h`: peer introspection, the catalog, `_signatures`, a message
+  signature, or `variant(x, "h")`. On the served side, a reply or signal arg
+  declared `h` that receives a number becomes an error reply or a skipped
+  signal (with a warning). A closed `unixFd` cannot be sent either. Sending
+  never consumes the sender's `unixFd`: it stays open until you `close()` it.
+- **Receiving.** Every received `h` (and every `ah` element) arrives as a
+  `unixFd` holding **its own** duplicate of the descriptor. Two listeners on
+  one signal (two watchers, a watcher and a proxy, …) each get an
+  independent fd, so one listener's `close()` never closes another's. An fd
+  that arrives invalid is a `unixFd` with `valid === false`. An option
+  declared `h` in `_options` takes only a received fd; a number there is an
+  `InvalidArgs` type mismatch.
+
+```qml
+import DBus 1.0
+import DBus 1.0 as DBusQML
+
+// Send: wrap the fd you want to pass (the wrapper dups it; you keep yours).
+var f = DBusUtils.openFd("/run/user/1000/doc.txt", "r")
+proxy.call("Consume", [f])          // declared h: the fd travels
+f.close()                           // done with it on our side
+
+// Receive: a unixFd you own.
+var r = proxy.call("OpenThing", [])
+r.finished.connect(function() {
+    var fd = r.value
+    if (!fd.valid) return
+    var bytes = DBusUtils.readFd(fd, 4096)
+    fd.close()
+})
+```
+
+### `DBusQML.unixFd`
+
+| Member | Description |
+| :--- | :--- |
+| `valid` | `true` while the fd is open. `false` after `close()`, after a failed `openFd`, and for a received invalid fd |
+| `close()` | Closes the fd now, for **every copy** of the value. Idempotent |
+| `take()` | Returns a **duplicate** fd number (at least 3) that you own; close it with `DBusUtils.closeFd(n)`. The `unixFd` itself stays open. Use it to hand the fd to an API that wants a number |
+| `toString()` | `"DBusQML.unixFd(valid)"` / `"DBusQML.unixFd(invalid)"`. It never shows the number |
+| `new DBusQML.unixFd(n)` | Wraps a duplicate of fd number `n`; you keep (and close) `n` |
+
+Copies share one state: `var b = a`, a `property var` holding it, a JS
+array element and the `reply.value` you read again all refer to the same fd.
+A unixFd converts to no number (`Number(fd)` is `NaN`).
+
+**Closing.** Call `close()` when you are done. A `unixFd` that reached
+JavaScript and is collected while still open is closed by the garbage
+collector, which warns `dbusqml: fd closed by garbage collector — call
+close()`. Engine destruction closes every fd its JS still holds. A **pressure
+valve** watches the wrapper-owned fds of the whole process. When their
+number crosses `clamp(RLIMIT_NOFILE soft / 4, 64, 1024)`, it queues a garbage
+collection on every engine that received a `unixFd`, and warns once per
+process. It is a fallback for forgotten `close()` calls, not a substitute for
+them.
+
+**A reply owns its fds.** The fds in a `DBusPendingReply`'s values belong
+to the reply. `reply.value` hands out copies of the same `unixFd`, and the
+fds close when the reply and every copy are gone. Fds nobody reads therefore
+close with the reply. Examples: the values after the first in a
+promise-style `asyncCall`, a promise without callbacks, a rejected
+`Properties.Set`, an option the whitelist drops.
+
+C++ consumers receive the same `DBus::UnixFd` in `QVariant`s. It converts to
+a `QDBusUnixFileDescriptor` that shares its descriptor
+(`v.value<QDBusUnixFileDescriptor>()`), and `fileDescriptor()` borrows the
+number while the value stays open. A `unixFd` is not for concurrent use from
+several threads.
+
+### fd helpers (`DBusUtils`)
 
 QML has no fd I/O — the same gap the `ay` codec hit (0.3.0 shipped
-`textFromBytes`/`bytesFromText` *with* `ay` support because QML lacked
-text codecs). The fd quartet fills it the same way, so a received fd is
-usable from the script layer, and the receiver-closes contract is
-dischargeable from QML via `closeFd`:
+`textFromBytes`/`bytesFromText` *with* `ay` support because QML lacked text
+codecs). These helpers fill it. Every fd they take or return is a `unixFd`;
+a plain number is refused with a warning, never read, written or turned into
+a URL.
 
-- `DBusUtils.openFd(path, mode) → int` — fopen-style `mode` (`"r"`,
-  `"w"`, `"rw"`); −1 + warning on failure.
-- `DBusUtils.writeFd(fd, ArrayBuffer|string) → int` — bytes written;
+- `DBusUtils.openFd(path, mode) → unixFd` — fopen-style `mode` (`"r"`,
+  `"w"`, `"rw"`); an invalid `unixFd` + warning on failure.
+- `DBusUtils.writeFd(unixFd, ArrayBuffer|string) → int` — bytes written;
   −1 + warning on failure.
-- `DBusUtils.readFd(fd, maxBytes) → ArrayBuffer` — empty on error/EOF.
-- `DBusUtils.closeFd(fd)` — no-op warning on an invalid fd, never a crash.
-- `DBusUtils.fdUrl(fd) → string` — `"file:///proc/self/fd/N"`, so
+- `DBusUtils.readFd(unixFd, maxBytes) → ArrayBuffer` — empty on error/EOF.
+- `DBusUtils.fdUrl(unixFd) → string` — `"file:///proc/self/fd/N"`, so
   regular-file fds flow into path-based QML consumers (`Image`,
   Quickshell `FileView`, …) with no extra I/O code.
+- `DBusUtils.closeFd(n)` — closes a number you got from `take()`. It refuses
+  0–2 (stdin/stdout/stderr) and a `unixFd` (call its `close()`).
 
 Caveats:
 
@@ -1069,9 +1147,40 @@ Caveats:
 - **Access mode travels with the fd.** A transferred fd keeps its access
   mode; a receiver cannot read through a write-only fd — open `rw` when
   the other side must read.
-- **fdUrl lifetime.** The URL is valid only while the fd stays open in
-  this process — lazy/async loaders must not outlive it. Close with
-  `closeFd` when done (that is the receiver-closes contract).
+- **fdUrl lifetime.** The URL is valid only while the `unixFd` stays open —
+  lazy/async loaders must not outlive it.
+
+### Migrating from 0.9.0 / 1.0 plain-int fds
+
+| Before | Now |
+| :--- | :--- |
+| send an fd number with a declared `h` | send `DBusUtils.openFd(...)` or `new DBusQML.unixFd(n)` |
+| a received fd is an `int`, `-1` if invalid | a received fd is a `unixFd`, `valid === false` if invalid |
+| `DBusUtils.closeFd(fd)` on a received fd | `fd.close()` |
+| `openFd(...)` returns an `int`, `-1` on failure | `openFd(...)` returns a `unixFd`; check `valid` |
+| `readFd`/`writeFd`/`fdUrl(int)` | the same helpers with a `unixFd` |
+
+## ListModel and dbusqml values
+
+Qt's [`ListModel`](https://doc.qt.io/qt-6/qml-qtqml-models-listmodel.html)
+keeps QObjects, URLs, dates, functions and simple values (strings, numbers,
+booleans, nested lists). It copies **any other object property by property**
+into a plain map. Qt's own value types behave the same: `Qt.point(1, 2)`
+stored in a `ListModel` comes back as a plain `{x, y}` object.
+
+For dbusqml this means every value wrapper (`objectPath`, `variant`,
+`uint64`, …, `unixFd`) loses its type and methods inside a `ListModel` row.
+For a `unixFd` the copy is a frozen `{valid: true}` that holds **no
+descriptor**: the real fd closes when the original `unixFd` is collected
+(with the GC warning), and the helpers refuse the copy.
+
+Use instead:
+
+- a `property var` or a JS array / object. JS arrays work directly as view
+  models (`model: myArray`);
+- Quickshell's `ScriptModel` where available;
+- a key in the `ListModel` row, with the value looked up in a `property var`
+  map.
 
 ## Known Limitations
 

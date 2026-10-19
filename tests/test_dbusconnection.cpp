@@ -12,6 +12,9 @@
 #include <QDBusUnixFileDescriptor>
 #include <QProcess>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <QTemporaryFile>
 #include <QDBusConnectionInterface>
 #include <QDBusContext>
 #include <QDBusMetaType>
@@ -37,6 +40,7 @@
 #include "../dbussignalwatcher.h"
 #include "../dbusobjectmanager.h"
 #include "dbustypes.h"
+#include "../dbusutils.h"
 
 // a{sa{sv}}-ish container shapes for the test service replies.
 // Registered with QtDBus in main() so the service methods can marshal.
@@ -302,6 +306,71 @@ private:
     }
 };
 ConnMessageCapture *ConnMessageCapture::s_active = nullptr;
+
+// ==================== fd ownership helpers (item 9) ====================
+//
+// Deliberately free of DBus::UnixFd: the tests that use them must also
+// compile against the pre-unixFd tree, where a received fd was a plain int
+// (their RED baseline).
+
+// Open descriptors of this process (the leak gauge).
+static int openFdCount() {
+    return QDir(QStringLiteral("/proc/self/fd"))
+        .entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot)
+        .size();
+}
+
+// The descriptor number a received fd value carries: a unixFd through its
+// QDBusUnixFileDescriptor conversion, or (pre-unixFd) a plain int.
+static int receivedFdNumber(const QVariant &v) {
+    if (v.userType() == QMetaType::Int)
+        return v.toInt();
+    if (v.canConvert<QDBusUnixFileDescriptor>()) {
+        const QDBusUnixFileDescriptor d = v.value<QDBusUnixFileDescriptor>();
+        return d.isValid() ? d.fileDescriptor() : -1;
+    }
+    return -1;
+}
+
+// Closes a received fd value the way its type demands: a gadget's close()
+// through its meta-object, a plain int through ::close.
+static void closeReceivedFd(QVariant v) {
+    if (v.userType() == QMetaType::Int) {
+        ::close(v.toInt());
+        return;
+    }
+    if (const QMetaObject *mo = v.metaType().metaObject()) {
+        const int idx = mo->indexOfMethod("close()");
+        if (idx >= 0)
+            mo->method(idx).invokeOnGadget(v.data());
+    }
+}
+
+static QByteArray preadAll(int fd) {
+    char buf[128] = {};
+    const ssize_t n = ::pread(fd, buf, sizeof(buf), 0);
+    return n > 0 ? QByteArray(buf, int(n)) : QByteArray();
+}
+
+static bool fdIsOpen(int fd) {
+    return fd >= 0 && ::fcntl(fd, F_GETFD) != -1;
+}
+
+// Replies to Give with ("first", h) — an fd the promise path's resolve
+// never sees (only the first value reaches it; finding #9).
+class FdReplyObject : public QDBusVirtualObject {
+public:
+    int fd = -1;
+    int calls = 0;
+    QString introspect(const QString &) const override { return {}; }
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.interface() == QLatin1String("org.freedesktop.DBus.Introspectable"))
+            return false;
+        ++calls;
+        return conn.send(msg.createReply(
+            {QStringLiteral("first"), QVariant::fromValue(QDBusUnixFileDescriptor(fd))}));
+    }
+};
 
 // Manual property server for the PropertiesChanged protocol tests (A2/A3/A16):
 // Introspect declares the properties; Get/GetAll/Set/Bump are fully manual so
@@ -1254,23 +1323,527 @@ private slots:
         QCOMPARE(arr.at(1).toByteArray(), QByteArrayLiteral("T"));
     }
 
+    // ==================== fd ownership (item 9, finding #4/#9) ====================
+    //
+    // RED-capable tests first: they compile against the pre-unixFd tree.
+
+    // finding #4: a plain number at a declared `h` is a LOCAL error naming
+    // DBusQML.unixFd — whatever declared the `h` (peer introspection,
+    // the _signatures override, a message signature, variant(x, sig)) and
+    // wherever it sits (top level, array, struct, dict value). Nothing is
+    // sent. The number is a REAL open fd, so the pre-fix tree dup()ed it
+    // and handed it to the peer.
+    void testFdNumberRefusedAtEveryHSite_data() {
+        QTest::addColumn<QString>("site");
+        for (const char *row : {"proxy-h", "proxy-ah", "proxy-struct", "proxy-dict", "override-h",
+                                "message-h", "message-ah", "variant-h"})
+            QTest::newRow(row) << QString::fromLatin1(row);
+    }
+    void testFdNumberRefusedAtEveryHSite() {
+        QFETCH(QString, site);
+        int pipeFds[2];
+        QCOMPARE(::pipe(pipeFds), 0);
+        auto closePipe = qScopeGuard([&] {
+            ::close(pipeFds[0]);
+            ::close(pipeFds[1]);
+        });
+        const int n = pipeFds[1];
+
+        SignatureProbeObject probe;
+        probe.argType = site == QLatin1String("proxy-ah")       ? QStringLiteral("ah")
+                        : site == QLatin1String("proxy-struct") ? QStringLiteral("(hs)")
+                        : site == QLatin1String("proxy-dict")   ? QStringLiteral("a{sh}")
+                        : site == QLatin1String("override-h")   ? QStringLiteral("s")
+                                                                : QStringLiteral("h");
+        const QString svc = QStringLiteral("org.dbusqml.FdProbe");
+        auto bus = QDBusConnection::sessionBus();
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/FdProbe"), &probe));
+        QVERIFY(bus.registerService(svc));
+        auto unregister = qScopeGuard([&] {
+            bus.unregisterObject(QStringLiteral("/FdProbe"));
+            bus.unregisterService(svc);
+        });
+
+        auto expectRefused = [&](DBusPendingReply *reply) {
+            QVERIFY(reply != nullptr);
+            QTRY_VERIFY_WITH_TIMEOUT(reply->isFinished(), 3000);
+            QVERIFY2(reply->isError(), "a number at an h position must fail locally");
+            QCOMPARE(reply->error().name(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+            QVERIFY2(reply->error().message().contains(QStringLiteral("DBusQML.unixFd")),
+                     qPrintable(reply->error().message()));
+            QTest::qWait(100);
+            QCOMPARE(probe.calls, 0); // nothing sent
+        };
+
+        if (site.startsWith(QLatin1String("proxy")) || site == QLatin1String("override-h")) {
+            DBusProxy proxy;
+            proxy.setService(svc);
+            proxy.setPath(QStringLiteral("/FdProbe"));
+            proxy.setIface(QStringLiteral("org.dbusqml.SigProbe"));
+            if (site == QLatin1String("override-h"))
+                proxy.setSignatures(QVariantMap{{QStringLiteral("Take"), QStringLiteral("h")}});
+            QSignalSpy ready(&proxy, &DBusProxy::introspectionCompleted);
+            QTRY_VERIFY_WITH_TIMEOUT(!ready.isEmpty(), 5000);
+            const QVariant value = site == QLatin1String("proxy-ah") ? QVariant(QVariantList{n, n})
+                                   : site == QLatin1String("proxy-struct")
+                                       ? QVariant(QVariantList{n, QStringLiteral("s")})
+                                   : site == QLatin1String("proxy-dict")
+                                       ? QVariant(QVariantMap{{QStringLiteral("k"), n}})
+                                       : QVariant(n);
+            expectRefused(proxy.call(QStringLiteral("Take"), {value}));
+            return;
+        }
+
+        DBusConnection *conn =
+            trackedConnectToBus(QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS")));
+        QVERIFY(conn != nullptr);
+        auto dropConn = qScopeGuard([&] { delete conn; });
+        DBusMessage m;
+        m.setService(svc);
+        m.setPath(QStringLiteral("/FdProbe"));
+        m.setIface(QStringLiteral("org.dbusqml.SigProbe"));
+        m.setMember(QStringLiteral("Take"));
+        if (site == QLatin1String("message-h")) {
+            m.setSignature(QStringLiteral("h"));
+            m.setArguments({n});
+        } else if (site == QLatin1String("message-ah")) {
+            m.setSignature(QStringLiteral("ah"));
+            m.setArguments({QVariant(QVariantList{n})});
+        } else { // variant-h: an explicit variant payload signature
+            m.setArguments({QVariant::fromValue(DBus::Variant(QJSValue(n), QStringLiteral("h")))});
+        }
+        DBusPendingReply *reply = conn->asyncCall(m);
+        expectRefused(reply);
+        delete reply;
+    }
+
+    // P1 + the first-listener-only bug: two subscribers to one fd signal
+    // each get a valid fd of their own (h and every ah element) — one
+    // listener closing its fd leaves the other's open. Pre-fix, the first
+    // decode stole the message's descriptor (takeFileDescriptor does not
+    // detach a shared QDBusUnixFileDescriptor) and the second got -1.
+    void testFdSignalEachListenerOwnsItsFd() {
+        QTemporaryFile file;
+        QVERIFY(file.open());
+        file.write("listener-bytes");
+        file.flush();
+        const int fileFd = ::open(file.fileName().toLocal8Bit().constData(), O_RDONLY);
+        QVERIFY(fileFd >= 0);
+        auto closeFile = qScopeGuard([&] { ::close(fileFd); });
+
+        DBusSignalWatcher w1, w2;
+        for (DBusSignalWatcher *w : {&w1, &w2}) {
+            w->setPath(QStringLiteral("/FdSig"));
+            w->setIface(QStringLiteral("org.dbusqml.FdSig"));
+            w->setMember(QStringLiteral("Handed"));
+            w->componentComplete();
+        }
+        QSignalSpy s1(&w1, &DBusSignalWatcher::received);
+        QSignalSpy s2(&w2, &DBusSignalWatcher::received);
+
+        const QString emitterName = QStringLiteral("item9-fd-emitter");
+        QDBusConnection emitter = QDBusConnection::connectToBus(
+            QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS")), emitterName);
+        QVERIFY(emitter.isConnected());
+        auto dropEmitter = qScopeGuard([&] { QDBusConnection::disconnectFromBus(emitterName); });
+        QTest::qWait(200); // let both match rules land
+        QDBusMessage sig = QDBusMessage::createSignal(QStringLiteral("/FdSig"),
+                                                      QStringLiteral("org.dbusqml.FdSig"),
+                                                      QStringLiteral("Handed"));
+        QDBusArgument arr;
+        arr.beginArray(QMetaType::fromType<QDBusUnixFileDescriptor>());
+        arr << QDBusUnixFileDescriptor(fileFd) << QDBusUnixFileDescriptor(fileFd);
+        arr.endArray();
+        sig.setArguments(
+            {QVariant::fromValue(QDBusUnixFileDescriptor(fileFd)), QVariant::fromValue(arr)});
+        QVERIFY(emitter.send(sig));
+        QTRY_COMPARE_WITH_TIMEOUT(s1.count(), 1, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(s2.count(), 1, 5000);
+
+        const QVariantList a1 = s1.first().at(1).toList();
+        const QVariantList a2 = s2.first().at(1).toList();
+        QCOMPARE(a1.size(), 2);
+        QCOMPARE(a2.size(), 2);
+        QVariantList all1{a1.at(0)}, all2{a2.at(0)};
+        all1 += a1.at(1).toList();
+        all2 += a2.at(1).toList();
+        QCOMPARE(all1.size(), 3);
+        QCOMPARE(all2.size(), 3);
+        QSet<int> numbers;
+        for (const QVariantList *list : {&all1, &all2}) {
+            for (const QVariant &v : *list) {
+                const int fd = receivedFdNumber(v);
+                QVERIFY2(fd >= 0, "every listener must receive a valid fd for every h");
+                QCOMPARE(preadAll(fd), QByteArrayLiteral("listener-bytes"));
+                numbers.insert(fd);
+            }
+        }
+        QCOMPARE(numbers.size(), 6); // six independent descriptors
+        const int kept = receivedFdNumber(all2.at(0));
+        for (const QVariant &v : std::as_const(all1))
+            closeReceivedFd(v);
+        QVERIFY2(fdIsOpen(kept), "one listener's close must not close another's fd");
+        QCOMPARE(preadAll(kept), QByteArrayLiteral("listener-bytes"));
+        for (const QVariant &v : std::as_const(all2))
+            closeReceivedFd(v);
+    }
+
+    // finding #9: a reply owns its fds. The promise overload hands resolve
+    // only the first value; the fd behind it, and every fd of a promise
+    // without callbacks, closes when the reply settles. Pre-fix each call
+    // leaked one descriptor (decoded to an int nobody closed).
+    void testFdPromiseUnreadValuesClosed_data() {
+        QTest::addColumn<bool>("withResolve");
+        QTest::newRow("no-callbacks") << false;
+        QTest::newRow("resolve-ignores-fd") << true;
+    }
+    void testFdPromiseUnreadValuesClosed() {
+        QFETCH(bool, withResolve);
+        QTemporaryFile file;
+        QVERIFY(file.open());
+        file.write("promise");
+        file.flush();
+        FdReplyObject peer;
+        peer.fd = ::open(file.fileName().toLocal8Bit().constData(), O_RDONLY);
+        QVERIFY(peer.fd >= 0);
+        auto closePeer = qScopeGuard([&] { ::close(peer.fd); });
+        const QString svc = QStringLiteral("org.dbusqml.FdReply");
+        auto bus = QDBusConnection::sessionBus();
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/FdReply"), &peer));
+        QVERIFY(bus.registerService(svc));
+        auto unregister = qScopeGuard([&] {
+            bus.unregisterObject(QStringLiteral("/FdReply"));
+            bus.unregisterService(svc);
+        });
+        DBusConnection *conn =
+            trackedConnectToBus(QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS")));
+        QVERIFY(conn != nullptr);
+        auto dropConn = qScopeGuard([&] { delete conn; });
+        DBusMessage m;
+        m.setService(svc);
+        m.setPath(QStringLiteral("/FdReply"));
+        m.setIface(QStringLiteral("org.dbusqml.FdReply"));
+        m.setMember(QStringLiteral("Give"));
+        m.setTimeout(3000);
+        QJSEngine js;
+        js.globalObject().setProperty(QStringLiteral("hits"), 0);
+        const QJSValue resolve =
+            withResolve ? js.evaluate(QStringLiteral("(function(v) { hits = hits + 1 })"))
+                        : QJSValue();
+        // Warm-up: the first round trip may open lazily created descriptors.
+        {
+            DBusPendingReply *warm = conn->asyncCall(m);
+            QTRY_VERIFY_WITH_TIMEOUT(warm->isFinished(), 3000);
+            delete warm;
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        }
+        const int baseline = openFdCount();
+        for (int i = 0; i < 3; ++i)
+            conn->asyncCall(m, resolve, QJSValue());
+        // Replies on one connection arrive in order: once this one is in,
+        // the three promise replies have settled.
+        DBusPendingReply *fence = conn->asyncCall(m);
+        QTRY_VERIFY_WITH_TIMEOUT(fence->isFinished(), 3000);
+        delete fence;
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QCoreApplication::processEvents();
+        QCOMPARE(peer.calls, 5);
+        if (withResolve)
+            QCOMPARE(js.globalObject().property(QStringLiteral("hits")).toInt(), 3);
+        QTRY_COMPARE_WITH_TIMEOUT(openFdCount(), baseline, 2000);
+    }
+
+    // closeFd refuses stdin/stdout/stderr: a stray 0 (Number(unixFd) is
+    // NaN, an int conversion makes it 0) must never close stdin. Pre-fix
+    // closeFd(0) closed it.
+    void testCloseFdRefusesStdio() {
+        const int saved = ::dup(0);
+        QVERIFY(saved >= 0);
+        DBusUtils utils;
+        ConnMessageCapture capture;
+        utils.closeFd(0);
+        const bool stdinOpen = fdIsOpen(0);
+        if (!stdinOpen)
+            ::dup2(saved, 0);
+        ::close(saved);
+        QVERIFY2(stdinOpen, "closeFd(0) closed stdin");
+        QVERIFY(capture.contains(QStringLiteral("refusing to close fd 0")));
+    }
+
+    // >>> RED-BASELINE-STRIP-BEGIN: item-9 new-API tests (DBus::UnixFd).
+    // They exercise the type this item ADDS and cannot compile against the
+    // pre-unixFd tree; the RED scratch copy deletes them to the END marker.
+
+    // B4 + the one fd send rule at the walker level: only an explicit, open
+    // fd value produces `h`.
     void testWalkerFdValidity() {
-        // B4: invalid fds are rejected everywhere — marshalBySignature's h
-        // coercion and wireMarshalable's fd blessing.
-        int invalidFd = -1;
-        QVariant m = marshalBySignature(QStringLiteral("h"), QVariant(invalidFd));
-        QVERIFY2(!m.isValid(), "marshalBySignature(h, -1) must fail loud");
-        QVERIFY2(!wireMarshalable(QVariant::fromValue(QDBusUnixFileDescriptor(invalidFd))),
-                 "wireMarshalable must reject an invalid fd");
-        // Valid fd still passes.
         int valid[2];
         QCOMPARE(pipe(valid), 0);
-        QVariant ok = marshalBySignature(QStringLiteral("h"), QVariant(valid[1]));
-        QVERIFY(ok.isValid());
-        QVERIFY(wireMarshalable(QVariant::fromValue(QDBusUnixFileDescriptor(valid[1]))));
-        close(valid[0]);
-        close(valid[1]);
+        auto closePipe = qScopeGuard([&] {
+            ::close(valid[0]);
+            ::close(valid[1]);
+        });
+        // A number is never an fd.
+        QVariant m = marshalBySignature(QStringLiteral("h"), QVariant(valid[1]));
+        QVERIFY(!wireMarshalable(m));
+        QVERIFY2(fdFailureIn(m).contains(QStringLiteral("DBusQML.unixFd")),
+                 qPrintable(fdFailureIn(m)));
+        QVERIFY(
+            !writeBySignature(QStringLiteral("ah"), QVariant(QVariantList{valid[1]})).isValid());
+        QVERIFY(!wireMarshalable(QVariant::fromValue(QDBusUnixFileDescriptor(-1))));
+        // An open unixFd produces its descriptor; a closed one cannot be sent.
+        DBus::UnixFd fd(valid[1]);
+        QVERIFY(fd.isValid());
+        QVERIFY(fd.fileDescriptor() != valid[1]); // its own dup
+        QVariant ok = marshalBySignature(QStringLiteral("h"), QVariant::fromValue(fd));
+        QCOMPARE(ok.userType(), qMetaTypeId<QDBusUnixFileDescriptor>());
+        QVERIFY(wireMarshalable(ok));
+        QVERIFY(writeBySignature(QStringLiteral("a(hs)"),
+                                 QVariant(QVariantList{QVariant(
+                                     QVariantList{QVariant::fromValue(fd), QStringLiteral("s")})}))
+                    .isValid());
+        fd.close();
+        QVariant closed = marshalBySignature(QStringLiteral("h"), QVariant::fromValue(fd));
+        QVERIFY(!wireMarshalable(closed));
+        QVERIFY(fdFailureIn(closed).contains(QStringLiteral("closed")));
+        QString err;
+        QVERIFY(!checkSendable({toDbusVariant(QVariant::fromValue(fd))}, &err));
+        QVERIFY2(err.contains(QStringLiteral("closed DBusQML.unixFd")), qPrintable(err));
     }
+
+    // The explicit value IS sent, at every site the number was refused.
+    void testFdExplicitValueSent_data() {
+        QTest::addColumn<QString>("site");
+        for (const char *row : {"proxy-h", "proxy-ah", "proxy-struct", "proxy-dict", "message-h",
+                                "inference", "qdbus-descriptor"})
+            QTest::newRow(row) << QString::fromLatin1(row);
+    }
+    void testFdExplicitValueSent() {
+        QFETCH(QString, site);
+        int pipeFds[2];
+        QCOMPARE(::pipe(pipeFds), 0);
+        DBus::UnixFd fd(pipeFds[1]);
+        ::close(pipeFds[1]);
+        auto closePipe = qScopeGuard([&] { ::close(pipeFds[0]); });
+        const QVariant fdv = QVariant::fromValue(fd);
+        SignatureProbeObject probe;
+        probe.argType = site == QLatin1String("proxy-ah")       ? QStringLiteral("ah")
+                        : site == QLatin1String("proxy-struct") ? QStringLiteral("(hs)")
+                        : site == QLatin1String("proxy-dict")   ? QStringLiteral("a{sh}")
+                                                                : QStringLiteral("h");
+        const QString svc = QStringLiteral("org.dbusqml.FdProbe");
+        auto bus = QDBusConnection::sessionBus();
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/FdProbe"), &probe));
+        QVERIFY(bus.registerService(svc));
+        auto unregister = qScopeGuard([&] {
+            bus.unregisterObject(QStringLiteral("/FdProbe"));
+            bus.unregisterService(svc);
+        });
+        auto expectSent = [&](DBusPendingReply *reply) {
+            QVERIFY(reply != nullptr);
+            QTRY_VERIFY_WITH_TIMEOUT(reply->isFinished(), 3000);
+            QVERIFY2(!reply->isError(), qPrintable(reply->error().message()));
+            QCOMPARE(probe.calls, 1);
+            QCOMPARE(probe.lastWireSig, probe.argType);
+        };
+        if (site.startsWith(QLatin1String("proxy"))) {
+            DBusProxy proxy;
+            proxy.setService(svc);
+            proxy.setPath(QStringLiteral("/FdProbe"));
+            proxy.setIface(QStringLiteral("org.dbusqml.SigProbe"));
+            QSignalSpy ready(&proxy, &DBusProxy::introspectionCompleted);
+            QTRY_VERIFY_WITH_TIMEOUT(!ready.isEmpty(), 5000);
+            const QVariant value = site == QLatin1String("proxy-ah")
+                                       ? QVariant(QVariantList{fdv, fdv})
+                                   : site == QLatin1String("proxy-struct")
+                                       ? QVariant(QVariantList{fdv, QStringLiteral("s")})
+                                   : site == QLatin1String("proxy-dict")
+                                       ? QVariant(QVariantMap{{QStringLiteral("k"), fdv}})
+                                       : fdv;
+            expectSent(proxy.call(QStringLiteral("Take"), {value}));
+        } else {
+            DBusConnection *conn =
+                trackedConnectToBus(QString::fromLocal8Bit(qgetenv("DBUS_SESSION_BUS_ADDRESS")));
+            QVERIFY(conn != nullptr);
+            auto dropConn = qScopeGuard([&] { delete conn; });
+            DBusMessage m;
+            m.setService(svc);
+            m.setPath(QStringLiteral("/FdProbe"));
+            m.setIface(QStringLiteral("org.dbusqml.SigProbe"));
+            m.setMember(QStringLiteral("Take"));
+            if (site == QLatin1String("message-h"))
+                m.setSignature(QStringLiteral("h"));
+            m.setArguments({site == QLatin1String("qdbus-descriptor")
+                                ? QVariant::fromValue(fd.descriptor())
+                                : fdv});
+            DBusPendingReply *reply = conn->asyncCall(m);
+            expectSent(reply);
+            delete reply;
+        }
+        QVERIFY2(fd.isValid(), "sending never consumes the sender's unixFd");
+        fd.close();
+    }
+
+    // Copies share one state; take() is a caller-owned duplicate; P6: a
+    // QVariant-carried unixFd converts to a QDBusUnixFileDescriptor sharing
+    // the descriptor; no int conversion exists.
+    void testUnixFdValueSemantics() {
+        int pipeFds[2];
+        QCOMPARE(::pipe(pipeFds), 0);
+        auto closePipe = qScopeGuard([&] { ::close(pipeFds[0]); });
+        DBus::UnixFd a(pipeFds[1]);
+        ::close(pipeFds[1]); // the caller's number; a keeps its dup
+        QVERIFY(a.isValid());
+        const int live = DBus::UnixFd::liveCount();
+        DBus::UnixFd b = a;
+        QCOMPARE(DBus::UnixFd::liveCount(), live); // a copy owns nothing new
+        const QVariant v = QVariant::fromValue(a);
+        QVERIFY(v.canConvert<QDBusUnixFileDescriptor>());
+        QCOMPARE(v.value<QDBusUnixFileDescriptor>().fileDescriptor(), a.fileDescriptor());
+        bool intOk = true;
+        v.toInt(&intOk);
+        QVERIFY2(!intOk, "a unixFd must not convert to a number");
+        const int taken = a.take();
+        QVERIFY(taken >= 3 && taken != a.fileDescriptor());
+        QVERIFY(a.isValid());
+        ::close(taken);
+        QVERIFY(a.isValid());
+        QCOMPARE(a.toString(), QStringLiteral("DBusQML.unixFd(valid)"));
+        QVERIFY(!a.toString().contains(QString::number(a.fileDescriptor())));
+        const int number = a.fileDescriptor();
+        b.close();
+        QVERIFY(!a.isValid() && !b.isValid() && !v.value<DBus::UnixFd>().isValid());
+        QCOMPARE(DBus::UnixFd::liveCount(), live - 1);
+        QVERIFY(!fdIsOpen(number));
+        QVERIFY(!DBus::UnixFd(QDBusUnixFileDescriptor()).isValid()); // P2 shape
+        QVERIFY(!DBus::UnixFd(-1).isValid());
+        const int threshold = DBus::UnixFd::pressureThreshold();
+        QVERIFY(threshold >= 64 && threshold <= 1024);
+    }
+
+    // closeFd refuses a unixFd (close() is its contract) and leaves it open.
+    void testCloseFdRefusesUnixFd() {
+        QQmlEngine engine;
+        int pipeFds[2];
+        QCOMPARE(::pipe(pipeFds), 0);
+        auto closePipe = qScopeGuard([&] {
+            ::close(pipeFds[0]);
+            ::close(pipeFds[1]);
+        });
+        DBus::UnixFd fd(pipeFds[1]);
+        DBusUtils utils;
+        ConnMessageCapture capture;
+        utils.closeFd(engine.toScriptValue(QVariant::fromValue(fd)));
+        QVERIFY(capture.contains(QStringLiteral("refusing a DBusQML.unixFd")));
+        QVERIFY(fd.isValid() && fdIsOpen(fd.fileDescriptor()));
+        QVERIFY(fdIsOpen(0));
+        fd.close();
+    }
+
+    // GC fallback: a unixFd that reached JS and was dropped unclosed is
+    // closed by the collector, with the warning. A closed one never warns.
+    void testUnixFdGcFallbackWarns() {
+        QTemporaryFile file;
+        QVERIFY(file.open());
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        QQmlComponent component(&engine);
+        component.setData("import QtQml\nimport DBus as DBusQML\nQtObject {\n"
+                          "  property string path\n"
+                          "  function dropOpen() { var f = DBusQML.DBusUtils.openFd(path, 'r');\n"
+                          "    return DBusQML.DBusUtils.fdUrl(f) }\n"
+                          "  function dropClosed() { var f = DBusQML.DBusUtils.openFd(path, 'r');\n"
+                          "    var u = DBusQML.DBusUtils.fdUrl(f); f.close(); return u }\n"
+                          "}",
+                          QUrl());
+        QScopedPointer<QObject> obj(component.create());
+        QVERIFY2(obj, qPrintable(component.errorString()));
+        obj->setProperty("path", file.fileName());
+        auto urlFd = [](const QVariant &u) {
+            return u.toString().section(QLatin1Char('/'), -1).toInt();
+        };
+        auto collect = [&] {
+            for (int i = 0; i < 4; ++i) {
+                engine.collectGarbage();
+                QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+                QCoreApplication::processEvents();
+            }
+        };
+        {
+            ConnMessageCapture capture;
+            QVariant u;
+            for (int i = 0; i < 2; ++i) // a second call releases V4's call-site cache
+                QMetaObject::invokeMethod(obj.get(), "dropClosed", Q_RETURN_ARG(QVariant, u));
+            collect();
+            QVERIFY(!capture.contains(QStringLiteral("fd closed by garbage collector")));
+        }
+        ConnMessageCapture capture;
+        QVariant u1, u2;
+        QMetaObject::invokeMethod(obj.get(), "dropOpen", Q_RETURN_ARG(QVariant, u1));
+        QMetaObject::invokeMethod(obj.get(), "dropOpen", Q_RETURN_ARG(QVariant, u2));
+        collect();
+        QVERIFY(capture.contains(
+            QStringLiteral("dbusqml: fd closed by garbage collector — call close()")));
+        QVERIFY2(!fdIsOpen(urlFd(u1)), "the dropped fd was not closed");
+        Q_UNUSED(u2);
+    }
+
+    // P4 pressure valve: more than the threshold of dropped (unclosed)
+    // wrappers queues a collection on the engine that received them — the
+    // live count drops without any explicit gc, with one warning per
+    // process. A child with RLIMIT_NOFILE soft = 256 → threshold 64.
+    void testUnixFdPressureValve() {
+        if (!qEnvironmentVariableIsSet("DBUSQML_FDVALVE_CHILD")) {
+            QProcess child;
+            auto env = QProcessEnvironment::systemEnvironment();
+            env.insert(QStringLiteral("DBUSQML_FDVALVE_CHILD"), QStringLiteral("1"));
+            child.setProcessEnvironment(env);
+            child.setProcessChannelMode(QProcess::MergedChannels);
+            child.start(QCoreApplication::applicationFilePath(),
+                        {QStringLiteral("testUnixFdPressureValve")});
+            QVERIFY(child.waitForStarted(3000));
+            const bool finished = child.waitForFinished(30000);
+            const QByteArray out = child.readAll();
+            qInfo().noquote() << out;
+            QVERIFY2(finished, "valve child did not finish");
+            QCOMPARE(child.exitStatus(), QProcess::NormalExit);
+            QCOMPARE(child.exitCode(), 0);
+            return;
+        }
+        rlimit rl{};
+        QCOMPARE(::getrlimit(RLIMIT_NOFILE, &rl), 0);
+        rl.rlim_cur = 256;
+        QCOMPARE(::setrlimit(RLIMIT_NOFILE, &rl), 0);
+        QCOMPARE(DBus::UnixFd::pressureThreshold(), 64);
+        QTemporaryFile file;
+        QVERIFY(file.open());
+        QQmlEngine engine;
+        engine.addImportPath(QCoreApplication::applicationDirPath());
+        QQmlComponent component(&engine);
+        component.setData("import QtQml\nimport DBus as DBusQML\nQtObject {\n"
+                          "  property string path\n"
+                          "  function burst(n) { for (var i = 0; i < n; ++i)\n"
+                          "    DBusQML.DBusUtils.openFd(path, 'r') }\n"
+                          "}",
+                          QUrl());
+        QScopedPointer<QObject> obj(component.create());
+        QVERIFY2(obj, qPrintable(component.errorString()));
+        obj->setProperty("path", file.fileName());
+        const int base = DBus::UnixFd::liveCount();
+        ConnMessageCapture capture;
+        QMetaObject::invokeMethod(obj.get(), "burst", Q_ARG(QVariant, 80));
+        QCOMPARE(DBus::UnixFd::liveCount(), base + 80); // nothing collected synchronously
+        QVERIFY(capture.contains(QStringLiteral("exceed the pressure threshold (64)")));
+        // The queued collection runs on the next event-loop turn.
+        QTRY_VERIFY_WITH_TIMEOUT(DBus::UnixFd::liveCount() < base + 64, 3000);
+        // Warn once per process; the valve keeps working.
+        capture.messages.clear();
+        QMetaObject::invokeMethod(obj.get(), "burst", Q_ARG(QVariant, 80));
+        QVERIFY(!capture.contains(QStringLiteral("exceed the pressure threshold")));
+        QTRY_VERIFY_WITH_TIMEOUT(DBus::UnixFd::liveCount() < base + 64, 3000);
+    }
+    // >>> RED-BASELINE-STRIP-END (item 9)
 
     void testProxyDestroyWithPendingCalls() {
         // P4 verification: pending-call watchers are parented to the proxy —

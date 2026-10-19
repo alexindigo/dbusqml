@@ -93,7 +93,8 @@ DBusAdaptor {
   struct arrays arrive as real JS `Array` / `Object` instances you can
   traverse directly.
 - **`DBusUtils`** — `textFromBytes()` / `bytesFromText()` for `ay` payloads
-  (0.3.0+); fd quartet + `fdUrl` (see above).
+  (0.3.0+); fd helpers over `DBusQML.unixFd`, the owning fd value
+  (`openFd`/`readFd`/`writeFd`/`fdUrl`; see API.md).
 - **`SessionBus` and `SystemBus`** singletons; `connectToBus(address)` for
   peer/custom connections.
 - **Value types** — `dbusVariant`, `dbusMessage`, `dbusError`, `bytes`,

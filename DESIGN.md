@@ -115,9 +115,23 @@ DBusQML.double(3.14)
 DBusQML.objectPath("/org/freedesktop/UPower")
 DBusQML.variant("any value")
 DBusQML.dict({ key: "value" })
+new DBusQML.unixFd(fdNumber)   // owns a dup of fdNumber
 ```
 
 Used when Qt's auto-conversion doesn't produce the correct D-Bus type signature.
+
+`DBusQML.unixFd` is the exception: it is the only fd value, both directions.
+It owns its descriptor through a state shared by every copy — `close()` is
+the contract, the last copy's destruction (GC for values that reached JS)
+is the fallback, and a process-wide pressure valve queues a collection when
+wrapper-owned fds pile up. A number is never inferred as an fd from a
+declared `h`: every send site goes through one fd rule (`wireFd`, the send
+boundary reports `DBusFdFailure`), and every decoded `h` becomes a fresh
+`unixFd` holding its own `dup()`.
+
+Qt's `ListModel` copies every non-QObject object property by property, so
+none of these wrappers keeps its type (or, for `unixFd`, its descriptor) in a
+`ListModel` row — see API.md "ListModel and dbusqml values".
 
 ## Architecture
 

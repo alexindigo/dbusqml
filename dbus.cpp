@@ -922,6 +922,7 @@ void DBusProxy::fetchProperties() {
         QVariantList args;
         QDBusError error = reply.error();
         if (!error.isValid() && decodeMessage(w->reply(), args, &error) && !args.isEmpty()) {
+            DBus::UnixFd::noteDelivered(args.first(), qmlEngine(this)); // into the QML map
             QVariantMap props = args.first().toMap();
             for (auto it = props.begin(); it != props.end(); ++it) {
                 QString qmlName = dbusPropToQml(it.key());
@@ -954,6 +955,7 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
         QVariantList unwrapped;
         if (!decodeMessage(msg, unwrapped))
             return;
+        DBus::UnixFd::noteDelivered(QVariant(unwrapped), qmlEngine(this));
         emit signalReceived(msg.member(), unwrapped);
 
         if (msg.member() == "PropertiesChanged") {
@@ -1173,6 +1175,7 @@ void DBusProxy::refetchInvalidated(const QStringList &names) {
                            iface == m_iface) {
                     const QString qmlName = dbusPropToQml(wireName);
                     m_qmlToDbusName.insert(qmlName, wireName);
+                    DBus::UnixFd::noteDelivered(args.first(), qmlEngine(this));
                     insert(qmlName, args.first());
                 } else {
                     qWarning("dbusqml: dropping stale re-fetch of %s (destination changed)",

@@ -427,47 +427,106 @@ TestCase {
         verify(found, "dynamic methods should exist after introspection")
     }
 
-    // fd quartet + fdUrl (0.9.0 blocker resolution): QML-side fd I/O —
-    // open/write/read/close plus the file:///proc/self/fd/N URL form.
-    function test_fd_quartet_roundtrip() {
+    // fd helpers over DBusQML.unixFd: open/write/read plus the
+    // file:///proc/self/fd/N URL form; the unixFd owns its descriptor and
+    // close() is the contract.
+    function test_fd_helpers_roundtrip() {
         var path = tempPath + "/dbusqml-fd-quartet.txt"
         var fd = DBusQML.DBusUtils.openFd(path, "w")
-        verify(fd >= 0, "openFd w failed: " + fd)
+        verify(fd.valid, "openFd w failed")
         compare(DBusQML.DBusUtils.writeFd(fd, "fd-quartet-ok\n"), 14, "writeFd byte count")
-        DBusQML.DBusUtils.closeFd(fd)
+        fd.close()
+        verify(!fd.valid, "close() invalidates")
         var fd2 = DBusQML.DBusUtils.openFd(path, "r")
-        verify(fd2 >= 0, "openFd r failed: " + fd2)
+        verify(fd2.valid, "openFd r failed")
         var data = DBusQML.DBusUtils.readFd(fd2, 4096)
         verify(data instanceof ArrayBuffer, "readFd returns ArrayBuffer")
         verify(data.byteLength === 14, "readFd byteLength: " + data.byteLength)
         compare(DBusQML.DBusUtils.textFromBytes(data), "fd-quartet-ok\n")
-        DBusQML.DBusUtils.closeFd(fd2)
+        fd2.close()
     }
     function test_fd_url() {
         var path = tempPath + "/dbusqml-fdurl.txt"
         var fd = DBusQML.DBusUtils.openFd(path, "rw")
-        verify(fd >= 0, "openFd rw failed: " + fd)
+        verify(fd.valid, "openFd rw failed")
         var url = DBusQML.DBusUtils.fdUrl(fd)
-        compare(url, "file:///proc/self/fd/" + fd)
+        verify(/^file:\/\/\/proc\/self\/fd\/[0-9]+$/.test(url), "fdUrl shape: " + url)
         compare(DBusQML.DBusUtils.writeFd(fd, "FDURL-OK"), 8, "writeFd")
         // The URL must resolve as a real filesystem path for path-based
         // consumers: read /proc/self/fd/N back through openFd+readFd.
-        // (XHR on file:// is non-functional in this runtime — the very
-        // blocker that motivated the quartet — so it is not a valid probe.)
-        var pfd = DBusQML.DBusUtils.openFd("/proc/self/fd/" + fd, "r")
-        verify(pfd >= 0, "openFd through " + url + " failed")
+        // (XHR on file:// is non-functional in this runtime, so it is not a
+        // valid probe.)
+        var pfd = DBusQML.DBusUtils.openFd(url.substring(7), "r")
+        verify(pfd.valid, "openFd through " + url + " failed")
         var data = DBusQML.DBusUtils.readFd(pfd, 4096)
-        DBusQML.DBusUtils.closeFd(pfd)
+        pfd.close()
         compare(DBusQML.DBusUtils.textFromBytes(data), "FDURL-OK", "fdUrl read-through content")
-        DBusQML.DBusUtils.closeFd(fd)
+        fd.close()
+        compare(DBusQML.DBusUtils.fdUrl(fd), "", "no URL for a closed unixFd")
     }
     function test_fd_error_paths() {
-        compare(DBusQML.DBusUtils.openFd("/nonexistent/dbusqml-test", "r"), -1)
-        compare(DBusQML.DBusUtils.writeFd(-1, "x"), -1)
-        var empty = DBusQML.DBusUtils.readFd(-1, 100)
-        verify(empty.byteLength === 0, "readFd invalid fd → empty buffer")
-        compare(DBusQML.DBusUtils.fdUrl(-1), "")
-        DBusQML.DBusUtils.closeFd(-1)  // must not crash
+        ignoreWarning(/DBusUtils::openFd: failed to open/)
+        var missing = DBusQML.DBusUtils.openFd("/nonexistent/dbusqml-test", "r")
+        verify(!missing.valid, "a failed open is an invalid unixFd")
+        ignoreWarning(/DBusUtils::writeFd: the DBusQML.unixFd is not valid/)
+        compare(DBusQML.DBusUtils.writeFd(missing, "x"), -1)
+        ignoreWarning(/DBusUtils::readFd: the DBusQML.unixFd is not valid/)
+        verify(DBusQML.DBusUtils.readFd(missing, 100).byteLength === 0)
+        ignoreWarning(/DBusUtils::fdUrl: the DBusQML.unixFd is not valid/)
+        compare(DBusQML.DBusUtils.fdUrl(missing), "")
+        missing.close() // idempotent, must not crash
+    }
+    // A plain number is never an fd: the helpers refuse it (no coercion of
+    // the number into a descriptor — 3 might be anything, 0 is stdin).
+    function test_fd_helpers_refuse_numbers() {
+        var path = tempPath + "/dbusqml-fd-number.txt"
+        var w = DBusQML.DBusUtils.openFd(path, "w")
+        var wn = (typeof w === "number") ? w : w.take()
+        DBusQML.DBusUtils.writeFd(w, "not-through-a-number")
+        var f = DBusQML.DBusUtils.openFd(path, "r")
+        var n = (typeof f === "number") ? f : f.take()
+        verify(n >= 3, "a readable number to misuse: " + n)
+        ignoreWarning(/DBusUtils::readFd: expects a DBusQML.unixFd/)
+        var data = DBusQML.DBusUtils.readFd(n, 64)
+        compare(data.byteLength, 0, "readFd(number) must refuse, not read fd " + n)
+        ignoreWarning(/DBusUtils::writeFd: expects a DBusQML.unixFd/)
+        compare(DBusQML.DBusUtils.writeFd(wn, "x"), -1, "writeFd(number) must refuse")
+        ignoreWarning(/DBusUtils::fdUrl: expects a DBusQML.unixFd/)
+        compare(DBusQML.DBusUtils.fdUrl(n), "", "fdUrl(number) must refuse")
+        DBusQML.DBusUtils.closeFd(n)
+        DBusQML.DBusUtils.closeFd(wn)
+        if (typeof f !== "number") { f.close(); w.close() }
+    }
+    // DBusQML.unixFd value semantics: construction dups (the caller keeps
+    // its number), copies share one state, take() hands out a caller-owned
+    // duplicate, toString() never shows the number.
+    function test_unixfd_value() {
+        var path = tempPath + "/dbusqml-unixfd.txt"
+        var src = DBusQML.DBusUtils.openFd(path, "rw")
+        DBusQML.DBusUtils.writeFd(src, "unixfd-value")
+        var n = src.take()
+        verify(n >= 3, "take() returns a duplicate number >= 3: " + n)
+        verify(src.valid, "take() leaves the unixFd open")
+        var made = new DBusQML.unixFd(n)
+        verify(made.valid, "new DBusQML.unixFd(n) owns a dup")
+        DBusQML.DBusUtils.closeFd(n) // the caller's own number
+        verify(made.valid, "closing the caller's number leaves the unixFd's dup open")
+        compare(made.toString(), "DBusQML.unixFd(valid)")
+        var copy = made
+        holder.held = made
+        holder.held.close()
+        verify(!made.valid && !copy.valid && !holder.held.valid, "close() on one copy closes all")
+        compare(made.toString(), "DBusQML.unixFd(invalid)")
+        ignoreWarning(/DBusQML.unixFd.take\(\): the fd is not valid/)
+        compare(made.take(), -1)
+        ignoreWarning(/DBusQML.unixFd expects a file descriptor number/)
+        verify(!(new DBusQML.unixFd("3")).valid, "a string is not an fd number")
+        src.close()
+        holder.held = undefined
+    }
+    QtObject {
+        id: holder
+        property var held
     }
     function test_dynamic_method_call() {
         for (var i = 0; i < 10; ++i) {

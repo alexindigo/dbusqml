@@ -96,6 +96,7 @@ void DBusObjectManager::fetchManagedObjects() {
         QDBusError error = w->error();
         const bool decoded = !error.isValid() && decodeMessage(w->reply(), args, &error);
         if (decoded && !args.isEmpty()) {
+            DBus::UnixFd::noteDelivered(args.first(), qmlEngine(this));
             m_objects = args.first().toMap();
             if (!m_ready) {
                 m_ready = true;
@@ -113,6 +114,7 @@ void DBusObjectManager::onInterfacesAdded(const QDBusMessage &msg) {
     QVariantList args;
     if (!decodeMessage(msg, args) || args.size() < 2)
         return;
+    DBus::UnixFd::noteDelivered(args.at(1), qmlEngine(this));
     const QString objectPath = args.at(0).toString();
     const QVariantMap ifaces = args.at(1).toMap();
 

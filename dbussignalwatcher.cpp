@@ -108,6 +108,8 @@ void DBusSignalWatcher::onSignal(const QDBusMessage &msg) {
     QVariantList args;
     if (!decodeMessage(msg, args))
         return;
+    // Each watcher decodes for itself: its fds are its own dups (P1).
+    DBus::UnixFd::noteDelivered(QVariant(args), qmlEngine(this));
     emit received(msg.member(), args);
 }
 

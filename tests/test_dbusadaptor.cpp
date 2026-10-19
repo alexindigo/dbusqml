@@ -8,12 +8,14 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusServiceWatcher>
+#include <QDBusUnixFileDescriptor>
 #include <QDBusVariant>
 #include <QXmlStreamReader>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QProcess>
+#include <QTemporaryFile>
 #include <QFile>
 #include <QQmlComponent>
 #include <QQmlContext>
@@ -37,6 +39,7 @@
 #include "dbusmessage.h"
 #include "dbusservicewatcher.h"
 #include "dbusobjectmanager.h"
+#include "dbustypes.h"
 #include <QFile>
 #include <fcntl.h>
 #include <cstring>
@@ -643,19 +646,25 @@ private slots:
     void testAdaptorBroadcastOnAttachConnection();
     void testAdaptorRepliesOnDeliveryConnection();
 
-    // 0.9.0 unix fd (h) passing (B1/S3).
-    void testFdRoundTripSend();
-    void testFdRoundTripReceive();
-    void testFdContainerPosition();
-
     // 0.9.0 lossless 64-bit delivery (C2).
     void testInt64StringRoundTrip();
     void testInt64SmallValueStaysNumber();
     // CF-20 pin: nested int64 > 2^53 inside a struct/map arrives exact.
     void testInt64NestedPrecision();
 
-    // 0.9.0 fix cycle: cross-process fd transfer.
+    // Item 9: DBusQML.unixFd owns descriptors in both directions.
+    // >>> RED-BASELINE-STRIP-BEGIN (item 9 declarations: new-API tests)
+    // unix fd (h) passing (B1/S3) + cross-process transfer, over unixFd.
+    void testFdRoundTripSend();
+    void testFdRoundTripReceive();
+    void testFdContainerPosition();
     void testFdCrossProcess();
+    // >>> RED-BASELINE-STRIP-END (item 9 declarations)
+    void testFdAdaptorRefusesNumbers();
+    void testFdRejectedSetClosed_data();
+    void testFdRejectedSetClosed();
+    void testFdFilteredOptionClosed();
+    void testFdOptionRequiresUnixFd();
     void testValueKeyStructListIsRealDict();
 
     // 0.9.0 fix cycle: co-location/leak regression.
@@ -10283,44 +10292,53 @@ void TestDBusAdaptor::testInt64NestedPrecision() {
 
 // ==================== 0.9.0 unix fd passing (h; B1/S3) =====================
 
+static int openFdCount() {
+    return QDir(QStringLiteral("/proc/self/fd"))
+        .entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot)
+        .size();
+}
+
+// >>> RED-BASELINE-STRIP-BEGIN (item 9): new-API fd tests (DBus::UnixFd).
+// They cannot compile against the pre-unixFd tree; the RED scratch copy
+// deletes them (and their declarations) to the END marker.
+
 // Test adaptor with fd-aware methods: ReceiveFd writes through the received
-// fd; GiveFd returns the held fd (declared 'h' out-signature); ReceiveFdArray
-// counts the fds in a declared 'ah' array.
+// unixFd; GiveFd returns the held unixFd (declared 'h' out-signature);
+// ReceiveFdArray counts the valid unixFds in a declared 'ah' array.
 class FdAdaptor : public DBusAdaptor {
     Q_OBJECT
 public:
     explicit FdAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
 
+    int receiveCalls = 0;
     Q_INVOKABLE QString receiveFd(const QVariant &fd) {
-        const int rawFd = fd.toInt();
-        if (rawFd < 0)
+        ++receiveCalls;
+        if (fd.userType() != qMetaTypeId<DBus::UnixFd>())
+            return QStringLiteral("not-a-unixFd");
+        const DBus::UnixFd unixFd = fd.value<DBus::UnixFd>();
+        if (!unixFd.isValid())
             return QStringLiteral("bad-fd");
-        QFile f;
-        if (!f.open(rawFd, QIODevice::WriteOnly))
-            return QStringLiteral("open-failed");
-        if (f.write("hello-fd") != 8)
+        if (::write(unixFd.fileDescriptor(), "hello-fd", 8) != 8)
             return QStringLiteral("write-failed");
-        f.close(); // we wrote; the fd still belongs to the caller
-        return QStringLiteral("ok");
+        return QStringLiteral("ok"); // the received unixFd closes with its last copy
     }
 
-    int heldFd = -1;
-    Q_INVOKABLE int giveFd() { return heldFd; }
+    DBus::UnixFd heldFd;
+    Q_INVOKABLE QVariant giveFd() { return QVariant::fromValue(heldFd); }
 
     Q_INVOKABLE int receiveFdArray(const QVariant &fdsV) {
-        // 'ah' — array of fds; count valid ints. (The C++ dispatch path
-        // passes call args as QVariant — convert inside.)
-        const QVariantList fds = fdsV.toList();
+        ++receiveCalls;
         int valid = 0;
-        for (const QVariant &fd : fds)
-            if (fd.toInt() >= 0)
+        for (const QVariant &fd : fdsV.toList())
+            if (fd.userType() == qMetaTypeId<DBus::UnixFd>() && fd.value<DBus::UnixFd>().isValid())
                 ++valid;
         return valid;
     }
 };
 
-// fd round-trip, send side: a pipe write-end sent as declared 'h'; the
-// adaptor writes through the received fd and the test reads the content.
+// fd round-trip, send side: a pipe write-end sent as a DBusQML.unixFd with a
+// declared 'h'; the adaptor writes through the received unixFd and the test
+// reads the content. A plain number in the same call fails locally.
 void TestDBusAdaptor::testFdRoundTripSend() {
     FdAdaptor adaptor;
     adaptor.setService(QStringLiteral("org.dbusqml.Fd"));
@@ -10331,6 +10349,8 @@ void TestDBusAdaptor::testFdRoundTripSend() {
 
     int fds[2];
     QVERIFY(pipe(fds) == 0);
+    DBus::UnixFd sendFd(fds[1]);
+    close(fds[1]); // the unixFd owns its own dup
 
     DBusMessage m;
     m.setService(QStringLiteral("org.dbusqml.Fd"));
@@ -10338,9 +10358,7 @@ void TestDBusAdaptor::testFdRoundTripSend() {
     m.setIface(QStringLiteral("org.dbusqml.Fd"));
     m.setMember(QStringLiteral("ReceiveFd"));
     m.setSignature(QStringLiteral("h"));
-    QVariantList args;
-    args.append(fds[1]); // int fd — the plain-int send shape
-    m.setArguments(args);
+    m.setArguments({QVariant::fromValue(sendFd)});
     m.setTimeout(3000);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
@@ -10351,23 +10369,40 @@ void TestDBusAdaptor::testFdRoundTripSend() {
     QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
     QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
     QCOMPARE(reply->value().toString(), QStringLiteral("ok"));
+    QVERIFY2(sendFd.isValid(), "sending never consumes the sender's unixFd");
 
     // Read what the adaptor wrote through the fd.
-    close(fds[1]);
+    sendFd.close();
     char buf[16] = {};
     const ssize_t n = read(fds[0], buf, sizeof(buf) - 1);
     QCOMPARE(int(n), 8);
     QCOMPARE(QByteArray(buf, 8), QByteArrayLiteral("hello-fd"));
+    delete reply;
+
+    // The pre-1.1 plain-int shape is refused locally — nothing sent.
+    int other[2];
+    QVERIFY(pipe(other) == 0);
+    m.setArguments({other[1]});
+    const int calls = adaptor.receiveCalls;
+    DBusPendingReply *refused = conn->asyncCall(m);
+    QSignalSpy refusedSpy(refused, &DBusPendingReply::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(refusedSpy.count(), 1, 5000);
+    QVERIFY(refused->isError());
+    QVERIFY2(refused->error().message().contains(QStringLiteral("DBusQML.unixFd")),
+             qPrintable(refused->error().message()));
+    QTest::qWait(100);
+    QCOMPARE(adaptor.receiveCalls, calls);
+    close(other[0]);
+    close(other[1]);
     close(fds[0]);
 
-    delete reply;
+    delete refused;
     delete conn;
 }
 
-// fd round-trip, receive side: the adaptor's GiveFd returns its held fd
+// fd round-trip, receive side: the adaptor's GiveFd returns its held unixFd
 // (declared 'h' out via _signatures); the client reads the content through
-// the received int fd, then closes it (receiver closes — the lifetime
-// contract).
+// the received unixFd, then close()s it — the received value owns its fd.
 void TestDBusAdaptor::testFdRoundTripReceive() {
     FdAdaptor adaptor;
     adaptor.setService(QStringLiteral("org.dbusqml.FdGive"));
@@ -10381,7 +10416,8 @@ void TestDBusAdaptor::testFdRoundTripReceive() {
     QVERIFY(pipe(fds) == 0);
     QVERIFY(write(fds[1], "give-fd", 7) == 7);
     close(fds[1]);
-    adaptor.heldFd = fds[0]; // the adaptor "owns" the read end
+    adaptor.heldFd = DBus::UnixFd(fds[0]); // the adaptor owns its dup of the read end
+    close(fds[0]);
 
     DBusMessage m;
     m.setService(QStringLiteral("org.dbusqml.FdGive"));
@@ -10398,22 +10434,29 @@ void TestDBusAdaptor::testFdRoundTripReceive() {
     QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
     QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
     QCOMPARE(reply->values().size(), 1);
-    const int receivedFd = reply->values().first().toInt();
-    QVERIFY(receivedFd >= 0);
+    const QVariant received = reply->values().first();
+    QCOMPARE(received.userType(), qMetaTypeId<DBus::UnixFd>());
+    DBus::UnixFd receivedFd = received.value<DBus::UnixFd>();
+    QVERIFY(receivedFd.isValid());
+    QVERIFY(receivedFd.fileDescriptor() != adaptor.heldFd.fileDescriptor());
 
     // The client reads through the received fd, then closes it.
     char buf[16] = {};
-    const ssize_t n = read(receivedFd, buf, sizeof(buf) - 1);
+    const ssize_t n = read(receivedFd.fileDescriptor(), buf, sizeof(buf) - 1);
     QCOMPARE(int(n), 7);
     QCOMPARE(QByteArray(buf, 7), QByteArrayLiteral("give-fd"));
-    close(receivedFd);
-    close(fds[0]);
+    receivedFd.close();
+    // The reply owns the same state: closed for every copy.
+    QVERIFY(!reply->values().first().value<DBus::UnixFd>().isValid());
+    QVERIFY(adaptor.heldFd.isValid()); // the server's own fd is untouched
+    adaptor.heldFd.close();
 
     delete reply;
     delete conn;
 }
 
-// Container-position fds: a declared 'ah' array arrives as a list of ints.
+// Container-position fds: a declared 'ah' array of unixFds arrives as a list
+// of unixFds; one plain number in the array fails the call locally.
 void TestDBusAdaptor::testFdContainerPosition() {
     FdAdaptor adaptor;
     adaptor.setService(QStringLiteral("org.dbusqml.FdArr"));
@@ -10424,6 +10467,7 @@ void TestDBusAdaptor::testFdContainerPosition() {
 
     int fds[2];
     QVERIFY(pipe(fds) == 0);
+    const QVariant fd = QVariant::fromValue(DBus::UnixFd(fds[1]));
 
     DBusMessage m;
     m.setService(QStringLiteral("org.dbusqml.FdArr"));
@@ -10431,9 +10475,7 @@ void TestDBusAdaptor::testFdContainerPosition() {
     m.setIface(QStringLiteral("org.dbusqml.Fd"));
     m.setMember(QStringLiteral("ReceiveFdArray"));
     m.setSignature(QStringLiteral("ah"));
-    QVariantList fdArgs;
-    fdArgs.append(QVariant(QVariantList{fds[1], fds[1]})); // two fds
-    m.setArguments(fdArgs);
+    m.setArguments({QVariant(QVariantList{fd, fd})}); // two fds
     m.setTimeout(3000);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
@@ -10444,10 +10486,21 @@ void TestDBusAdaptor::testFdContainerPosition() {
     QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
     QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
     QCOMPARE(reply->value().toInt(), 2);
-
-    close(fds[1]);
-
     delete reply;
+
+    m.setArguments({QVariant(QVariantList{fd, fds[1]})});
+    const int calls = adaptor.receiveCalls;
+    DBusPendingReply *refused = conn->asyncCall(m);
+    QSignalSpy refusedSpy(refused, &DBusPendingReply::finished);
+    QTRY_COMPARE_WITH_TIMEOUT(refusedSpy.count(), 1, 5000);
+    QVERIFY(refused->isError());
+    QVERIFY(refused->error().message().contains(QStringLiteral("DBusQML.unixFd")));
+    QTest::qWait(100);
+    QCOMPARE(adaptor.receiveCalls, calls);
+
+    close(fds[0]);
+    close(fds[1]);
+    delete refused;
     delete conn;
 }
 
@@ -10455,10 +10508,10 @@ void TestDBusAdaptor::testFdContainerPosition() {
 
 // Cross-process fd transfer: the helper service runs in a SEPARATE process
 // (spawned binary), so fd numbers cannot coincide — no vacuous same-process
-// pass. The test sends a pipe/file fd with a declared 'h' (client send
-// direction), the helper writes through the received fd and replies with an
-// fd of its own file (served reply direction); both directions are asserted
-// byte-exact.
+// pass. The test sends a DBusQML.unixFd with a declared 'h' (client send
+// direction), the helper writes through the received unixFd and replies
+// with a unixFd of its own file (served reply direction); both directions
+// are asserted byte-exact.
 static void os_lseek_guard(int fd) {
     ::lseek(fd, 0, SEEK_SET);
 }
@@ -10499,8 +10552,10 @@ void TestDBusAdaptor::testFdCrossProcess() {
         QFile f(sendFilePath);
         QVERIFY(f.open(QIODevice::WriteOnly));
     }
-    const int sendFd = ::open(sendFilePath.toLocal8Bit().constData(), O_RDWR);
-    QVERIFY(sendFd >= 0);
+    const int rawSendFd = ::open(sendFilePath.toLocal8Bit().constData(), O_RDWR);
+    QVERIFY(rawSendFd >= 0);
+    DBus::UnixFd sendFd(rawSendFd);
+    ::close(rawSendFd);
 
     DBusMessage m;
     m.setService(service);
@@ -10508,9 +10563,7 @@ void TestDBusAdaptor::testFdCrossProcess() {
     m.setIface(service);
     m.setMember(QStringLiteral("WriteThrough"));
     m.setSignature(QStringLiteral("h"));
-    QVariantList args;
-    args.append(sendFd);
-    m.setArguments(args);
+    m.setArguments({QVariant::fromValue(sendFd)});
     m.setTimeout(5000);
 
     const QByteArray addr = qgetenv("DBUS_SESSION_BUS_ADDRESS");
@@ -10522,31 +10575,223 @@ void TestDBusAdaptor::testFdCrossProcess() {
     QVERIFY2(!reply->isError(), qPrintable(reply->error().name()));
     QCOMPARE(reply->values().size(), 1);
 
-    // Reply direction: the received fd IS the helper's reply fd (dup'd via
-    // the daemon) — read the payload byte-exact.
-    const int receivedFd = reply->values().first().toInt();
-    QVERIFY2(receivedFd >= 0, "reply did not carry a usable fd");
+    // Reply direction: the received unixFd holds the helper's reply file
+    // (passed via the daemon) — read the payload byte-exact.
+    QCOMPARE(reply->values().first().userType(), qMetaTypeId<DBus::UnixFd>());
+    DBus::UnixFd receivedFd = reply->values().first().value<DBus::UnixFd>();
+    QVERIFY2(receivedFd.isValid(), "reply did not carry a usable fd");
     {
         char buf[64] = {};
-        os_lseek_guard(receivedFd);
-        const ssize_t n = ::read(receivedFd, buf, sizeof(buf) - 1);
+        os_lseek_guard(receivedFd.fileDescriptor());
+        const ssize_t n = ::read(receivedFd.fileDescriptor(), buf, sizeof(buf) - 1);
         QCOMPARE(QByteArray(buf, int(n > 0 ? n : 0)), QByteArrayLiteral("fd-xfer-reply-ok\n"));
     }
 
     // Send direction: the helper wrote through OUR fd — read the file.
     {
         char buf[64] = {};
-        os_lseek_guard(sendFd);
-        const ssize_t n = ::read(sendFd, buf, sizeof(buf) - 1);
+        os_lseek_guard(sendFd.fileDescriptor());
+        const ssize_t n = ::read(sendFd.fileDescriptor(), buf, sizeof(buf) - 1);
         QCOMPARE(QByteArray(buf, int(n > 0 ? n : 0)), QByteArrayLiteral("fd-xfer-send-ok\n"));
     }
 
-    ::close(sendFd);
-    ::close(receivedFd);
+    sendFd.close();
+    receivedFd.close();
     delete reply;
     delete conn;
     helper.terminate();
     helper.waitForFinished(3000);
+}
+
+// >>> RED-BASELINE-STRIP-END (item 9)
+
+// finding #4, served direction: a declared-'h' reply or signal arg given a
+// plain number (a REAL open fd number) is refused — an error reply / a
+// skipped signal, never that descriptor on the wire. Pre-fix the number was
+// dup()ed and handed to the peer.
+void TestDBusAdaptor::testFdAdaptorRefusesNumbers() {
+    QTemporaryFile file;
+    QVERIFY(file.open());
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import DBus 1.0 as DBusQML\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.FdNum'\n"
+                                        "  path: '/FdNum'\n"
+                                        "  iface: 'org.dbusqml.FdNum'\n"
+                                        "  _signatures: ({ GiveNumber: 'h' })\n"
+                                        "  property string filePath\n"
+                                        "  property int number: -1\n"
+                                        "  function giveNumber() {\n"
+                                        "    var f = DBusQML.DBusUtils.openFd(filePath, 'r')\n"
+                                        "    number = (typeof f === 'number') ? f : f.take()\n"
+                                        "    return number\n"
+                                        "  }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    adaptor->setProperty("filePath", file.fileName());
+    QDBusPendingCallWatcher *w =
+        asyncCallDeferred(QStringLiteral("org.dbusqml.FdNum"), QStringLiteral("/FdNum"),
+                          QStringLiteral("org.dbusqml.FdNum"), QStringLiteral("GiveNumber"));
+    QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+    QVERIFY(spy.wait(5000));
+    const QDBusMessage reply = w->reply();
+    delete w;
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+    const int number = adaptor->property("number").toInt();
+    QVERIFY(number >= 3);
+    ::close(number);
+    delete adaptor;
+
+    // Signal: a declared 'h' arg given a number is skipped (warned), not sent.
+    DeclaredSignalAdaptor sigAdaptor;
+    sigAdaptor.setService(QStringLiteral("org.dbusqml.FdSigNum"));
+    sigAdaptor.setPath(QStringLiteral("/FdSigNum"));
+    sigAdaptor.setIface(QStringLiteral("org.dbusqml.FdSigNum"));
+    sigAdaptor.setSignalSpecs(
+        QVariantMap{{QStringLiteral("StateChanged"), QVariant(QStringLiteral("hs"))}});
+    sigAdaptor.classBegin();
+    sigAdaptor.componentComplete();
+    SignalCatcher catcher;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QVERIFY(bus.connect(QStringLiteral("org.dbusqml.FdSigNum"), QStringLiteral("/FdSigNum"),
+                        QStringLiteral("org.dbusqml.FdSigNum"), QStringLiteral("StateChanged"),
+                        &catcher, SLOT(onSignal(QDBusMessage))));
+    QTest::ignoreMessage(QtWarningMsg,
+                         QRegularExpression(QStringLiteral(
+                             ".*signal StateChanged arg 0 cannot produce declared type 'h' \\(an "
+                             "fd \\(h\\) value must be a DBusQML.unixFd.*")));
+    emit sigAdaptor.StateChanged(QVariant(file.handle()), QVariant(QStringLiteral("s")));
+    QTest::qWait(500);
+    QCOMPARE(catcher.count, 0);
+}
+
+// finding #9: a rejected Set (read-only or unknown property) drops the
+// decoded value — its fd closes. Pre-fix the fd was detached into an int and
+// leaked per call.
+void TestDBusAdaptor::testFdRejectedSetClosed_data() {
+    QTest::addColumn<QString>("property");
+    QTest::newRow("read-only") << QStringLiteral("Sink");
+    QTest::newRow("unknown") << QStringLiteral("NoSuchProperty");
+}
+
+void TestDBusAdaptor::testFdRejectedSetClosed() {
+    QFETCH(QString, property);
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.FdSet'\n"
+                                        "  path: '/FdSet'\n"
+                                        "  iface: 'org.dbusqml.FdSet'\n"
+                                        "  readonly property var sink: null\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    QTemporaryFile file;
+    QVERIFY(file.open());
+    auto trySet = [&]() -> QDBusMessage {
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            QStringLiteral("org.dbusqml.FdSet"), QStringLiteral("/FdSet"),
+            QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Set"));
+        m.setArguments({QVariant(QStringLiteral("org.dbusqml.FdSet")), QVariant(property),
+                        QVariant::fromValue(QDBusVariant(
+                            QVariant::fromValue(QDBusUnixFileDescriptor(file.handle()))))});
+        QDBusPendingCallWatcher w(deferredCaller().asyncCall(m));
+        QSignalSpy spy(&w, &QDBusPendingCallWatcher::finished);
+        spy.wait(5000);
+        return w.reply();
+    };
+    QCOMPARE(trySet().type(), QDBusMessage::ErrorMessage); // warm-up
+    QCoreApplication::processEvents();
+    const int baseline = openFdCount();
+    for (int i = 0; i < 3; ++i) {
+        const QDBusMessage refused = trySet();
+        QCOMPARE(refused.type(), QDBusMessage::ErrorMessage);
+    }
+    QCoreApplication::processEvents();
+    QTRY_COMPARE_WITH_TIMEOUT(openFdCount(), baseline, 2000);
+    delete adaptor;
+}
+
+// finding #9: an option the whitelist drops takes its fd with it.
+void TestDBusAdaptor::testFdFilteredOptionClosed() {
+    QObject *adaptor = createQmlAdaptor("import DBus 1.0\n"
+                                        "import QtQml 2.15\n"
+                                        "DBusAdaptor {\n"
+                                        "  service: 'org.dbusqml.FdOpt'\n"
+                                        "  path: '/FdOpt'\n"
+                                        "  iface: 'org.dbusqml.FdOpt'\n"
+                                        "  _options: ({ DoIt: ({ count: 'u' }) })\n"
+                                        "  function doIt(options) {\n"
+                                        "    return Object.keys(options).join(',')\n"
+                                        "  }\n"
+                                        "}");
+    QVERIFY(adaptor != nullptr);
+    QTemporaryFile file;
+    QVERIFY(file.open());
+    auto call = [&]() -> QDBusMessage {
+        QDBusPendingCallWatcher *w = asyncCallDeferred(
+            QStringLiteral("org.dbusqml.FdOpt"), QStringLiteral("/FdOpt"),
+            QStringLiteral("org.dbusqml.FdOpt"), QStringLiteral("DoIt"),
+            {QVariantMap{{QStringLiteral("count"), uint(1)},
+                         {QStringLiteral("smuggled"),
+                          QVariant::fromValue(QDBusUnixFileDescriptor(file.handle()))}}});
+        QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+        spy.wait(5000);
+        const QDBusMessage r = w->reply();
+        delete w;
+        return r;
+    };
+    QCOMPARE(call().arguments().value(0).toString(), QStringLiteral("count")); // warm-up
+    QCoreApplication::processEvents();
+    const int baseline = openFdCount();
+    for (int i = 0; i < 3; ++i)
+        QCOMPARE(call().arguments().value(0).toString(), QStringLiteral("count"));
+    QCoreApplication::processEvents();
+    QTRY_COMPARE_WITH_TIMEOUT(openFdCount(), baseline, 2000);
+    delete adaptor;
+}
+
+// An option declared 'h' takes only an fd — the caller's number is a type
+// mismatch (InvalidArgs), never an fd; a real fd arrives as a DBusQML.unixFd
+// the handler owns (and closes).
+void TestDBusAdaptor::testFdOptionRequiresUnixFd() {
+    QObject *adaptor =
+        createQmlAdaptor("import DBus 1.0\n"
+                         "import QtQml 2.15\n"
+                         "DBusAdaptor {\n"
+                         "  service: 'org.dbusqml.FdOptH'\n"
+                         "  path: '/FdOptH'\n"
+                         "  iface: 'org.dbusqml.FdOptH'\n"
+                         "  _options: ({ DoIt: ({ fd: 'h' }) })\n"
+                         "  function doIt(options) {\n"
+                         "    var f = options.fd\n"
+                         "    if (typeof f !== 'object' || !f.valid) return typeof f\n"
+                         "    f.close()\n"
+                         "    return 'closed:' + f.valid\n"
+                         "  }\n"
+                         "}");
+    QVERIFY(adaptor != nullptr);
+    QTemporaryFile file;
+    QVERIFY(file.open());
+    auto call = [&](const QVariant &fd) -> QDBusMessage {
+        QDBusPendingCallWatcher *w =
+            asyncCallDeferred(QStringLiteral("org.dbusqml.FdOptH"), QStringLiteral("/FdOptH"),
+                              QStringLiteral("org.dbusqml.FdOptH"), QStringLiteral("DoIt"),
+                              {QVariantMap{{QStringLiteral("fd"), fd}}});
+        QSignalSpy spy(w, &QDBusPendingCallWatcher::finished);
+        spy.wait(5000);
+        const QDBusMessage r = w->reply();
+        delete w;
+        return r;
+    };
+    const QDBusMessage number = call(QVariant(file.handle()));
+    QCOMPARE(number.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(number.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    const QDBusMessage real = call(QVariant::fromValue(QDBusUnixFileDescriptor(file.handle())));
+    QCOMPARE(real.type(), QDBusMessage::ReplyMessage);
+    QCOMPARE(real.arguments().value(0).toString(), QStringLiteral("closed:false"));
+    delete adaptor;
 }
 
 // ==================== Adaptor lifecycle (L1–L7, 0.7.0) ====================

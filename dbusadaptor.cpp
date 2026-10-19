@@ -127,9 +127,11 @@ private:
             for (int i = 0; i < args.size(); ++i) {
                 QVariant v = marshalBySignature(declared.at(i), args.at(i));
                 if (!wireMarshalable(v)) {
-                    qWarning("dbusqml: signal %s arg %d cannot produce declared type '%s' — "
+                    const QString fd = fdFailureIn(v);
+                    qWarning("dbusqml: signal %s arg %d cannot produce declared type '%s'%s — "
                              "skipping send",
-                             qPrintable(m_name), i, qPrintable(declared.at(i)));
+                             qPrintable(m_name), i, qPrintable(declared.at(i)),
+                             fd.isEmpty() ? "" : qPrintable(QStringLiteral(" (%1)").arg(fd)));
                     return;
                 }
                 typed << v;
@@ -485,9 +487,15 @@ QVariant coerceScalarOption(const QString &sig, const QVariant &value, bool *ok)
         }
         return QVariant::fromValue(value.toBool());
     }
+    if (sig == QLatin1String("h")) {
+        // An fd option is a DBusQML.unixFd — the decoded `h` (its own dup,
+        // owned by the delivered value). A number is never an fd.
+        *ok = t == qMetaTypeId<DBus::UnixFd>() && value.value<DBus::UnixFd>().isValid();
+        return *ok ? value : QVariant();
+    }
     if (sig == QLatin1String("y") || sig == QLatin1String("n") || sig == QLatin1String("q") ||
         sig == QLatin1String("i") || sig == QLatin1String("u") || sig == QLatin1String("x") ||
-        sig == QLatin1String("t") || sig == QLatin1String("d") || sig == QLatin1String("h")) {
+        sig == QLatin1String("t") || sig == QLatin1String("d")) {
         if (t == QMetaType::Bool) {
             *ok = false; // bools never coerce to numeric
             return {};
@@ -514,11 +522,7 @@ QVariant coerceScalarOption(const QString &sig, const QVariant &value, bool *ok)
             return QVariant::fromValue(value.toLongLong());
         if (sig == QLatin1String("t"))
             return QVariant::fromValue(value.toULongLong());
-        if (sig == QLatin1String("d"))
-            return QVariant::fromValue(value.toDouble());
-        // h: an fd option is a plain int (the -1 sentinel contract is the
-        // producer's; delivery stays the int).
-        return QVariant::fromValue(value.toInt());
+        return QVariant::fromValue(value.toDouble()); // d
     }
     // Unrecognized declared sig (an authoring typo) — reject loud.
     *ok = false;
@@ -1014,9 +1018,11 @@ void DBusAdaptor::emitSignal(const QString &name, const QJSValue &arguments) {
             for (int i = 0; i < args.size(); ++i) {
                 QVariant v = marshalBySignature(declared.at(i), args.at(i));
                 if (!wireMarshalable(v)) {
-                    qWarning("dbusqml: signal %s arg %d cannot produce declared type '%s' — "
+                    const QString fd = fdFailureIn(v);
+                    qWarning("dbusqml: signal %s arg %d cannot produce declared type '%s'%s — "
                              "skipping send",
-                             qPrintable(name), i, qPrintable(declared.at(i)));
+                             qPrintable(name), i, qPrintable(declared.at(i)),
+                             fd.isEmpty() ? "" : qPrintable(QStringLiteral(" (%1)").arg(fd)));
                     return;
                 }
                 typed << v;
@@ -1045,7 +1051,7 @@ static QString metaTypeToDbusSignature(int typeId) {
         return QStringLiteral("o");
     if (typeId == qMetaTypeId<QDBusSignature>())
         return QStringLiteral("g");
-    if (typeId == qMetaTypeId<QDBusUnixFileDescriptor>())
+    if (typeId == qMetaTypeId<QDBusUnixFileDescriptor>() || typeId == qMetaTypeId<DBus::UnixFd>())
         return QStringLiteral("h");
     switch (typeId) {
     case QMetaType::UChar:
@@ -1638,6 +1644,8 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                         QStringLiteral("Cannot convert value for property %1").arg(propName)));
                     return true;
                 }
+                // A written unixFd now lives in the QML property (JS world).
+                DBus::UnixFd::noteDelivered(value, qmlEngine(this));
                 // D-Bus spec: Set must send an empty reply
                 sendReply(msg.createReply());
                 return true;

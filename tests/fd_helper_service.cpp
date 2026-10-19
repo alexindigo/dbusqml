@@ -2,12 +2,10 @@
 // v1-followup.md — precedent: Nemo's dbustestd, KDE's dbusservice.py).
 //
 // Serves <service> with WriteThrough(h) -> h:
-//   - writes "fd-xfer-send-ok\n" through the RECEIVED fd via the
-//     DBusUtils fd quartet, then discharges receiver-closes via closeFd,
-//   - replies with its own fd (the reply file passed as argv[1], opened
-//     and pre-written with "fd-xfer-reply-ok\n" via the quartet).
-// Running as a separate process means fd numbers cannot coincide between
-// caller and service — no same-process vacuous pass.
+//   - writes "fd-xfer-send-ok\n" through the RECEIVED DBusQML.unixFd via the
+//     DBusUtils fd helpers, then close()s it (the received value owns it),
+//   - replies with its own unixFd (the reply file passed as argv[1], opened
+//     and pre-written with "fd-xfer-reply-ok\n" via the helpers).
 // Running as a separate process means fd numbers cannot coincide between
 // caller and service — no same-process vacuous pass.
 #include <QCoreApplication>
@@ -21,6 +19,7 @@
 #include <unistd.h>
 
 #include "dbusadaptor.h"
+#include "dbustypes.h"
 #include "dbusutils.h"
 
 class FdHelperAdaptor : public DBusAdaptor {
@@ -29,21 +28,20 @@ public:
     explicit FdHelperAdaptor(QObject *parent = nullptr) : DBusAdaptor(parent) {}
 
     // WriteThrough(h) -> h: writes the known sequence through the RECEIVED
-    // fd and replies with our reply-file fd (the VM-gate shape).
-    Q_INVOKABLE int writeThrough(const QVariant &fd) {
-        const int rawFd = fd.toInt();
-        if (rawFd < 0)
-            return -1;
-        // The quartet, exercised from a plain QCoreApplication (no QML
+    // unixFd and replies with our reply-file unixFd (the VM-gate shape).
+    Q_INVOKABLE QVariant writeThrough(const QVariant &fd) {
+        if (fd.userType() != qMetaTypeId<DBus::UnixFd>())
+            return {};
+        // The helpers, exercised from a plain QCoreApplication (no QML
         // engine): the string path of writeFd needs no JS runtime.
         DBusUtils utils;
-        if (utils.writeFd(rawFd, QJSValue(QStringLiteral("fd-xfer-send-ok\n"))) != 16)
-            return -1;
-        utils.closeFd(rawFd); // received fd: receiver-closes, via the quartet
-        return replyFd;
+        if (utils.writeFd(fd, QJSValue(QStringLiteral("fd-xfer-send-ok\n"))) != 16)
+            return {};
+        fd.value<DBus::UnixFd>().close(); // copies share one state: closed for all
+        return QVariant::fromValue(replyFd);
     }
 
-    int replyFd = -1;
+    DBus::UnixFd replyFd;
 };
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
@@ -56,10 +54,11 @@ int main(int argc, char *argv[]) {
     // ("rw" is O_RDWR|O_CREAT|O_TRUNC: the caller reads the payload
     // through the transferred fd).
     DBusUtils utils;
-    const int replyFd = utils.openFd(replyFilePath, QStringLiteral("rw"));
-    if (replyFd < 0)
+    const DBus::UnixFd replyFd = utils.openFd(replyFilePath, QStringLiteral("rw"));
+    if (!replyFd.isValid())
         return 2;
-    if (utils.writeFd(replyFd, QJSValue(QStringLiteral("fd-xfer-reply-ok\n"))) != 17)
+    if (utils.writeFd(QVariant::fromValue(replyFd),
+                      QJSValue(QStringLiteral("fd-xfer-reply-ok\n"))) != 17)
         return 2;
 
     FdHelperAdaptor adaptor;
