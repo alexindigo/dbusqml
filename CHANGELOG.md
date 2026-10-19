@@ -13,6 +13,20 @@ infrastructure that materially affects consumer trust).
 
 ### Changed
 
+- **A proxy accepts signals only from the configured service's current
+  owner.** Every per-signal subscription now passes the configured
+  `service` as the match-rule sender (previously a wildcard), and the
+  proxy additionally tracks the name's unique owner (an initial
+  `GetNameOwner` plus an owner-change watch, GDBus-proxy style) and drops
+  a signal whose sender differs — covering a stale previous owner still
+  queued across a service restart. A unique (`:1.…`) `service` compares
+  directly; while the owner is not yet known, the daemon's match rule is
+  the filter. Changing `service` or `path` now also tears the old
+  subscription down with its exact recorded identity before
+  resubscribing, as `iface` and `connection` already did.
+  `DBusSignalWatcher` is unchanged — wildcard listening stays its
+  purpose.
+
 - **`Properties.Set` on a property whose advertised access is `read` is
   refused** with `org.freedesktop.DBus.Error.PropertyReadOnly`, the value
   left unchanged. This covers catalog read-only declarations (previously
@@ -111,6 +125,16 @@ infrastructure that materially affects consumer trust).
   promise `reject` now runs on connections without a QML context
   (`connectToBus`). A `finished.connect` made after delivery never fires
   (documented).
+
+### Security
+
+- **Any bus peer could inject a proxy's interface signals** — the
+  per-signal subscriptions used a wildcard sender, so any process
+  emitting the same path/interface/member had its signal delivered to
+  the proxy's `signalReceived`, independent of who owned the configured
+  service. Signals are now accepted only from the service's current
+  owner (see Changed above). (`PropertiesChanged` was already
+  sender-bound.)
 
 ### Quality
 

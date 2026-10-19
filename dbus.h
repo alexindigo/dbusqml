@@ -206,6 +206,18 @@ private:
     QString m_connectedPath;
     QString m_connectedIface;
 
+    // #8: current-owner tracking behind the signal acceptance check
+    // (GDBus gdbusproxy.c:1015 shape). Created together with the signal
+    // subscriptions for a well-known m_service, torn down with them
+    // (disconnectSignals), rebuilt on service/connection change. The
+    // tracker is independent of watchServiceStatus's m_serviceWatcher.
+    // m_trackedService records which service m_currentOwner refers to.
+    void setupOwnerTracker();
+    void teardownOwnerTracker();
+    QDBusServiceWatcher *m_ownerWatcher = nullptr;
+    QString m_trackedService;
+    QString m_currentOwner;
+
     // P9 (features train, Phase 8): pending-op dedupe maps, keyed by
     // property (KDE dbusproperties.cpp:32 guard semantics). Duplicate
     // in-flight Get coalesced (one wire call, all waiters answered);

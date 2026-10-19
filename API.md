@@ -168,9 +168,24 @@ fetches keep their existing data on decode failure and report the failure;
 an initial proxy fetch enters `Error`, and an initial ObjectManager fetch
 does not set `ready`.
 
+**Sender binding:** the proxy subscribes to every discovered signal (and to
+`PropertiesChanged`) with the configured `service` as the sender and accepts
+a signal only from the service's **current owner**. The bus match rule names
+the service, so the daemon itself resolves the well-known name to its owner
+on every delivery; the proxy additionally tracks the owner (an initial
+`GetNameOwner` plus an owner-change watch) and drops a signal whose sender
+differs — e.g. one from a stale previous owner still queued across a
+restart. A unique (`:1.…`) `service` compares directly. While the owner is
+not yet known (right after subscribing) the daemon's match rule is the
+filter. A peer that emits the same path/interface/member without owning the
+service is never delivered. To listen to signals from **any** sender
+(dbus-monitor shape, wildcard `service`/`member`), use
+[`DBusSignalWatcher`](#dbussignalwatcher) — wildcard listening stays its
+purpose.
+
 | Signal | Arguments | Description |
 | :--- | :--- | :--- |
-| `signalReceived(name, args)` | `string name`, `list args` | Emitted when a D-Bus signal is received. |
+| `signalReceived(name, args)` | `string name`, `list args` | Emitted when a D-Bus signal from the configured service's current owner is received. |
 | `valueChanged(key, value)` | `string key`, `variant value` | Emitted when a dynamic property changes (from QQmlPropertyMap). |
 
 #### Toggle Signals

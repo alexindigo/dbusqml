@@ -410,6 +410,43 @@ QString PropertyServerObject::s_iface = QStringLiteral("org.dbusqml.PcServer");
 bool PropertyServerObject::s_declarePayload = false;
 bool PropertyServerObject::s_servePayload = false;
 
+// Owner-binding fixture (#8): introspection declares one signal (Ping) so
+// the proxy makes a per-signal subscription, plus a Level property for the
+// PropertiesChanged leg. The test drives emissions from whichever connection
+// currently owns — or does not own — the service name.
+class SignalOwnerObject : public QDBusVirtualObject {
+    Q_OBJECT
+
+public:
+    explicit SignalOwnerObject(QObject *parent = nullptr) : QDBusVirtualObject(parent) {}
+
+    QString introspect(const QString &) const override {
+        return QStringLiteral("<node><interface name=\"") + ifaceName +
+               QStringLiteral("\"><signal name=\"Ping\"><arg type=\"s\" direction=\"out\"/>"
+                              "</signal>"
+                              "<property name=\"Level\" type=\"u\" access=\"read\"/>"
+                              "</interface></node>");
+    }
+
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.interface() != QLatin1String("org.freedesktop.DBus.Properties"))
+            return false;
+        if (msg.member() == QLatin1String("GetAll")) {
+            conn.send(msg.createReply(
+                {QVariant::fromValue(QVariantMap{{QStringLiteral("Level"), level}})}));
+            return true;
+        }
+        if (msg.member() == QLatin1String("Get")) {
+            conn.send(msg.createReply({QVariant::fromValue(QDBusVariant(QVariant(level)))}));
+            return true;
+        }
+        return false;
+    }
+
+    uint level = 7u;
+    QString ifaceName = QStringLiteral("org.dbusqml.SigOwner");
+};
+
 // Payload-echo helper: launched as a separate process (payload_echo_service)
 // — a real wire round-trip: the helper replies with a write-built payload of
 // the requested signature; the caller receives it READ-mode.
@@ -1633,6 +1670,163 @@ private slots:
         QTest::qWait(500);
         QCOMPARE(PropertyServerObject::s_lastSetProp, QStringLiteral("PayloadLevel"));
         PropertyServerObject::s_declarePayload = false;
+    }
+
+    // ---- #8: proxy signals only from the configured service's owner ----
+
+    void testProxyDropsNonOwnerSignal() {
+        // #8: a signal from a connection that does not own the configured
+        // service must not be delivered — same path/iface/member, second
+        // connection, no name ownership. Pre-#8 the per-signal
+        // subscription used a wildcard sender, so it WAS delivered.
+        // Positive control: the owner's own emission is delivered.
+        auto bus = QDBusConnection::sessionBus();
+        auto *server = new SignalOwnerObject();
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/SigOwner"), server));
+        QVERIFY(bus.registerService(QStringLiteral("org.dbusqml.SigOwner")));
+
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.SigOwner"));
+        proxy.setPath(QStringLiteral("/SigOwner"));
+        proxy.setIface(QStringLiteral("org.dbusqml.SigOwner"));
+        int pings = 0;
+        connect(&proxy, &DBusProxy::signalReceived, this,
+                [&pings](const QString &name, const QVariantList &) {
+                    if (name == QLatin1String("Ping"))
+                        ++pings;
+                });
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+
+        QVERIFY(!s_privateBusAddress.isEmpty());
+        QDBusConnection other =
+            QDBusConnection::connectToBus(s_privateBusAddress, QStringLiteral("item8-nonowner"));
+        QVERIFY(other.isConnected());
+        QDBusMessage rogue = QDBusMessage::createSignal(QStringLiteral("/SigOwner"),
+                                                        QStringLiteral("org.dbusqml.SigOwner"),
+                                                        QStringLiteral("Ping"));
+        rogue.setArguments({QStringLiteral("rogue")});
+        QVERIFY(other.send(rogue));
+        QTest::qWait(500);
+        QCOMPARE(pings, 0);
+
+        // Positive control: the owner IS delivered.
+        QDBusMessage legit = QDBusMessage::createSignal(QStringLiteral("/SigOwner"),
+                                                        QStringLiteral("org.dbusqml.SigOwner"),
+                                                        QStringLiteral("Ping"));
+        legit.setArguments({QStringLiteral("legit")});
+        QVERIFY(bus.send(legit));
+        QTRY_COMPARE_WITH_TIMEOUT(pings, 1, 5000);
+
+        QDBusConnection::disconnectFromBus(QStringLiteral("item8-nonowner"));
+        bus.unregisterService(QStringLiteral("org.dbusqml.SigOwner"));
+        bus.unregisterObject(QStringLiteral("/SigOwner"));
+        delete server;
+    }
+
+    void testProxyFollowsOwnerChange() {
+        // #8: the binding follows the CURRENT owner. After the name moves
+        // to a new connection, the new owner's signal is delivered (the
+        // daemon's match rule follows the name; the proxy's tracked owner
+        // follows NameOwnerChanged) and the previous owner's emission
+        // after the change is dropped (pre-#8: wildcard — delivered).
+        auto bus = QDBusConnection::sessionBus();
+        auto *server = new SignalOwnerObject();
+        server->ifaceName = QStringLiteral("org.dbusqml.SigOwner2");
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/SigOwner2"), server));
+        QVERIFY(bus.registerService(QStringLiteral("org.dbusqml.SigOwner2")));
+
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.SigOwner2"));
+        proxy.setPath(QStringLiteral("/SigOwner2"));
+        proxy.setIface(QStringLiteral("org.dbusqml.SigOwner2"));
+        int pings = 0;
+        connect(&proxy, &DBusProxy::signalReceived, this,
+                [&pings](const QString &name, const QVariantList &) {
+                    if (name == QLatin1String("Ping"))
+                        ++pings;
+                });
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+
+        const auto emitPing = [](QDBusConnection &conn, const QString &payload) {
+            QDBusMessage ping = QDBusMessage::createSignal(QStringLiteral("/SigOwner2"),
+                                                           QStringLiteral("org.dbusqml.SigOwner2"),
+                                                           QStringLiteral("Ping"));
+            ping.setArguments({payload});
+            return conn.send(ping);
+        };
+
+        // Owner A (the suite's shared connection) is delivered.
+        QVERIFY(emitPing(bus, QStringLiteral("a1")));
+        QTRY_COMPARE_WITH_TIMEOUT(pings, 1, 5000);
+
+        // Service restart: A releases the name, B acquires it (new unique
+        // owner).
+        QDBusConnection connB =
+            QDBusConnection::connectToBus(s_privateBusAddress, QStringLiteral("item8-owner-b"));
+        QVERIFY(connB.isConnected());
+        bus.unregisterService(QStringLiteral("org.dbusqml.SigOwner2"));
+        QVERIFY(connB.registerService(QStringLiteral("org.dbusqml.SigOwner2")));
+
+        // The new owner is delivered after the owner change. (Daemon→client
+        // FIFO delivers NameOwnerChanged before this signal, so the proxy's
+        // tracked owner is already B when it arrives.)
+        QVERIFY(emitPing(connB, QStringLiteral("b1")));
+        QTRY_COMPARE_WITH_TIMEOUT(pings, 2, 5000);
+
+        // The previous owner's emission after the change is dropped.
+        QVERIFY(emitPing(bus, QStringLiteral("a2")));
+        QTest::qWait(500);
+        QCOMPARE(pings, 2);
+
+        QDBusConnection::disconnectFromBus(QStringLiteral("item8-owner-b"));
+        bus.unregisterObject(QStringLiteral("/SigOwner2"));
+        delete server;
+    }
+
+    void testProxyDropsNonOwnerPropertiesChanged() {
+        // #8: a PropertiesChanged from a connection that does not own the
+        // configured service leaves the property map unchanged. (The
+        // PropertiesChanged subscription was already sender-bound; this
+        // pins the behavior, and its positive control guards the #8 owner
+        // check against false drops of the real owner.)
+        auto bus = QDBusConnection::sessionBus();
+        auto *server = new SignalOwnerObject();
+        server->ifaceName = QStringLiteral("org.dbusqml.SigOwner3");
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/SigOwner3"), server));
+        QVERIFY(bus.registerService(QStringLiteral("org.dbusqml.SigOwner3")));
+
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.SigOwner3"));
+        proxy.setPath(QStringLiteral("/SigOwner3"));
+        proxy.setIface(QStringLiteral("org.dbusqml.SigOwner3"));
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        QCOMPARE(proxy.property("level").toUInt(), 7u);
+
+        const auto emitPc = [](QDBusConnection &conn, uint value) {
+            QDBusMessage pc = QDBusMessage::createSignal(
+                QStringLiteral("/SigOwner3"), QStringLiteral("org.freedesktop.DBus.Properties"),
+                QStringLiteral("PropertiesChanged"));
+            pc.setArguments({QVariant(QStringLiteral("org.dbusqml.SigOwner3")),
+                             QVariant(QVariantMap{{QStringLiteral("Level"), value}}),
+                             QVariant(QStringList{})});
+            return conn.send(pc);
+        };
+
+        QDBusConnection other =
+            QDBusConnection::connectToBus(s_privateBusAddress, QStringLiteral("item8-pc-nonowner"));
+        QVERIFY(other.isConnected());
+        QVERIFY(emitPc(other, 99u));
+        QTest::qWait(500);
+        QCOMPARE(proxy.property("level").toUInt(), 7u);
+
+        // Positive control: the real owner's PropertiesChanged updates the map.
+        QVERIFY(emitPc(bus, 42u));
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.property("level").toUInt(), 42u, 5000);
+
+        QDBusConnection::disconnectFromBus(QStringLiteral("item8-pc-nonowner"));
+        bus.unregisterService(QStringLiteral("org.dbusqml.SigOwner3"));
+        bus.unregisterObject(QStringLiteral("/SigOwner3"));
+        delete server;
     }
 
     void testDBusProperties() {

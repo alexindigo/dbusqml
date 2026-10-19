@@ -120,6 +120,12 @@ void DBusProxy::setService(const QString &v) {
     ensureServiceWatcher();
     emit serviceChanged();
     prepopulateFromCatalog();
+
+    // Subscriptions (and the owner tracker) bind the OLD service — tear
+    // down with the recorded identity before resubscribing, same as
+    // setIface/setConnection do.
+    disconnectSignals();
+
     if (!m_iface.isEmpty() && !m_path.isEmpty())
         scheduleIntrospect();
 }
@@ -130,6 +136,9 @@ void DBusProxy::setPath(const QString &v) {
     m_path = v;
     emit pathChanged();
     prepopulateFromCatalog();
+
+    disconnectSignals(); // subscriptions bind the old path — see setService
+
     if (!m_iface.isEmpty() && !m_service.isEmpty())
         scheduleIntrospect();
 }
@@ -823,12 +832,15 @@ void DBusProxy::disconnectSignals() {
     if (!m_signalsConnected)
         return;
 
+    // The owner tracker exists only while subscriptions do.
+    teardownOwnerTracker();
+
     // Disconnect each recorded per-signal hook with the exact arguments
     // used at connect time. QtDBus disconnect requires exact-arg match.
     // On a dead bus these are no-ops (QtDBus guards internally) — safe
     // to call from onBusDisconnected.
     for (const QString &sigName : std::as_const(m_connectedSignals)) {
-        m_bus.disconnect(QString(), m_connectedPath, m_connectedIface, sigName, this,
+        m_bus.disconnect(m_connectedService, m_connectedPath, m_connectedIface, sigName, this,
                          SLOT(onPropertiesChanged(QDBusMessage)));
     }
     m_bus.disconnect(m_connectedService, m_connectedPath, "org.freedesktop.DBus.Properties",
@@ -839,6 +851,59 @@ void DBusProxy::disconnectSignals() {
     m_connectedPath.clear();
     m_connectedIface.clear();
     m_signalsConnected = false;
+}
+
+// #8: the proxy accepts signals only from the CURRENT owner of the
+// configured service (GDBus gdbusproxy.c:1015 shape). A well-known
+// m_service's unique owner is tracked with a dedicated
+// QDBusServiceWatcher (WatchForOwnerChange — independent of
+// watchServiceStatus) plus one async GetNameOwner seeding; a unique-name
+// m_service compares directly and needs neither. While the owner is
+// unknown the daemon's sender= match rule is the only filter.
+void DBusProxy::setupOwnerTracker() {
+    teardownOwnerTracker(); // recorded identity: never stack two trackers
+    if (m_service.isEmpty())
+        return;
+    if (m_service.startsWith(QLatin1Char(':'))) {
+        m_currentOwner = m_service;
+        return;
+    }
+    m_trackedService = m_service;
+    m_ownerWatcher =
+        new QDBusServiceWatcher(m_service, m_bus, QDBusServiceWatcher::WatchForOwnerChange, this);
+    connect(m_ownerWatcher, &QDBusServiceWatcher::serviceOwnerChanged, this,
+            [this](const QString &name, const QString &, const QString &newOwner) {
+                if (name == m_trackedService)
+                    m_currentOwner = newOwner; // empty while the name is unowned
+            });
+    // Seed the current owner asynchronously. The watcher is created first,
+    // so a change that lands after the daemon answers arrives as a later
+    // NameOwnerChanged on the same ordered stream — the reply can never
+    // overwrite a newer owner.
+    QDBusMessage call = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("GetNameOwner"));
+    call.setArguments({m_trackedService});
+    auto *watcher = new QDBusPendingCallWatcher(m_bus.asyncCall(call, m_callTimeout), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, service = m_trackedService](QDBusPendingCallWatcher *w) {
+                QDBusPendingReply<QString> reply = *w;
+                // An error (the name has no owner) or a torn-down/rebuilt
+                // tracker leaves the owner unknown — the daemon's match
+                // rule is the filter until a change arrives.
+                if (!reply.isError() && m_trackedService == service)
+                    m_currentOwner = reply.value();
+                w->deleteLater();
+            });
+}
+
+void DBusProxy::teardownOwnerTracker() {
+    if (m_ownerWatcher) {
+        m_ownerWatcher->deleteLater();
+        m_ownerWatcher = nullptr;
+    }
+    m_trackedService.clear();
+    m_currentOwner.clear();
 }
 
 void DBusProxy::fetchProperties() {
@@ -880,6 +945,12 @@ void DBusProxy::fetchProperties() {
 
 void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
     if (msg.type() == QDBusMessage::SignalMessage) {
+        // #8: accept only from the configured service's current owner —
+        // drops a stale previous owner's signal still queued on this
+        // connection across an owner change (GDBus gdbusproxy.c:1015).
+        // Owner unknown → the daemon's sender= match rule is the filter.
+        if (!m_currentOwner.isEmpty() && msg.service() != m_currentOwner)
+            return;
         QVariantList unwrapped;
         if (!decodeMessage(msg, unwrapped))
             return;
@@ -1020,8 +1091,13 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
     }
 
     if (m_signalsEnabled) {
+        // #8: bind every subscription to the configured service — the
+        // daemon's match rule then resolves the well-known name to its
+        // current owner on each delivery, so a peer that merely emits the
+        // same path/iface/member never reaches this proxy.
+        // (DBusSignalWatcher stays the wildcard-listening component.)
         for (const QString &sigName : signalNames) {
-            m_bus.connect(QString(), m_path, m_iface, sigName, this,
+            m_bus.connect(m_service, m_path, m_iface, sigName, this,
                           SLOT(onPropertiesChanged(QDBusMessage)));
         }
 
@@ -1034,6 +1110,8 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
         m_connectedPath = m_path;
         m_connectedIface = m_iface;
         m_signalsConnected = true;
+
+        setupOwnerTracker();
     }
 
     // Pre-populate null placeholders for every property declared in the
