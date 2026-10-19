@@ -448,20 +448,22 @@ inline void sendFlaggedRequest(const QDBusConnection &conn, OwnerChangeReceiver 
     // registry-owned per-connection receiver — never the adaptor, never the
     // dispatcher (both can die before the reply arrives).
     auto *watcher = new QDBusPendingCallWatcher(pending, receiver);
-    QObject::connect(watcher, &QDBusPendingCallWatcher::finished, receiver,
-                     [conn, service, token](QDBusPendingCallWatcher *w) {
-                         QDBusPendingReply<uint> r = *w;
-                         if (r.isError()) {
-                             // Documented unchanged: consumers waiting on
-                             // nameAcquired get no failure signal.
-                             qWarning("dbusqml: Failed to register service %s: %s",
-                                      qPrintable(service), qPrintable(r.error().message()));
-                         } else {
-                             DBusPathDispatcher::handleRequestNameReply(conn.name(), service,
-                                                                        r.value(), token);
-                         }
-                         w->deleteLater();
-                     });
+    QObject::connect(
+        watcher, &QDBusPendingCallWatcher::finished, receiver,
+        [conn, service, token](QDBusPendingCallWatcher *w) {
+            QDBusPendingReply<uint> r = *w;
+            if (r.isError()) {
+                // Documented unchanged: consumers waiting on
+                // nameAcquired get no failure signal. The error
+                // message is the daemon's reply text — a bus
+                // participant's wire data (escaped — #10).
+                qWarning("dbusqml: Failed to register service %s: %s", qPrintable(service),
+                         qPrintable(escapeForLog(r.error().message())));
+            } else {
+                DBusPathDispatcher::handleRequestNameReply(conn.name(), service, r.value(), token);
+            }
+            w->deleteLater();
+        });
 }
 
 bool DBusPathDispatcher::attach(QDBusConnection conn, const QString &path, const QString &service,
@@ -771,7 +773,10 @@ void DBusPathDispatcher::detach(QDBusConnection conn, const QString &path, const
                 }
             }
             if (!warnText.isEmpty())
-                qmlInfo(adaptor) << "Failed to unregister service" << service << warnText;
+                // warnText can carry the daemon's reply error text (a bus
+                // participant's wire data — escaped, #10).
+                qmlInfo(adaptor) << "Failed to unregister service" << service
+                                 << escapeForLog(warnText);
         }
     }
 }

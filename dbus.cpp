@@ -37,9 +37,11 @@
 // call locally, not reach libdbus).
 static QVariant toTypedDbusVariant(const QVariant &v, const QString &dbusType) {
     if (!dbusType.isEmpty() && !validateSignature(dbusType, SignatureKind::Single)) {
+        // The declared type can come from the peer's introspection XML —
+        // escape it before logging (#10).
         qWarning("dbusqml: declared signature '%s' is not a valid D-Bus signature — failing the "
                  "value",
-                 qPrintable(dbusType));
+                 qPrintable(escapeForLog(dbusType)));
         return {};
     }
     return marshalBySignature(dbusType, v);
@@ -644,9 +646,12 @@ void DBusProxy::setProperty(const QString &name, const QVariant &value) {
                     m_failedSetRefetch.insert(wireName);
                 finishPendingSet(wireName, r);
                 if (failed) {
+                    // wireName can be peer-derived (introspection XML);
+                    // errName/errMsg are the peer's reply error (#10).
                     qWarning("dbusqml: Set of property %s failed (%s: %s) — re-fetching from the "
                              "service",
-                             qPrintable(wireName), qPrintable(errName), qPrintable(errMsg));
+                             qPrintable(escapeForLog(wireName)), qPrintable(escapeForLog(errName)),
+                             qPrintable(escapeForLog(errMsg)));
                     emit propertyWriteFailed(name, errName, errMsg);
                     maybeRefetchAfterFailedWrite(wireName);
                 }
@@ -747,9 +752,12 @@ QVariant DBusProxy::updateValue(const QString &key, const QVariant &input) {
                     m_failedSetRefetch.insert(dbusName);
                 finishPendingSet(dbusName, r);
                 if (r.type() == QDBusMessage::ErrorMessage) {
+                    // Peer-derived: dbusName (introspection) + the reply
+                    // error name/message (#10).
                     qWarning("dbusqml: Set of property %s failed (%s: %s) — re-fetching from the "
                              "service",
-                             qPrintable(dbusName), qPrintable(errName), qPrintable(errMsg));
+                             qPrintable(escapeForLog(dbusName)), qPrintable(escapeForLog(errName)),
+                             qPrintable(escapeForLog(errMsg)));
                     emit propertyWriteFailed(key, errName, errMsg);
                     maybeRefetchAfterFailedWrite(dbusName);
                 }
@@ -805,11 +813,14 @@ void DBusProxy::finishPendingSet(const QString &dbusName, const QDBusMessage &re
                 finishPendingSet(dbusName, r);
                 if (failed) {
                     // R3 on the chained call: re-fetch (post-settle) +
-                    // warn + signal — no rollback inference.
+                    // warn + signal — no rollback inference. dbusName and
+                    // the peer's reply error are escaped before logging
+                    // (#10).
                     qWarning("dbusqml: Set of property %s failed (%s: %s) — re-fetching from the "
                              "service",
-                             qPrintable(dbusName), qPrintable(r.errorName()),
-                             qPrintable(r.errorMessage()));
+                             qPrintable(escapeForLog(dbusName)),
+                             qPrintable(escapeForLog(r.errorName())),
+                             qPrintable(escapeForLog(r.errorMessage())));
                     emit propertyWriteFailed(qmlKey, r.errorName(), r.errorMessage());
                     maybeRefetchAfterFailedWrite(dbusName);
                 }
@@ -1034,13 +1045,17 @@ void DBusProxy::setupDynamicMethods(const QStringList &methodNames) {
 
         // Validate: D-Bus member names must be valid identifiers
         if (!name.contains(QRegularExpression(QStringLiteral("^[A-Za-z_][A-Za-z0-9_]*$")))) {
-            qWarning("DBusProxy: skipping invalid method name '%s'", qPrintable(name));
+            // #10: the name is the peer's — XML character references can
+            // put control characters into it; escape before logging.
+            qWarning("DBusProxy: skipping invalid method name '%s'",
+                     qPrintable(escapeForLog(name)));
             continue;
         }
 
         QJSValue fn = factory.call({helperObj, QJSValue(name)});
         if (fn.isError()) {
-            qWarning("DBusProxy: failed to create method '%s': %s", qPrintable(name),
+            // The name is peer-derived (introspection XML) — escaped (#10).
+            qWarning("DBusProxy: failed to create method '%s': %s", qPrintable(escapeForLog(name)),
                      qPrintable(fn.toString()));
             continue;
         }
@@ -1169,8 +1184,11 @@ void DBusProxy::refetchInvalidated(const QStringList &names) {
                 QDBusError error = reply.error();
                 const bool decoded = !error.isValid() && decodeMessage(w->reply(), args, &error);
                 if (!decoded || args.isEmpty()) {
+                    // wireName came from the peer's invalidated_properties;
+                    // the error message can be the peer's reply error (#10).
                     qWarning("dbusqml: re-fetch of %s failed: %s — keeping the last known value",
-                             qPrintable(wireName), qPrintable(error.message()));
+                             qPrintable(escapeForLog(wireName)),
+                             qPrintable(escapeForLog(error.message())));
                 } else if (epoch == m_refetchEpoch && service == m_service && path == m_path &&
                            iface == m_iface) {
                     const QString qmlName = dbusPropToQml(wireName);
@@ -1178,8 +1196,10 @@ void DBusProxy::refetchInvalidated(const QStringList &names) {
                     DBus::UnixFd::noteDelivered(args.first(), qmlEngine(this));
                     insert(qmlName, args.first());
                 } else {
+                    // wireName came from the peer's invalidated_properties
+                    // (#10).
                     qWarning("dbusqml: dropping stale re-fetch of %s (destination changed)",
-                             qPrintable(wireName));
+                             qPrintable(escapeForLog(wireName)));
                 }
                 w->deleteLater();
             });

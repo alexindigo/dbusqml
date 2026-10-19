@@ -104,7 +104,10 @@ void DBusObjectManager::fetchManagedObjects() {
             }
             emit managedObjectsChanged();
         } else if (error.isValid()) {
-            qWarning("dbusqml: GetManagedObjects failed: %s", qPrintable(error.message()));
+            // The error can be the peer's reply error (peer-derived,
+            // escaped — #10).
+            qWarning("dbusqml: GetManagedObjects failed: %s",
+                     qPrintable(escapeForLog(error.message())));
         }
         w->deleteLater();
     });

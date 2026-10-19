@@ -58,6 +58,17 @@ infrastructure that materially affects consumer trust).
 
 ### Fixed
 
+- **Peer-supplied text could forge extra lines in text logs** (finding
+  #10). Warnings and info messages that print bus-derived strings — names
+  from introspection XML, incoming member and property names, reply error
+  names and messages, and bus-daemon error replies — printed them
+  verbatim, so an XML character reference could put a real newline into a
+  logged name (`DBusProxy: skipping invalid method name '…'` was the
+  reported case). One shared `escapeForLog` helper now renders control
+  characters and other non-printables as visible escapes (`\n`, `\x1b`,
+  `\u2028`, …) before printing; printable Unicode is unchanged, and no
+  warning text changed for printable input.
+
 - **Received fds leaked, and only the first listener got one** (finding
   #9). A decoded fd was detached from its message into a plain int that
   nothing closed when it went unread — the values after the first in a

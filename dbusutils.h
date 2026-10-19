@@ -92,9 +92,71 @@ QVariant unwrapDbus(const QVariant &value, DecodeState &state, DecodeDepth depth
 // receive Failed/InvalidArgs respectively, without a recursive warning storm.
 bool decodeMessage(const QDBusMessage &message, QVariantList &args, QDBusError *error = nullptr);
 
+// #10: peer-supplied text (a member name from introspection XML, an incoming
+// message's member, a reply's error text, a sender name, …) can carry control
+// characters — an XML character reference puts a real newline into a name —
+// that a text log renders as extra forged lines. Escape every non-printable
+// character before printing, plus the Unicode line/paragraph separators
+// (Qt's isPrint accepts them, but they render as line breaks); printable
+// Unicode passes through unchanged.
+inline QString escapeForLog(const QString &text) {
+    QString out;
+    out.reserve(text.size());
+    for (auto it = text.cbegin(); it != text.cend();) {
+        char32_t u;
+        if (it->isHighSurrogate() && it + 1 != text.cend() && (it + 1)->isLowSurrogate()) {
+            u = QChar::surrogateToUcs4(*it, *(it + 1));
+            it += 2;
+        } else {
+            u = it->unicode();
+            ++it;
+        }
+        switch (u) {
+        case 0x07:
+            out += QStringLiteral("\\a");
+            continue;
+        case 0x08:
+            out += QStringLiteral("\\b");
+            continue;
+        case 0x09:
+            out += QStringLiteral("\\t");
+            continue;
+        case 0x0A:
+            out += QStringLiteral("\\n");
+            continue;
+        case 0x0B:
+            out += QStringLiteral("\\v");
+            continue;
+        case 0x0C:
+            out += QStringLiteral("\\f");
+            continue;
+        case 0x0D:
+            out += QStringLiteral("\\r");
+            continue;
+        default:
+            break;
+        }
+        const QChar::Category cat = QChar::category(u);
+        if (QChar::isPrint(u) && cat != QChar::Separator_Line &&
+            cat != QChar::Separator_Paragraph) {
+            if (u > 0xFFFF) {
+                out += QChar(QChar::highSurrogate(u));
+                out += QChar(QChar::lowSurrogate(u));
+            } else {
+                out += QChar(char16_t(u));
+            }
+        } else if (u <= 0xFF) {
+            out += QStringLiteral("\\x%1").arg(uint(u), 2, 16, QLatin1Char('0'));
+        } else {
+            out += QStringLiteral("\\u%1").arg(uint(u), 4, 16, QLatin1Char('0'));
+        }
+    }
+    return out;
+}
+
 inline void checkedSend(const QDBusConnection &c, const QDBusMessage &m, const char *what,
                         const QString &member = {}) {
     if (!c.send(m))
         qWarning("dbusqml: %s%s%s failed to send: %s", what, member.isEmpty() ? "" : " for ",
-                 qPrintable(member), qPrintable(c.lastError().message()));
+                 qPrintable(escapeForLog(member)), qPrintable(c.lastError().message()));
 }

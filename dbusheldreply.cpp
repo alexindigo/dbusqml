@@ -28,8 +28,10 @@ void DBusHeldReply::send(const QJSValue &value) {
         return;
     }
     if (!m_adaptor) {
+        // m_member is the incoming call's member name (peer-derived,
+        // escaped — #10).
         qWarning("dbusqml: held reply for %s: adaptor destroyed before send — replying Failed",
-                 qPrintable(m_member));
+                 qPrintable(escapeForLog(m_member)));
         if (m_msg.isReplyRequired())
             checkedSend(m_conn,
                         m_msg.createErrorReply(QDBusError::Failed,
@@ -88,7 +90,10 @@ void DBusHeldReply::expire() {
     // a later consumer send() is ignored as already-settled).
     if (m_settled)
         return;
-    qWarning("dbusqml: held reply for %s timed out — replying Failed", qPrintable(m_member));
+    // m_member is the incoming call's member name (peer-derived, escaped
+    // — #10).
+    qWarning("dbusqml: held reply for %s timed out — replying Failed",
+             qPrintable(escapeForLog(m_member)));
     if (m_msg.isReplyRequired()) // B4: NO_REPLY_EXPECTED — send nothing
         checkedSend(m_conn,
                     m_msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),

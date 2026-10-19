@@ -1430,9 +1430,11 @@ QStringList DBusAdaptor::declaredOutTypes(const QString &member, bool *found) co
             if (argSig.isEmpty()) {
                 // B10: a declared signature that breaks mid-parse is LOUD
                 // (the proxy's twin already is); the parsed prefix stands.
+                // member is the incoming call's member name (peer-derived,
+                // escaped — #10).
                 qWarning("dbusqml: declared signature '%s' for %s breaks mid-parse — partial "
                          "out-args used",
-                         qPrintable(sig), qPrintable(member));
+                         qPrintable(sig), qPrintable(escapeForLog(member)));
                 break;
             }
             out << argSig;
@@ -1540,9 +1542,12 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                 val = toDbusVariantNested(val);
                 QString sendErr;
                 if (!checkSendable({QVariant::fromValue(QDBusVariant(val))}, &sendErr)) {
+                    // propName is the caller's property-name argument
+                    // (peer-derived, escaped — #10).
                     qWarning("dbusqml: property %s on %s is not marshalable (%s) — "
                              "replying InvalidArgs",
-                             qPrintable(propName), qPrintable(m_iface), qPrintable(sendErr));
+                             qPrintable(escapeForLog(propName)), qPrintable(m_iface),
+                             qPrintable(sendErr));
                     sendReply(msg.createErrorReply(
                         QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
                         QStringLiteral("Property not marshalable: %1").arg(propName)));
@@ -1863,8 +1868,11 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                                     errorMessage = msgVal.toString();
                             }
                         }
-                        qWarning("dbusqml: handler for %s threw %s: %s", qPrintable(member),
-                                 qPrintable(errorName), qPrintable(errorMessage));
+                        // member is the incoming call's member name
+                        // (peer-derived, escaped — #10).
+                        qWarning("dbusqml: handler for %s threw %s: %s",
+                                 qPrintable(escapeForLog(member)), qPrintable(errorName),
+                                 qPrintable(errorMessage));
                         if (m_currentCall.held && !m_currentCall.reply.isNull()) {
                             // P0: settle the HELD reply, not the serial. B4
                             // honored: sendError sends nothing when the caller
@@ -1873,7 +1881,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                         } else if (msg.isReplyRequired()) {
                             if (!conn.send(msg.createErrorReply(errorName, errorMessage)))
                                 qWarning("dbusqml: error reply for %s failed to send: %s",
-                                         qPrintable(member),
+                                         qPrintable(escapeForLog(member)),
                                          qPrintable(conn.lastError().message()));
                         }
                         return true;
@@ -2017,9 +2025,11 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         // decision, never silent.
         if (heldForThisCall) {
             if (retVal.isValid()) {
+                // member is the incoming call's member name (peer-derived,
+                // escaped — #10).
                 qWarning("dbusqml: handler return value ignored when holdReply() was called "
                          "(member %s — the held reply settles the caller)",
-                         qPrintable(member));
+                         qPrintable(escapeForLog(member)));
             }
             return true;
         }
@@ -2028,8 +2038,10 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         // an unchecked invoke used to send a silent EMPTY SUCCESS reply
         // (invalid retVal) for C++-typed handlers whose conversion failed.
         if (!invoked) {
+            // member is the incoming call's member name (peer-derived,
+            // escaped — #10).
             qWarning("dbusqml: handler invocation failed for %s (conversion error)",
-                     qPrintable(member));
+                     qPrintable(escapeForLog(member)));
             sendReply(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
                                            QStringLiteral("Handler invocation failed")));
             return true;
@@ -2053,9 +2065,11 @@ DBusHeldReply *DBusAdaptor::holdReply() {
     // settlement authorities = double-reply surface; the teardown loop
     // would error the orphan).
     if (m_currentCall.held && !m_currentCall.reply.isNull()) {
+        // m_currentCall.member is the incoming call's member name
+        // (peer-derived, escaped — #10).
         qWarning("dbusqml: holdReply() called twice in one dispatch of %s — returning the same "
                  "handle",
-                 qPrintable(m_currentCall.member));
+                 qPrintable(escapeForLog(m_currentCall.member)));
         return m_currentCall.reply;
     }
     auto *reply = new DBusHeldReply(this);
@@ -2135,10 +2149,12 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
         // Robustness guard: an unmarshalable payload (e.g. a returned JS
         // function) would otherwise make QtDBus drop the bus connection.
         // Degrade to an error reply — one failed call, never the service.
+        // member is the incoming call's member name (peer-derived, escaped
+        // — #10); the same holds for the other warnings in this routine.
         QString sendErr;
         if (!checkSendable({value}, &sendErr)) {
             qWarning("dbusqml: reply for %s is not marshalable (%s) — sending error reply",
-                     qPrintable(member), qPrintable(sendErr));
+                     qPrintable(escapeForLog(member)), qPrintable(sendErr));
             checkedSend(msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
                                              QStringLiteral("Reply value is not marshalable")),
                         "error reply");
@@ -2155,7 +2171,8 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
         bool declared = false;
         const QStringList outTypes = declaredOutTypes(member, &declared);
         if (declared && outTypes.isEmpty()) {
-            qWarning("dbusqml: %s is declared void — dropping return value", qPrintable(member));
+            qWarning("dbusqml: %s is declared void — dropping return value",
+                     qPrintable(escapeForLog(member)));
             checkedSend(msg.createReply(), "declared-void reply");
             return;
         }
@@ -2171,7 +2188,8 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
             if (!checkSendable({coerced}, &sendErr)) {
                 qWarning("dbusqml: reply for %s cannot produce declared type '%s' (%s) — sending "
                          "error reply",
-                         qPrintable(member), qPrintable(outTypes.first()), qPrintable(sendErr));
+                         qPrintable(escapeForLog(member)), qPrintable(outTypes.first()),
+                         qPrintable(sendErr));
                 checkedSend(
                     msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
                                          QStringLiteral("Reply value is not marshalable")),
@@ -2194,7 +2212,7 @@ void DBusAdaptor::sendMethodReply(const QDBusConnection &conn, const QDBusMessag
             QString sendErr;
             if (!checkSendable(reply, &sendErr)) {
                 qWarning("dbusqml: reply for %s is not marshalable (%s) — sending error reply",
-                         qPrintable(member), qPrintable(sendErr));
+                         qPrintable(escapeForLog(member)), qPrintable(sendErr));
                 checkedSend(
                     msg.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.Failed"),
                                          QStringLiteral("Reply value is not marshalable")),

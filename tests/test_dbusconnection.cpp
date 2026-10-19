@@ -372,6 +372,26 @@ public:
     }
 };
 
+// #10 fixture: advertises a method whose name carries an ENCODED line feed
+// (the XML character reference &#10; — finding #10's shape). The proxy must
+// log the name in escaped form on one line, never a raw control character.
+class ControlCharIntroObject : public QDBusVirtualObject {
+public:
+    explicit ControlCharIntroObject(QObject *parent = nullptr) : QDBusVirtualObject(parent) {}
+    QString introspect(const QString &) const override {
+        return QStringLiteral("<node><interface name=\"org.dbusqml.CcPeer\">"
+                              "<method name=\"Foo&#10;Bar\"/>"
+                              "<method name=\"Good\"/>"
+                              "</interface></node>");
+    }
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.interface() == QLatin1String("org.dbusqml.CcPeer") &&
+            msg.member() == QLatin1String("Good"))
+            return conn.send(msg.createReply(QVariantList{QStringLiteral("ok")}));
+        return false;
+    }
+};
+
 // Manual property server for the PropertiesChanged protocol tests (A2/A3/A16):
 // Introspect declares the properties; Get/GetAll/Set/Bump are fully manual so
 // the test can change the value WITHOUT any emission (the invalidation scenario).
@@ -2905,6 +2925,96 @@ private slots:
 
         delete proxy;
     }
+
+    // #10: a peer-advertised method name with an encoded newline produces
+    // exactly one warning line carrying the ESCAPED form — the raw name
+    // would forge extra lines in a text log.
+    void testPeerControlCharMethodNameEscaped() {
+        QDBusConnection bus = QDBusConnection::sessionBus();
+        auto *peer = new ControlCharIntroObject(this);
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/CcPeer"), peer));
+        QVERIFY(bus.registerService(QStringLiteral("org.dbusqml.CcPeer")));
+
+        QQmlEngine engine;
+        QDir binDir(QCoreApplication::applicationDirPath());
+        engine.addImportPath(binDir.path());
+        engine.addImportPath(binDir.filePath(QStringLiteral("DBus")));
+        QQmlComponent component(&engine);
+        component.setData("import DBus 1.0;\n"
+                          "DBus {\n"
+                          "  service: 'org.dbusqml.CcPeer'\n"
+                          "  path: '/CcPeer'\n"
+                          "  iface: 'org.dbusqml.CcPeer'\n"
+                          "  propertiesEnabled: false\n"
+                          "  signalsEnabled: false\n"
+                          "}",
+                          QUrl());
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+
+        ConnMessageCapture capture;
+        auto *proxyObj = component.create();
+        QVERIFY(proxyObj != nullptr);
+        auto *proxy = static_cast<DBusProxy *>(proxyObj);
+
+        QTRY_VERIFY_WITH_TIMEOUT(capture.contains(QStringLiteral("skipping invalid method name")),
+                                 5000);
+
+        // Exactly one such warning line, carrying the escaped form.
+        int hits = 0;
+        bool rawControlChar = false;
+        for (const QString &m : capture.messages) {
+            if (m.contains(QStringLiteral("skipping invalid method name")))
+                ++hits;
+            for (const QChar c : m) {
+                if (!c.isPrint()) {
+                    rawControlChar = true;
+                    break;
+                }
+            }
+        }
+        QCOMPARE(hits, 1);
+        QVERIFY(capture.contains(
+            QStringLiteral("DBusProxy: skipping invalid method name 'Foo\\nBar'")));
+        QVERIFY(!rawControlChar);
+
+        delete proxy;
+    }
+
+    // >>> RED-BASELINE-STRIP-BEGIN (item 10): new-API unit test — the helper
+    // does not exist at the baseline, so the RED scratch copy deletes this
+    // block to the END marker.
+    void testEscapeForLog() {
+        QCOMPARE(escapeForLog(QString()), QString());
+        QCOMPARE(escapeForLog(QStringLiteral("plain ASCII-name_1.x")),
+                 QStringLiteral("plain ASCII-name_1.x"));
+        // C0 controls: named escapes for the well-known ones, \xNN for the rest.
+        QCOMPARE(escapeForLog(QStringLiteral("a\nb\rc\td\fe\vf\bg")),
+                 QStringLiteral("a\\nb\\rc\\td\\fe\\vf\\bg"));
+        QCOMPARE(escapeForLog(QString(1, QChar(0x07))), QStringLiteral("\\a"));
+        QCOMPARE(escapeForLog(QString(1, QChar(0x00))), QStringLiteral("\\x00"));
+        QCOMPARE(escapeForLog(QString(1, QChar(0x01))), QStringLiteral("\\x01"));
+        QCOMPARE(escapeForLog(QString(1, QChar(0x1b))), QStringLiteral("\\x1b")); // ESC
+        QCOMPARE(escapeForLog(QString(1, QChar(0x1f))), QStringLiteral("\\x1f"));
+        QCOMPARE(escapeForLog(QString(1, QChar(0x7f))), QStringLiteral("\\x7f")); // DEL
+        // C1 controls.
+        QCOMPARE(escapeForLog(QString(1, QChar(0x85))), QStringLiteral("\\x85")); // NEL
+        QCOMPARE(escapeForLog(QString(1, QChar(0x9b))), QStringLiteral("\\x9b"));
+        // Unicode line/paragraph separators and format characters.
+        QCOMPARE(escapeForLog(QString(1, QChar(0x2028))), QStringLiteral("\\u2028"));
+        QCOMPARE(escapeForLog(QString(1, QChar(0x2029))), QStringLiteral("\\u2029"));
+        QCOMPARE(escapeForLog(QString(1, QChar(0x200b))), QStringLiteral("\\u200b"));
+        // A lone surrogate is escaped, not printed raw.
+        QCOMPARE(escapeForLog(QString(1, QChar(0xd800))), QStringLiteral("\\ud800"));
+        // Printable Unicode passes through unchanged, including a non-BMP
+        // (surrogate-pair) character.
+        QCOMPARE(escapeForLog(QStringLiteral("héllo wörld — ünïcode")),
+                 QStringLiteral("héllo wörld — ünïcode"));
+        QCOMPARE(escapeForLog(QStringLiteral("\U0001F600")), QStringLiteral("\U0001F600"));
+        // A backslash is printable and stays as-is (only control characters
+        // are escaped).
+        QCOMPARE(escapeForLog(QStringLiteral("a\\b")), QStringLiteral("a\\b"));
+    }
+    // >>> RED-BASELINE-STRIP-END (item 10)
 
     void testPropertiesGetEchoString() {
         // Test Properties.Get via the service's echo mechanism
