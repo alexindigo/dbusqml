@@ -190,6 +190,9 @@ infrastructure that materially affects consumer trust).
 - Tests and the TSan gate honor `TMPDIR` for fd fixtures, monitor logs,
   scratch directories and every private D-Bus socket, including CTest/CI
   session wrappers and the Quickshell comparison runtime.
+- The TSan gate's report classifier parses `WARNING: ThreadSanitizer:` lines
+  in linear time: a warning line with a long whitespace run took over a minute
+  to parse before, with identical results.
 
 ## [1.0.0] - 2026-09-27
 

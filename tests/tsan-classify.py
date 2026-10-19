@@ -104,7 +104,8 @@ FOREIGN_MODULE_RE = re.compile(
     r"libstdc\+\+\.so(\.\d+)*|libtsan\.so(\.\d+)*|ld-linux[\w\-]*\.so(\.\d+)*|"
     r"ld\.so(\.\d+)*|linux-vdso\.so(\.\d+)*|\[vdso\])$")
 
-WARNING_RE = re.compile(r"^WARNING: ThreadSanitizer:\s*(.+?)\s*(\(pid=\d+\))?\s*$")
+WARNING_PREFIX = "WARNING: ThreadSanitizer:"
+PID_TAIL_RE = re.compile(r"\(pid=\d+\)\Z")
 SUMMARY_RE = re.compile(r"^SUMMARY: ThreadSanitizer:")
 FRAME_RE = re.compile(r"^\s+#(\d+)\s+(.*?)\s*$")
 CREATION_HDR_RE = re.compile(r"^\s+Thread\s+\S+.*\bcreated by\b")
@@ -204,6 +205,29 @@ class Block:
         self.raw = []
 
 
+def parse_warning(line):
+    """Report-type description of a 'WARNING: ThreadSanitizer:' line, or None.
+
+    Fixed prefix, then the description and an optional trailing '(pid=N)'.
+    Linear time: no overlapping repetitions to backtrack through (the former
+    regex took over a minute on a 5000-space run). Same result as that regex
+    on every line: its description where it matched, None where it did not.
+    Lines come from text.splitlines(), so they contain no line-boundary
+    characters."""
+    if not line.startswith(WARNING_PREFIX):
+        return None
+    rest = line[len(WARNING_PREFIX):]
+    body = rest.strip()
+    if not body:
+        # Whitespace-only remainder: the former regex's description was the
+        # remainder's last character (empty remainder: not a block start).
+        return rest[-1:] or None
+    m = PID_TAIL_RE.search(body)
+    if m and m.start() > 0:
+        return body[:m.start()].rstrip()
+    return body
+
+
 def split_blocks(text):
     """Split log text into (blocks, anomalies). Block = WARNING..SUMMARY."""
     lines = text.splitlines()
@@ -218,12 +242,12 @@ def split_blocks(text):
             # one anomaly per line is enough.)
             anomalies.append(f"fatal/error report line: {line.strip()[:80]}")
             continue
-        wm = WARNING_RE.match(line)
-        if wm:
+        desc = parse_warning(line)
+        if desc is not None:
             if cur is not None:
                 anomalies.append("truncated block: new WARNING before SUMMARY")
                 blocks.append(cur)
-            cur = Block(wm.group(1))
+            cur = Block(desc)
             cur.raw.append(line)
             continue
         if cur is None:

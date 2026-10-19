@@ -51,9 +51,13 @@
 # one expected verdict... (not used; the break-one proof is a corrupted
 # FIXTURES_DIR copy, so the runner itself carries no self-sabotage path).
 
+import importlib.util
 import os
+import random
+import re
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # tests/
 REPO = os.path.dirname(HERE)
@@ -107,7 +111,96 @@ def expect_crosscheck(name, dump_text, want_flagged):
         print(f"      {p.stdout.strip()} {p.stderr.strip()}")
 
 
+def load_classifier():
+    spec = importlib.util.spec_from_file_location("tsan_classify", CLASSIFIER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# The WARNING-line regex as it stood before item 11: the equality oracle
+# for the linear parser (tsan-classify.py parse_warning).
+OLD_WARNING_RE = re.compile(r"^WARNING: ThreadSanitizer:\s*(.+?)\s*(\(pid=\d+\))?\s*$")
+
+
+def warning_reports(cls, line):
+    """Report-type descriptions the classifier's real call site (split_blocks)
+    extracts from one WARNING line: [] when the line is not a block start."""
+    blocks, _ = cls.split_blocks(line)
+    return [b.report_type for b in blocks]
+
+
+def warning_parser_cases():
+    cls = load_classifier()
+
+    # 9a. linear-time parse of a pathological whitespace run (item 11).
+    # The former regex was quadratic here; the budget is generous for any
+    # linear parser and far below the former cost.
+    name = "WARNING line with a 5000-space run parses in < 100 ms"
+    line = "WARNING: ThreadSanitizer: x" + " " * 5000 + "y"
+    t0 = time.perf_counter()
+    got = warning_reports(cls, line)
+    dt = time.perf_counter() - t0
+    if got == ["x" + " " * 5000 + "y"] and dt < 0.1:
+        print(f"PASS: {name} ({dt * 1000:.1f} ms)")
+    else:
+        failures.append(name)
+        print(f"FAIL: {name} (got {len(got)} blocks, {dt * 1000:.1f} ms)")
+
+    # 9b. equality with the former regex on normal and edge lines: same
+    # description when it matched, no block when it did not.
+    normal = [
+        "WARNING: ThreadSanitizer: data race",
+        "WARNING: ThreadSanitizer: data race (pid=1234)",
+        "WARNING: ThreadSanitizer:   data race   (pid=1234)   ",
+        "WARNING: ThreadSanitizer: heap-use-after-free (pid=99)",
+        "WARNING: ThreadSanitizer: lock-order-inversion (potential deadlock) (pid=1234)",
+        "WARNING: ThreadSanitizer: thread leak",
+        "WARNING: ThreadSanitizer: data race  (pid=1234) trailing",
+        "WARNING: ThreadSanitizer: data\trace\t(pid=1)\t",
+        "WARNING: ThreadSanitizer: data race (pid=1)(pid=2)",
+        "WARNING: ThreadSanitizer: (pid=1234)",
+        "WARNING: ThreadSanitizer: data race (pid=)",
+        "WARNING: ThreadSanitizer: data race (pid=12x)",
+        "WARNING: ThreadSanitizer:x",
+        "WARNING: ThreadSanitizer: a\u00a0(pid=5)",
+        "WARNING: ThreadSanitizer: 数据竞争 (pid=7)",
+        "WARNING: ThreadSanitizer:",
+        "WARNING: ThreadSanitizer:    ",
+        "  WARNING: ThreadSanitizer: leading junk",
+        "SUMMARY: ThreadSanitizer: data race (pid=1)",
+    ]
+    fixed = [
+        "WARNING: ThreadSanitizer: data race (pid=1234) (pid=5)",
+        "WARNING: ThreadSanitizer: a (pid=1) b (pid=2)",
+        "WARNING: ThreadSanitizer:\t\x1f(pid=3)\x1f",
+    ]
+    rng = random.Random(1100)
+    tokens = ["data race", " ", "\t", "\u00a0", "\u3000", "\x1f", "\u200b",
+              "(", ")", "(pid=", "pid=", "=", "1", "\u0661", "a", "WARNING: ThreadSanitizer:"]
+    randomized = []
+    for _ in range(3000):
+        body = "".join(rng.choice(tokens) for _ in range(rng.randint(0, 9)))
+        randomized.append(("WARNING: ThreadSanitizer:" + body)
+                          if rng.random() < 0.8 else body)
+    mismatches = []
+    for line in normal + fixed + randomized:
+        m = OLD_WARNING_RE.match(line)
+        want = [m.group(1)] if m else []
+        if warning_reports(cls, line) != want:
+            mismatches.append(line)
+    name = (f"WARNING parser equals the former regex on {len(normal)} normal/edge "
+            f"and {len(randomized)} seeded random lines")
+    if not mismatches:
+        print(f"PASS: {name}")
+    else:
+        failures.append(name)
+        print(f"FAIL: {name}: {len(mismatches)} mismatches, first {mismatches[0]!r}")
+
+
 def main():
+    warning_parser_cases()
+
     # 4. captured real logs
     expect("real pure-ours canary log fails", "ours-pure-canary.log", True)
     expect("real bus-bind suite block (ours creation stack) is foreign-registered",
