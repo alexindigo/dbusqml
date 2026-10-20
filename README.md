@@ -143,7 +143,7 @@ scripts/run-tests        # C++ and QML tests
 
 ## Examples
 
-Thirteen runnable examples covering the common patterns:
+Runnable examples cover the common patterns:
 
 | Tier          | Examples                                                         |
 |---------------|------------------------------------------------------------------|
@@ -155,8 +155,9 @@ Thirteen runnable examples covering the common patterns:
 scripts/run-examples MprisPlayer   # or a category: `advanced`
 ```
 
-## Docs
+## Documentation
 
+- [`docs/guides/`](docs/guides/README.md) — task-oriented guides: first calls, properties/signals, serving interfaces, file descriptors and lifetime
 - [`API.md`](API.md) — full API reference
 - [`DESIGN.md`](DESIGN.md) — architecture and rationale
 - [`docs/TYPES.md`](docs/TYPES.md) — user-land type catalog

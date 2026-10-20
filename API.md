@@ -2,6 +2,9 @@
 
 This document describes the public API of the `DBus` QML module.
 
+For complete, task-oriented QML files, start with the
+[guides](docs/guides/README.md).
+
 ## Module Import
 
 To use the module in QML, import it as follows:
@@ -42,6 +45,9 @@ Item {
 ---
 
 ### `DBus` (Proxy Element)
+
+Guides: [calling methods](docs/guides/calling-methods.md) and
+[properties and signals](docs/guides/properties-and-signals.md).
 
 **`callTimeout`:** the proxy's `callTimeout` property (milliseconds, `-1` =
 Qt default) governs ALL proxy traffic — `call()`, dynamic methods,
@@ -222,6 +228,9 @@ DBus {
 
 ### `DBusConnection`
 
+Guides: [getting started](docs/guides/getting-started.md) and
+[explicit messages and callbacks](docs/guides/calling-methods.md).
+
 `DBusConnection` provides methods for making asynchronous calls to the bus. Obtain one via `connectToBus()` or reuse the built-in `SessionBus`/`SystemBus`:
 
 ```qml
@@ -283,6 +292,8 @@ SessionBus.asyncCall({
 
 ### `DBusSignalWatcher`
 
+Guide: [watch without introspection](docs/guides/properties-and-signals.md#watch-without-introspection).
+
 Subscribes to signals on any bus with no proxy and no introspection
 requirement. Empty `service`/`member` fields are wildcards (the
 dbus-monitor shape, including `NameOwnerChanged` on the daemon and
@@ -326,6 +337,8 @@ DBusServiceWatcher {
 
 ### `DBusObjectManager`
 
+Guide: [discover objects](docs/guides/properties-and-signals.md#discover-objects-with-objectmanager).
+
 Client for `org.freedesktop.DBus.ObjectManager`: fetches `GetManagedObjects`
 and follows `InterfacesAdded`/`InterfacesRemoved`.
 
@@ -348,6 +361,8 @@ service/path it was made with) and refetches the inventory; live
 `InterfacesAdded`/`InterfacesRemoved` then arrive from the new target only.
 
 ### `DBusAdaptor` (Server Element)
+
+Guide: [serving interfaces](docs/guides/serving-interfaces.md).
 
 The `DBusAdaptor` element registers a D-Bus object on the bus and responds to incoming method calls. It is the server-side counterpart of the `DBus` proxy element.
 
@@ -781,6 +796,9 @@ Lifecycle semantics:
 
 ## Shape Selection
 
+Guides: [typed calls](docs/guides/calling-methods.md) and
+[troubleshooting](docs/guides/troubleshooting.md).
+
 When dbusqml marshals a JS value to the wire, the D-Bus signature comes from
 declarations, never from guessing the data's shape. Inference is stable and
 boring: `QVariantMap` → `a{sv}`, always. Anything fancier must be declared.
@@ -893,6 +911,8 @@ Can be constructed from a property map: `new DBus.dbusMessage({service: "...", p
 ---
 
 ### `DBusPendingReply` (Object)
+
+Guide: [reply lifetime and memory](docs/guides/lifetime-and-memory.md).
 
 Represents the result of an asynchronous D-Bus call.
 
@@ -1040,6 +1060,8 @@ lossless end-to-end.
 
 ## Unix file descriptors (`h`)
 
+Guide: [sending, receiving and closing file descriptors](docs/guides/file-descriptors.md).
+
 A file descriptor crosses D-Bus only as a **`DBusQML.unixFd`** — a value that
 **owns** its descriptor (prior art: Node `FileHandle`, Go `os.File`, Qt
 `QDBusUnixFileDescriptor`, dbus-python `UnixFd`). This works in both
@@ -1161,6 +1183,8 @@ Caveats:
 | `readFd`/`writeFd`/`fdUrl(int)` | the same helpers with a `unixFd` |
 
 ## ListModel and dbusqml values
+
+Guide: [value-preserving storage](docs/guides/lifetime-and-memory.md#store-value-types-without-flattening-them).
 
 Qt's [`ListModel`](https://doc.qt.io/qt-6/qml-qtqml-models-listmodel.html)
 keeps QObjects, URLs, dates, functions and simple values (strings, numbers,

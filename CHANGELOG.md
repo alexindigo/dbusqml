@@ -194,6 +194,13 @@ infrastructure that materially affects consumer trust).
   in linear time: a warning line with a long whitespace run took over a minute
   to parse before, with identical results.
 
+### Docs
+
+- Task-oriented guides with complete QML files for first calls, typed
+  arguments, properties and signals, serving interfaces, file descriptors,
+  reply lifetime and troubleshooting. The README, API reference and example
+  index link to the matching tasks.
+
 ## [1.0.0] - 2026-09-27
 
 ### Added
