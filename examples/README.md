@@ -40,6 +40,8 @@ qml6 examples/simple/ListNames.qml
 | `intermediate/BatteryMonitor.qml` | `SystemBus.asyncCall()`, `org.freedesktop.DBus.Properties.GetAll`, UPower device enumeration — recreates the noctalia UPower battery monitoring pattern natively |
 | `intermediate/Caffeine.qml` | `org.freedesktop.ScreenSaver.Inhibit`/`UnInhibit` — prevent screen blanking. Replaces the `dbus-send --type=signal` and gnome-screensaver-command subprocess approach |
 | `intermediate/PortalDemo.qml` | Portal-styled demo shell wiring Settings + FileChooser shapes |
+| [`intermediate/SleepInhibitor.qml`](intermediate/SleepInhibitor.qml) | logind `Inhibit("sleep", …)` on the system bus; hold the returned `unixFd` while a toggle is on and `close()` to release it. Requires logind permission; reports policy errors in the window. |
+| [`intermediate/OpenFileWithPortal.qml`](intermediate/OpenFileWithPortal.qml) | Open a local file with `DBusUtils.openFd`, pass it to the session-bus OpenURI portal's `OpenFile`, then close the local fd. Requires a working portal/backend; displays errors or the request handle, not a claim that the application opened. |
 
 ### Advanced
 
