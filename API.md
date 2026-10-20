@@ -4,25 +4,30 @@ This document describes the public API of the `DBus` QML module.
 
 For complete, task-oriented QML files, start with the
 [guides](docs/guides/README.md).
-Examples without the required imports or an enclosing QML root are excerpts
-to use inside your application.
+QML blocks below are complete files. JavaScript excerpts run inside a QML
+handler with the named objects and module imports supplied by your application.
 
 ## Module Import
 
 To use the module in QML, import it as follows:
 
 ```qml
+import QtQuick
 import DBus 1.0
+
+Item { property var bus: SessionBus }
 ```
 
 ## Core Components
 
 ### `busType` (Enum)
 
-```qml
-busType.Session      // The session bus (personal applications)
-busType.System       // The system bus (system services)
+```js
+DBusQML.busType.Session // The session bus (personal applications)
+DBusQML.busType.System  // The system bus (system services)
 ```
+
+Use `import DBus 1.0 as DBusQML` for this qualified enum access.
 
 ### Bus Connections
 
@@ -67,14 +72,27 @@ The `DBus` element represents a D-Bus object. When `iface` is set, it introspect
 
 **Dynamic methods** — D-Bus methods become callable directly on the element. D-Bus method names are PascalCase; the QML surface exposes them in camelCase:
 ```qml
-DBus {
-    id: mpris
-    service: "org.mpris.MediaPlayer2.myplayer"
-    path: "/org/mpris/MediaPlayer2"
-    iface: "org.mpris.MediaPlayer2.Player"
+import QtQuick
+import DBus 1.0
+
+Item {
+    id: root
+    property var endpoint: mpris
+    DBus {
+        id: mpris
+        service: "org.mpris.MediaPlayer2.myplayer"
+        path: "/org/mpris/MediaPlayer2"
+        iface: "org.mpris.MediaPlayer2.Player"
+    }
+    function togglePlayback() {
+        if (mpris.status === DBus.Ready)
+            root.endpoint.playPause() // wire method PlayPause
+    }
+    function seekForward() {
+        if (mpris.status === DBus.Ready)
+            root.endpoint.seek(50000000) // wire method Seek
+    }
 }
-mpris.playPause()          // → calls "PlayPause" on the D-Bus object
-mpris.seek(50000000)       // → calls "Seek" with argument
 ```
 
 These calls require completed introspection. MPRIS volume is a writable
@@ -82,15 +100,21 @@ property, not a `SetVolume` method: use `mpris.setProperty("Volume", 0.8)`.
 
 **Dynamic properties** — D-Bus properties are exposed under QML camelCase names:
 ```qml
-DBus {
-    id: bat
-    service: "org.freedesktop.UPower"
-    path: "/org/freedesktop/UPower/devices/battery_BAT0"
-    iface: "org.freedesktop.UPower.Device"
+import QtQuick
+import DBus 1.0
+
+Item {
+    readonly property var percentage: battery["percentage"]
+    readonly property var isPresent: battery["isPresent"]
+    readonly property var timeToEmpty: battery["timeToEmpty"]
+    DBus {
+        id: battery
+        connection: SystemBus
+        service: "org.freedesktop.UPower"
+        path: "/org/freedesktop/UPower/devices/DisplayDevice"
+        iface: "org.freedesktop.UPower.Device"
+    }
 }
-bat.percentage             // cached value of "Percentage"
-bat.isPresent              // cached value of "IsPresent"
-bat.timeToEmpty            // cached value of "TimeToEmpty"
 ```
 
 The initial `Properties.GetAll` populates these values; reading a binding
@@ -138,8 +162,8 @@ handling owns the rest.
 | `setProperty(name, value)` | `string name`, `variant value` | — | Write a D-Bus property directly via `Properties.Set`. |
 | `propertyWriteFailed(name, errorName, message)` | `string`, `string`, `string` | Signal: a `Set` the proxy issued was rejected (the property is re-fetched from the service; the proxy never invents a value). |
 | `emitSignal(name, args)` | `string name`, `list args` | — | Emit a D-Bus signal from this proxy's path/interface. |
-| `connectToBus(address)` | `string address` | `DBusConnection` | (static) Connect to a custom D-Bus address. Returns null on failure. |
-| `reloadTypes()` | — | — | (static) Re-scan the type catalog after drop-in changes. See `docs/TYPES.md`. |
+| `connectToBus(address)` | `string address` | `DBusConnection` | C++ static factory, callable on a QML proxy instance; prefer `SessionBus.connectToBus(address)` in QML. Returns null on failure. |
+| `reloadTypes()` | — | — | C++ static catalog operation, callable on a QML proxy instance. Re-scan after drop-in changes; see `docs/TYPES.md`. |
 
 **Boundary errors:** arguments that cannot be marshaled (a
 `QObject*` in a map, a JS function, an unregistered type) fail the call
@@ -269,16 +293,27 @@ catalog data unless you supply an override.
 Guides: [getting started](docs/guides/getting-started.md) and
 [explicit messages and callbacks](docs/guides/calling-methods.md).
 
-`DBusConnection` provides methods for making asynchronous calls to the bus. Obtain one via `connectToBus()` or reuse the built-in `SessionBus`/`SystemBus`:
+`DBusConnection` provides methods for making asynchronous calls to the bus.
+Reuse `SessionBus` / `SystemBus`, or call `SessionBus.connectToBus(address)`
+for a custom connection. The factory does not use the singleton's bus;
+it opens the supplied address. A C++ static invokable is exposed through
+QML **object instances**, not as `DBus.connectToBus` on the type name:
 
-```qml
+```js
 // Use the built-in singletons
-SessionBus.asyncCall({...})
-SystemBus.asyncCall({...})
+const message = {
+    service: "org.freedesktop.DBus",
+    path: "/org/freedesktop/DBus",
+    iface: "org.freedesktop.DBus",
+    member: "ListNames",
+    arguments: []
+}
+SessionBus.asyncCall(message)
+SystemBus.asyncCall(message)
 
 // Connect to a custom bus address
-var custom = DBus.connectToBus("unix:path=/tmp/kvm-bus")
-custom.asyncCall({...})
+const custom = SessionBus.connectToBus("unix:path=/run/user/1000/example-bus")
+if (custom) custom.asyncCall(message)
 ```
 
 #### Methods
@@ -301,10 +336,10 @@ when you need all output arguments.
 | `disconnected()` | signal | Emitted once when the bus connection drops. Proxies flip to `Error` + `serviceAvailable=false`; served claims emit `nameLost`. |
 
 Example usage — pending reply style:
-```qml
+```js
 var reply = SessionBus.asyncCall({
     service: "org.freedesktop.DBus",
-    path: "/",
+    path: "/org/freedesktop/DBus",
     iface: "org.freedesktop.DBus",
     member: "ListNames",
 })
@@ -318,10 +353,10 @@ reply.finished.connect(() => {
 ```
 
 Example usage — promise/callback style:
-```qml
+```js
 SessionBus.asyncCall({
     service: "org.freedesktop.DBus",
-    path: "/",
+    path: "/org/freedesktop/DBus",
     iface: "org.freedesktop.DBus",
     member: "ListNames",
 }, (result) => {
@@ -343,6 +378,8 @@ dbus-monitor shape, including `NameOwnerChanged` on the daemon and
 system-bus signals).
 
 ```qml
+import DBus 1.0
+
 DBusSignalWatcher {
     connection: SystemBus          // or SessionBus / custom
     service: ""                    // any sender
@@ -369,6 +406,8 @@ Watches one well-known name for appear/disappear/owner change on any bus —
 the standalone complement to the proxy's `watchServiceStatus`.
 
 ```qml
+import DBus 1.0
+
 DBusServiceWatcher {
     connection: SystemBus
     service: "org.bluez"
@@ -387,6 +426,8 @@ Client for `org.freedesktop.DBus.ObjectManager`: fetches `GetManagedObjects`
 and follows `InterfacesAdded`/`InterfacesRemoved`.
 
 ```qml
+import DBus 1.0
+
 DBusObjectManager {
     connection: SystemBus
     service: "org.bluez"
@@ -415,6 +456,9 @@ Guide: [serving interfaces](docs/guides/serving-interfaces.md).
 The `DBusAdaptor` element registers a D-Bus object on the bus and responds to incoming method calls. It is the server-side counterpart of the `DBus` proxy element.
 
 ```qml
+import DBus 1.0
+import DBus 1.0 as DBusQML
+
 DBusAdaptor {
     id: adaptor
     service: "org.freedesktop.impl.portal.atmosphera"
@@ -426,10 +470,10 @@ DBusAdaptor {
     property int colorScheme: 0
 
     // QML functions become D-Bus methods (callable from other processes)
-    function readSetting(ns, key) {
+    function readOne(ns, key) {
         if (ns === "org.freedesktop.appearance" && key === "color-scheme")
-            return colorScheme
-        return ""
+            return new DBusQML.variant(adaptor.colorScheme)
+        return new DBusQML.variant("")
     }
 }
 ```
@@ -555,6 +599,9 @@ Example — serving `org.freedesktop.impl.portal.Settings` (the portal
 backend pattern):
 
 ```qml
+import DBus 1.0
+import DBus 1.0 as DBusQML
+
 DBusAdaptor {
     service: "org.freedesktop.impl.portal.MyShell"
     path: "/org/freedesktop/portal/desktop"
@@ -566,7 +613,7 @@ DBusAdaptor {
         if (ns === "org.freedesktop.appearance" && key === "color-scheme")
             return new DBusQML.variant(1)              // prefer-dark
         if (ns === "org.freedesktop.appearance" && key === "accent-color")
-            return new DBusQML.struct_([0.2, 0.5, 0.9]) // (ddd) on the wire
+            return new DBusQML.struct_([0.2, 0.5, 0.9]) // v holding (ddd)
         return new DBusQML.variant("")
     }
 
@@ -588,8 +635,8 @@ DBusAdaptor {
 ```
 
 **Limitations:**
-- QML `signal` declarations are automatically forwarded as D-Bus signals (maximum 5 parameters)
-- Static `DBus.emitSignal(service, path, iface, name, args)` always uses the session bus
+- Auto-forwarded QML signals use `var` parameters (maximum 5); `_signals` or catalog declarations supply their wire types. The current relay's Qt slots take `QVariant`: native typed parameters such as `string` do not connect to those slots and produce an incompatible sender/receiver warning. Use `var` or explicit `emitSignal`.
+- The C++ static five-argument `DBusProxy::emitSignal(service, path, iface, name, args)` overload always uses the session bus. From QML it is callable through a proxy object instance, not the `DBus` type name.
 - `DBusAdaptor.emitSignal(name, args)` sends on its recorded attach connection, using the adaptor's existing registration. The **proxy's** instance `emitSignal` is the API that attempts `registerService(service)`, once per service value.
 - `emitSignal(name, args)` arguments are marshaled through `toDbusVariant` — use `DBusQML.variant(x)` for variant-typed signal args (e.g. the portal `SettingChanged` `(ssv)` signature)
 - A struct **inside** a variant (`DBusQML.variant(DBusQML.struct_(...))`) marshals as a real `v` with a struct payload; return the struct directly when you need a bare `(...)` signature.
@@ -651,16 +698,37 @@ synchronously inside the handler to mark the call as deferred; it returns a
 `DBusHeldReply` that settles the call later with `send(value)` or
 `sendError(name, message)`:
 
-```qml
-import DBus 1.0
-import DBus 1.0 as DBusQML   // alias for value types
+This complete example answers on a timer. A real dialog uses the same
+handle, with one settlement owner and dialog callbacks disconnected when
+the interaction finishes.
 
-DBusAdaptor {
-    iface: "org.freedesktop.impl.portal.FileChooser"
-    function openFile(handle, appId, parentWindow, title, options) {
-        const reply = holdReply()
-        dialog.accepted.connect(paths => reply.send([0, { uris: new DBusQML.variant(paths, "as") }]))
-        dialog.cancelled.connect(() => reply.send([1, {}]))
+```qml
+import QtQuick
+import DBus 1.0
+
+Item {
+    id: root
+    property var pending: []
+    DBusAdaptor {
+        id: delayed
+        service: "com.example.Delayed"
+        path: "/com/example/Delayed"
+        iface: "com.example.Delayed"
+        _signatures: ({ ReadLater: "s" })
+        function readLater() {
+            root.pending.push(delayed.holdReply())
+            answerTimer.start()
+        }
+    }
+    Timer {
+        id: answerTimer
+        interval: 250
+        onTriggered: {
+            const batch = root.pending
+            root.pending = []
+            for (const reply of batch)
+                reply.send("Ready")
+        }
     }
 }
 ```
@@ -735,17 +803,26 @@ standard multi-interface D-Bus shape every real service has. Co-located
 adaptors share the path registration and the service name:
 
 ```qml
-DBusAdaptor {
-    service: "org.freedesktop.impl.portal.MyShell"
-    path: "/org/freedesktop/portal/desktop"
-    iface: "org.freedesktop.impl.portal.Settings"
-    function readOne(ns, key) { /* ... */ }
-}
-DBusAdaptor {
-    service: "org.freedesktop.impl.portal.MyShell"
-    path: "/org/freedesktop/portal/desktop"
-    iface: "org.freedesktop.impl.portal.FileChooser"
-    function openFile(handle, appId, parentWindow, title, options) { /* ... */ }
+import QtQuick
+import DBus 1.0
+
+Item {
+    DBusAdaptor {
+        service: "com.example.Shared"
+        path: "/com/example/Shared"
+        iface: "com.example.Greeter"
+        _signatures: ({ Greet: "s" })
+        function greet(name) { return "Hello, " + name }
+    }
+    DBusAdaptor {
+        id: counter
+        service: "com.example.Shared"
+        path: "/com/example/Shared"
+        iface: "com.example.Counter"
+        property int count: 0
+        _signatures: ({ ReadCount: "i" })
+        function readCount() { return counter.count }
+    }
 }
 ```
 
@@ -786,26 +863,43 @@ unique object path, the shape portal backends need (a Request object per
 portal call):
 
 ```qml
-// The Request pattern: the portal prefix captures its subtree so a
-// Close arriving before the child adaptor finishes attaching is
-// delivered in order (not UnknownObject from QtDBus). Set the flag on
-// EVERY co-located adaptor at this path — first-attached decides.
-DBusAdaptor {
-    service: "org.freedesktop.impl.portal.MyShell"
-    path: "/org/freedesktop/portal/desktop"
-    iface: "org.freedesktop.impl.portal.FileChooser"
-    captureSubtree: true
-    function openFile(handle, appId, parentWindow, title, options) {
-        return requestComp.createObject(null, {
-            path: handle,
-            iface: "org.freedesktop.impl.portal.Request"
-        })
-    }
-}
+import QtQuick
+import DBus 1.0
+import DBus 1.0 as DBusQML
 
-property Component requestComp: Component {
+Item {
+    id: root
+    property var activeRequest: null
+    property int requestId: 0
     DBusAdaptor {
-        function close() { destroy(); /* caller cancelled */ }
+        service: "com.example.Requests"
+        path: "/com/example/Requests"
+        iface: "com.example.RequestFactory"
+        captureSubtree: true // on every co-located prefix adaptor
+        _signatures: ({ CreateRequest: "o" })
+        function createRequest() {
+            if (root.activeRequest)
+                throw DBusUtils.error("com.example.Requests.Busy", "Close the current request first")
+            const handle = "/com/example/Requests/r" + (++root.requestId)
+            root.activeRequest = requestComp.createObject(root, {
+                path: handle,
+                _onRetire: function() { root.activeRequest = null }
+            })
+            return new DBusQML.objectPath(handle)
+        }
+    }
+    Component {
+        id: requestComp
+        DBusAdaptor {
+            id: request
+            iface: "org.freedesktop.impl.portal.Request"
+            property var _onRetire
+            function close() {
+                request.unregister()
+                request._onRetire()
+                request.destroy()
+            }
+        }
     }
 }
 ```
@@ -869,14 +963,24 @@ The `_signatures` property is a JS object mapping D-Bus member names to a
 concatenated signature string, split per-argument by the parser:
 
 ```qml
+import DBus 1.0
+
 // Proxy — declare the in-arg signature for a call:
 DBus {
+    service: "com.example.Service"
+    path: "/com/example/Service"
     iface: "com.example.Service"
     _signatures: ({ AddThing: "a{sa{sv}}oo" })   // a{sa{sv}}, o, o
 }
+```
+
+```qml
+import DBus 1.0
 
 // Adaptor — declare the out-arg signature for a reply:
 DBusAdaptor {
+    service: "com.example.Service"
+    path: "/com/example/Service"
     iface: "com.example.Service"
     _signatures: ({ ReadAll: "a{sa{sv}}" })
 }
@@ -1070,19 +1174,23 @@ Represents a D-Bus error.
 These types are used for explicit typing of D-Bus data when Qt's auto-conversion doesn't produce the correct D-Bus type signature. Access them through a module alias — the `DBus` element shadows the module namespace, so value types use a separate import:
 
 ```qml
+import QtQuick
 import DBus 1.0
 import DBus 1.0 as DBusQML    // alias for value types
 
-// Without alias: element is DBus {}, singletons are SessionBus, etc.
-// With alias: construct value types with new DBusQML.<type>(...).
-new DBusQML.uint32(42)
-new DBusQML.int64(21474836470)
-new DBusQML.string("hello")
-new DBusQML.boolean(true)
-new DBusQML.objectPath("/org/freedesktop/UPower")
-new DBusQML.variant("any value")
-new DBusQML.variant(["file:///home/user/example.txt"], "as") // variant holding as
-new DBusQML.dict({ key: "value" })
+Item {
+    property var bus: SessionBus
+    property var examples: [
+        new DBusQML.uint32(42),
+        new DBusQML.int64(21474836470),
+        new DBusQML.string("hello"),
+        new DBusQML.boolean(true),
+        new DBusQML.objectPath("/org/freedesktop/UPower"),
+        new DBusQML.variant("any value"),
+        new DBusQML.variant(["file:///home/user/example.txt"], "as"),
+        new DBusQML.dict({ key: "value" })
+    ]
+}
 ```
 
 Ordinary data usually needs no wrapper: plain JS strings, numbers and
@@ -1127,9 +1235,10 @@ Value types remain as explicit overrides for signature-less calls.
 Byte array properties arrive as JS `ArrayBuffer`. Use `DBusUtils` for
 text conversion:
 
-```qml
-import DBus 1.0
+JavaScript excerpt with `accessPoint` and `proxy` provided by the application
+and both DBus imports above:
 
+```js
 // SSID arrives as ArrayBuffer
 var ssidText = DBusUtils.textFromBytes(accessPoint.ssid)
 
@@ -1179,10 +1288,9 @@ directions, over session, system and custom buses (the ScreenCast/Camera
   declared `h` in `_options` takes only a received fd; a number there is an
   `InvalidArgs` type mismatch.
 
-```qml
-import DBus 1.0
-import DBus 1.0 as DBusQML
+JavaScript excerpt for a proxy declaring `Consume(h)` and `OpenThing() → h`:
 
+```js
 // Send: wrap the fd you want to pass (the wrapper dups it; you keep yours).
 var f = DBusUtils.openFd("/run/user/1000/doc.txt", "r")
 proxy.call("Consume", [f])          // declared h: the fd travels
@@ -1222,9 +1330,10 @@ collector, which warns `dbusqml: fd closed by garbage collector — call
 close()`. Engine destruction closes every fd its JS still holds. A **pressure
 valve** watches the wrapper-owned fds of the whole process. When their
 number crosses `clamp(RLIMIT_NOFILE soft / 4, 64, 1024)`, it queues a garbage
-collection on every engine that received a `unixFd`, and warns once per
-process. It is a fallback for forgotten `close()` calls, not a substitute for
-them.
+collection on registered engines that received a library-delivered `unixFd`,
+and warns once per process. Constructor-only engines are outside that
+registration scope (details below). It is a fallback for forgotten
+`close()` calls, not a substitute for them.
 
 **A reply owns its fds.** The fds in a `DBusPendingReply`'s values belong
 to the reply. `reply.value` hands out copies of the same `unixFd`, and the
@@ -1232,6 +1341,25 @@ fds close when the reply and every copy are gone. Fds nobody reads therefore
 close with the reply. Examples: the values after the first in a
 promise-style `asyncCall`, a promise without callbacks, a rejected
 `Properties.Set`, an option the whitelist drops.
+
+### Qt construction and pressure-valve scope
+
+`unixFd` is a `QML_CONSTRUCTIBLE_VALUE`. If **the application** declares a
+`DBusQML.unixFd`-typed property or function parameter, Qt can construct a
+wrapper from an assigned/passed number before the library sees it. That
+local type declaration is an explicit application choice, distinct from a
+peer declaring an `h` argument. Library helpers and call arguments accept
+untyped values and refuse a bare number at an `h` boundary; they do not
+perform that implicit numeric construction.
+
+The pressure valve queues collection only for engines registered when the
+library delivered a valid `unixFd` (for example, through `openFd`, a reply
+or a signal). An engine whose fds come **solely** from
+`new DBusQML.unixFd(n)` is not registered by that constructor, so it is not
+a pressure-triggered collection target unless it also receives a
+library-delivered fd. Constructor-created values still close with their
+last copy on garbage collection and warn when collected open. In every
+case, explicit `close()` remains the timely cleanup contract.
 
 C++ consumers receive the same `DBus::UnixFd` in `QVariant`s. It converts to
 a `QDBusUnixFileDescriptor` that shares its descriptor
@@ -1349,17 +1477,17 @@ Inline signal handlers declared on a `DBus` element (`onIntrospectionCompleted: 
 Workarounds:
 
 ```qml
-// Won't work — refreshPlayers() is not visible in the C++ context
-DBus {
-    id: proxy
-    onIntrospectionCompleted: refreshPlayers()
-}
+import QtQuick
+import DBus 1.0
 
-// Works — Connections re-binds the target in the QML scope
-DBus { id: proxy }
-Connections {
-    target: proxy
-    function onIntrospectionCompleted() { refreshPlayers() }
+Item {
+    id: root
+    function refreshPlayers() { console.log("Refresh requested") }
+    DBus { id: proxy }
+    Connections {
+        target: proxy
+        function onIntrospectionCompleted() { root.refreshPlayers() }
+    }
 }
 ```
 
@@ -1376,11 +1504,6 @@ For a proxy whose properties are assigned at runtime (typically via `onActivePla
 Wait for `introspectionCompleted` (or check `status === DBus.Ready`) before
 calling dynamic methods on either an inline or runtime-configured proxy:
 
-```qml
-Connections {
-    target: playerProxy
-    function onIntrospectionCompleted() {
-        playerProxy.playPause()   // safe here
-    }
-}
-```
+The complete notification example in the proxy section uses this pattern;
+the [calling-methods guide](docs/guides/calling-methods.md) also shows a
+complete call to the bus daemon.

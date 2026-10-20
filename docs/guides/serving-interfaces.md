@@ -106,9 +106,11 @@ using another accepted spelling cannot bypass it.
 Property changes send standard `PropertiesChanged` notifications under the
 advertised wire name. Property notify signals do not also become custom
 bus signals. You can instead declare ordinary QML signals (for example,
-`signal greeted(person: string)`) and emit them normally; they are relayed
-automatically, with a maximum of five parameters. Do not send the same
-event both ways.
+`signal greeted(person: var)`) and emit them normally; they are relayed
+automatically, with a maximum of five parameters. Use `var` parameters for
+the current QVariant-based relay, and let the catalog or `_signals` declare
+the wire types. Native typed parameters such as `string` do not connect to
+that relay. Do not send the same event both ways.
 
 ## Answer later with holdReply
 

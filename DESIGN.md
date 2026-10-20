@@ -2,7 +2,8 @@
 
 ## What
 
-A standalone QML module that exposes D-Bus (session and system bus) to QML applications. Zero KDE dependencies — just `Qt6::DBus`.
+A standalone QML module that exposes D-Bus (session and system bus) to QML
+applications. Zero KDE dependencies; uses Qt Core, Qml and DBus.
 
 Pattern follows `mpvqml`: a thin C++ Qt6 QML plugin that wraps existing Qt APIs into QML-friendly types.
 
@@ -11,6 +12,9 @@ Pattern follows `mpvqml`: a thin C++ Qt6 QML plugin that wraps existing Qt APIs 
 The only existing D-Bus QML module is KDE's `org.kde.plasma.workspace.dbus`, which depends on `plasma-workspace` (55 MiB, half of KDE). Not suitable for standalone QML apps on Niri/Hyprland/etc.
 
 ## Module: `import DBus 1.0`
+
+QML blocks below are complete files. JavaScript excerpts run inside a QML
+handler with the named proxy/imports supplied by the surrounding component.
 
 ## Types
 
@@ -25,75 +29,133 @@ The only existing D-Bus QML module is KDE's `org.kde.plasma.workspace.dbus`, whi
 
 A connection object. Used for raw `asyncCall()` when you don't need the rich object wrapper.
 
-```qml
-var conn = DBus.connectToBus("unix:path=/tmp/kvm-bus")
-conn.asyncCall({...})
+```js
+const conn = SessionBus.connectToBus("unix:path=/run/user/1000/example-bus")
+if (conn) {
+    const reply = conn.asyncCall({
+        service: "org.freedesktop.DBus",
+        path: "/org/freedesktop/DBus",
+        iface: "org.freedesktop.DBus",
+        member: "ListNames",
+        arguments: []
+    })
+    reply.finished.connect(function() {
+        if (reply.isError)
+            console.error(reply.error.name, reply.error.message)
+        else
+            console.log(reply.value)
+    })
+}
 ```
 
 ### `DBusMessage` (value type)
 
-```qml
-{ service, path, iface, member, signature, arguments }
+```json
+{
+    "service": "org.freedesktop.DBus",
+    "path": "/org/freedesktop/DBus",
+    "iface": "org.freedesktop.DBus",
+    "member": "NameHasOwner",
+    "signature": "s",
+    "arguments": ["org.freedesktop.DBus"]
+}
 ```
 
 Construct from a map or set properties individually.
 
 ### `DBusPendingReply`
 
-```qml
-var reply = SessionBus.asyncCall({...})
+```js
+const reply = SessionBus.asyncCall({
+    service: "org.freedesktop.DBus",
+    path: "/org/freedesktop/DBus",
+    iface: "org.freedesktop.DBus",
+    member: "ListNames",
+    arguments: []
+})
 reply.finished.connect(() => {
-    if (reply.isError) { /* reply.error.message */ }
-    else { /* reply.value */ }
+    if (reply.isError) console.error(reply.error.name, reply.error.message)
+    else console.log(reply.value)
 })
 ```
 
-Also supports Promise-style: `asyncCall({...}, (result) => {}, (error) => {})`
+Also supports a promise-style callback overload, not a JavaScript Promise:
+`asyncCall(message, resolve, reject)`. Resolve receives the first output
+argument; a pending reply's `values` exposes every output argument.
 
 ### `DBus` — the rich proxy element
 
 Set `service`, `path`, `iface` and optionally `connection` (defaults to session bus). When `iface` is set, introspection is called to discover:
 
-**Properties** — become QML properties with the same name:
+**Properties** — become cached QML properties under camelCase names:
 ```qml
-DBus {
-    id: bat
-    service: "org.freedesktop.UPower"
-    path: "/org/freedesktop/UPower/devices/..."
-    iface: "org.freedesktop.UPower.Device"
+import QtQuick
+import DBus 1.0
+
+Item {
+    readonly property var percentage: battery["percentage"]
+    DBus {
+        id: battery
+        connection: SystemBus
+        service: "org.freedesktop.UPower"
+        path: "/org/freedesktop/UPower/devices/DisplayDevice"
+        iface: "org.freedesktop.UPower.Device"
+    }
 }
-bat.percentage  // → Properties.Get(...)
 ```
 
-Properties auto-update via `PropertiesChanged` signal subscription.
+The initial `Properties.GetAll` populates the cache; known properties start
+as `null`. Properties auto-update via `PropertiesChanged`; reading a
+binding does not issue a new Get each time.
 
-**Methods** — dynamically exposed as callable properties after introspection:
-```qml
-proxy.play()                     // → asyncCall(member: "Play")
-proxy.setProfile("balanced")     // → asyncCall(member: "SetProfile", args: ["balanced"])
-proxy.echoString("hello")        // → asyncCall(member: "EchoString", args: ["hello"])
+**Methods** — dynamically exposed as callable properties after introspection.
+For a proxy configured for the session-bus daemon:
+```js
+proxy.listNames()                           // wire method ListNames
+proxy.nameHasOwner("org.freedesktop.DBus")   // wire method NameHasOwner
+proxy.getNameOwner("org.freedesktop.DBus")   // wire method GetNameOwner
 ```
 
 D-Bus method names are PascalCase; QML exposes them in camelCase. The
 original PascalCase name is what gets sent on the wire.
 
 Also available via generic `call(method, args)`:
-```qml
-proxy.call("Play")
-proxy.call("SetProfile", ["balanced"])
+```js
+proxy.call("ListNames")
+proxy.call("NameHasOwner", ["org.freedesktop.DBus"])
 ```
 
-**Signals** — received via `onSignalReceived`:
+**Signals** — received from the configured service's current owner via
+`signalReceived`; use `Connections` for surrounding QML-scope helpers:
 ```qml
-onSignalReceived: function(name, args) {
-    if (name === "Seeked") { ... }
+import QtQuick
+import DBus 1.0
+
+Item {
+    DBus {
+        id: player
+        service: "org.mpris.MediaPlayer2.myplayer"
+        path: "/org/mpris/MediaPlayer2"
+        iface: "org.mpris.MediaPlayer2.Player"
+    }
+    Connections {
+        target: player
+        function onSignalReceived(name, args) {
+            if (name === "Seeked")
+                console.log("New position:", args[0])
+        }
+    }
 }
 ```
 
 ### `DBusError` (value type)
 
-```qml
-{ isValid: bool, name: string, message: string }
+```json
+{
+    "isValid": true,
+    "name": "org.freedesktop.DBus.Error.Failed",
+    "message": "The operation failed"
+}
 ```
 
 ### D-Bus Type Wrappers
@@ -103,19 +165,33 @@ for the value-type constructors, because the plain module name is shadowed
 by the element:
 
 ```qml
+import QtQuick
 import DBus 1.0
 import DBus 1.0 as DBusQML
 
-// ...
-DBusQML.uint32(42)
-DBusQML.uint64(18446744073)
-DBusQML.string("hello")
-DBusQML.boolean(true)
-DBusQML.double(3.14)
-DBusQML.objectPath("/org/freedesktop/UPower")
-DBusQML.variant("any value")
-DBusQML.dict({ key: "value" })
-new DBusQML.unixFd(fdNumber)   // owns a dup of fdNumber
+Item {
+    property var examples: [
+        new DBusQML.uint32(42),
+        new DBusQML.uint64(18446744073),
+        new DBusQML.string("hello"),
+        new DBusQML.boolean(true),
+        new DBusQML.double(3.14),
+        new DBusQML.objectPath("/org/freedesktop/UPower"),
+        new DBusQML.variant("any value"),
+        new DBusQML.dict({ key: "value" })
+    ]
+    Component.onCompleted: {
+        const fd = DBusUtils.openFd("/etc/hostname", "r")
+        if (!fd.valid) return
+        const number = fd.take()
+        if (number >= 3) {
+            const copy = new DBusQML.unixFd(number) // owns another duplicate
+            DBusUtils.closeFd(number)
+            copy.close()
+        }
+        fd.close()
+    }
+}
 ```
 
 Used when Qt's auto-conversion doesn't produce the correct D-Bus type signature.
@@ -128,10 +204,14 @@ wrapper-owned fds pile up. A number is never inferred as an fd from a
 declared `h`: every send site goes through one fd rule (`wireFd`, the send
 boundary reports `DBusFdFailure`), and every decoded `h` becomes a fresh
 `unixFd` holding its own `dup()`.
+Qt can construct a wrapper at an application-declared `unixFd`-typed
+property/parameter, and constructor-only engines are not registered for
+the pressure valve. These accepted limits are detailed in
+[the fd reference](API.md#qt-construction-and-pressure-valve-scope).
 
-Qt's `ListModel` copies every non-QObject object property by property, so
-none of these wrappers keeps its type (or, for `unixFd`, its descriptor) in a
-`ListModel` row — see API.md "ListModel and dbusqml values".
+Qt's `ListModel` copies these wrappers' exposed properties into model data;
+it does not preserve their type, methods or, for `unixFd`, descriptor. See
+API.md "ListModel and dbusqml values" for the storage alternatives.
 
 ## Architecture
 
@@ -164,7 +244,9 @@ Registering means:
 2. **Path** — Register an object handler for a specific path. This is required to receive method calls.
 3. **Interface** — Part of the registered object's introspection XML. Defines which methods, signals, and properties the object exposes.
 
-The sender's unique name is included in every D-Bus message. A receiver can identify the caller via `QDBusMessage::sender()`, regardless of whether the sender owns a well-known name.
+The sender's unique name is included in every D-Bus message. On an incoming
+message, Qt exposes it through `QDBusMessage::service()`; the adaptor's QML
+dispatch API exposes `callerService()`.
 
 ## Registration (server-side)
 
@@ -173,23 +255,28 @@ The sender's unique name is included in every D-Bus message. A receiver can iden
 Inverse of the `DBus` proxy element. Registers a D-Bus object on the bus and maps QML properties/functions/signals to D-Bus properties/methods/signals. Shipped and covered by tests.
 
 ```qml
+import DBus 1.0
+import DBus 1.0 as DBusQML
+
 DBusAdaptor {
     id: portal
     service: "org.freedesktop.impl.portal.atmosphera"  // optional — omit for unique-name-only
     path: "/org/freedesktop/portal/desktop"
     iface: "org.freedesktop.impl.portal.Settings"
 
-    // QML properties → D-Bus properties (read/write)
+    // Property access comes from the catalog, then QML writability.
     property int preferredDarkMode: 0
+    property var _settings: ({ "color-scheme": 1 })
 
     // QML functions → D-Bus methods (lowercase-initial: QML forbids
     // uppercase-initial function names)
-    function read(namespace, key) {
-        return settings[key] ?? ""
+    function readOne(ns, key) {
+        return new DBusQML.variant(portal._settings[key] ?? "")
     }
 
     // QML signals → D-Bus signals
-    signal settingChanged(string ns, string key, variant value)
+    // The relay takes QVariant parameters; the catalog supplies wire ssv.
+    signal settingChanged(ns: var, key: var, value: var)
 }
 ```
 
@@ -305,10 +392,13 @@ themselves (introspected in-args, `_signatures` overrides, `variant(x,
 sig)`, slot-pool registrations) are validated against the full "Valid
 Signatures" rules — type codes, balanced non-empty structs, dict entries
 only as array elements with basic-type keys, per-kind nesting ≤ 32,
-encoded length ≤ 255 — by one `validateSignature`, so an invalid
-signature fails the value and the boundary fails the send locally; each
-path keeps its own failure style (local error reply, warn+skip, error
-reply).
+encoded length ≤ 255 — by `validateSignature` at proxy type validation
+and generic-writer/registration boundaries. Override splitting happens
+before validation: an unsplittable proxy override warns and infers;
+an invalid parsed proxy input type fails locally. Raw/adaptor marshalling
+can warn and infer after a container writer refuses a type. The send
+boundary checks the resulting values. See
+[Shape Selection](API.md#shape-selection) for the exact path-specific rules.
 
 ### XML boundary
 

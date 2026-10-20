@@ -6,10 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Sections per release, in canonical order: Added, Changed, Deprecated,
-Removed, Fixed, Security, Quality (project extension for test and CI
-infrastructure that materially affects consumer trust).
+Removed, Fixed, Security, Quality (test and CI infrastructure that affects
+consumer trust), then Docs (documentation); the last two are project extensions.
 
 ## [Unreleased]
+
+### Added
+
+- Bundled `org.freedesktop.impl.portal.Session` descriptor: `Close`,
+  `Closed` and its read-only version property are available to the type catalog.
+- Runnable sleep-inhibitor and portal OpenFile examples demonstrate retaining
+  and passing owning `unixFd` values with visible status and error handling.
 
 ### Changed
 
@@ -18,7 +25,8 @@ infrastructure that materially affects consumer trust).
   struct member, dict value, variant payload) requires a `unixFd` (C++:
   also a `QDBusUnixFileDescriptor`); every received `h` arrives as a
   `unixFd` holding its own duplicate, with `valid === false` for an
-  invalid fd (was: the `-1` sentinel). `close()` closes it for every copy;
+  invalid fd (was: the 1.0 plain-int `-1` sentinel). `close()` closes it for
+  every copy;
   `take()` hands out a caller-owned duplicate number; a `unixFd` that
   reached JS and is collected unclosed is closed by the garbage collector
   with a warning, and a process-wide pressure valve queues a collection
@@ -52,7 +60,7 @@ infrastructure that materially affects consumer trust).
 
 ### Removed
 
-- **Plain-int fd send.** A number at a declared `h` was `dup()`ed and sent
+- **Remove 1.0 plain-int fd send.** A number at a declared `h` was `dup()`ed and sent
   as a descriptor; it is now a local error naming `DBusQML.unixFd`, on every
   path, whatever declared the `h`.
 
@@ -70,13 +78,13 @@ infrastructure that materially affects consumer trust).
   warning text changed for printable input.
 
 - **Received fds leaked, and only the first listener got one** (finding
-  #9). A decoded fd was detached from its message into a plain int that
+  #9). In 1.0, a decoded fd was detached from its message into a plain int that
   nothing closed when it went unread — the values after the first in a
   promise-style `asyncCall`, a promise without callbacks, a rejected
   `Properties.Set`, an option the whitelist dropped. Because detaching did
   not copy the shared descriptor, a second listener on the same signal
-  received `-1`. Every decode now owns its own duplicate inside a `unixFd`,
-  which closes with its last copy.
+  received the 1.0 invalid-fd sentinel `-1`. Every decode now owns its own
+  duplicate inside a `unixFd`, which closes with its last copy.
 
 - **Subscriptions and adaptor sends could act on the wrong connection** —
   every component now uses exactly the connection and filter identity it
@@ -203,6 +211,10 @@ infrastructure that materially affects consumer trust).
 - Correct the API reference's notification call, served signal declarations,
   signature parsing/validation behavior and message destination; align related
   property, readiness, reply and fd notes with the task guides.
+- Release audit: refresh README features, validate the reference/design QML
+  files, correct helper-script defaults and document Qt's application-typed
+  `unixFd` construction, constructor-only engine pressure-valve limits and
+  the current auto-forwarded QML signal parameter restriction.
 
 ## [1.0.0] - 2026-09-27
 

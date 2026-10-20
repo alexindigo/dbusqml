@@ -5,7 +5,7 @@ Use [calling methods](../docs/guides/calling-methods.md) for argument types,
 [properties and signals](../docs/guides/properties-and-signals.md) for live state,
 and [serving interfaces](../docs/guides/serving-interfaces.md) for `DBusAdaptor`.
 The [file-descriptor guide](../docs/guides/file-descriptors.md) explains the
-1.1.0 owning `unixFd` model and migration from plain integer descriptors.
+1.1.0 owning `unixFd` model and migration from 1.0 plain integer descriptors.
 
 To run an example, use `qml6` with the `DBus` module's build directory in the import path:
 

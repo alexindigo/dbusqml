@@ -10,8 +10,8 @@ covers all needed components (`Core`, `Qml`, `DBus`, `Test`).
 
 ```sh
 scripts/build            # release build to build-release/
-scripts/build-dev        # debug build to build-debug/
-scripts/install          # install into Qt's QML import path
+scripts/build-dev        # debug build to build-dev/
+BUILD_DIR=build-release scripts/install # install the release build
 ```
 
 Or by hand:
@@ -24,12 +24,14 @@ cmake --build build-debug
 ## Test
 
 C++ tests use `QTest`; QML tests use `qmltestrunner`. Both need a
-running D-Bus session — the scripts wrap themselves with
-`dbus-run-session` when none exists.
+running D-Bus session. CTest wraps the D-Bus test targets in private
+sessions; `run-qml-tests` creates a session when none exists. Pass the build
+directory explicitly: `run-tests` defaults to `build-debug`, while
+`run-qml-tests` defaults to `build-release`.
 
 ```sh
-scripts/run-tests        # all four ctest targets + QML suite
-scripts/run-qml-tests    # QML only (takes the build dir)
+scripts/run-tests build-dev     # all four ctest targets + QML suite
+scripts/run-qml-tests build-dev # QML only
 ```
 
 Coverage (lcov/genhtml, best-effort — Debug builds carry no `.gcda` data):
@@ -59,7 +61,7 @@ copy-paste from the freedesktop spec.
 
 ## Signing
 
-Commits and tags in this repo are SSH-signed (see `.gitconfig`). Not
+Maintainer commits and tags are SSH-signed using repo-local Git configuration. Not
 required for external PRs — the maintainer will sign the merge.
 
 ## Filing issues

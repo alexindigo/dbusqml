@@ -2,36 +2,51 @@
 
 [![CI](https://github.com/alexindigo/dbusqml/actions/workflows/ci.yml/badge.svg)](https://github.com/alexindigo/dbusqml/actions/workflows/ci.yml)
 
-**D-Bus in QML. No KDE.** Standalone Qt 6 QML plugin — `Qt6::DBus` is the only dependency. Requires **Qt 6.8** or newer.
+**D-Bus in QML. No KDE.** Standalone Qt 6 QML plugin using Qt Core, Qml
+and DBus. Requires **Qt 6.8** or newer.
 
 The `DBus {}` element introspects a remote object and exposes its methods and
 properties as native QML — call methods directly, bind to properties, get
 `PropertiesChanged` updates for free.
 
 ```qml
+import QtQuick
+import QtQuick.Controls
 import DBus 1.0
 
-DBus {
-    id: notifications
-    service: "org.freedesktop.Notifications"
-    path:    "/org/freedesktop/Notifications"
-    iface:   "org.freedesktop.Notifications"
-    connection: SessionBus
-}
+ApplicationWindow {
+    id: root
+    visible: true
+    width: 360
+    height: 180
+    property var endpoint: notifications
 
-Button {
-    text: "Notify"
-    onClicked: {
-        // D-Bus `Notify(...)` → QML `notify(...)`, camelCased automatically.
-        var reply = notifications.notify(
-            "dbusqml", 0, "",
-            "Hello from QML", "Sent over the session bus.",
-            [], ({}), 5000
-        )
-        reply.finished.connect(() => {
-            if (reply.isError) console.log(reply.error.message)
-            else               console.log("id: " + reply.value)
-        })
+    DBus {
+        id: notifications
+        service: "org.freedesktop.Notifications"
+        path: "/org/freedesktop/Notifications"
+        iface: "org.freedesktop.Notifications"
+        connection: SessionBus
+        callTimeout: 5000
+    }
+
+    Button {
+        anchors.centerIn: parent
+        text: "Notify"
+        enabled: notifications.status === DBus.Ready
+        onClicked: {
+            // D-Bus Notify(...) becomes the dynamic QML method notify(...).
+            const reply = root.endpoint.notify(
+                "dbusqml", 0, "", "Hello from QML",
+                "Sent over the session bus.", [], {}, 5000
+            )
+            reply.finished.connect(function() {
+                if (reply.isError)
+                    console.error(reply.error.name, reply.error.message)
+                else
+                    console.log("Notification ID:", reply.value)
+            })
+        }
     }
 }
 ```
@@ -40,6 +55,8 @@ Portal backends whose handlers spawn per-call `Request` adaptors capture
 the subtree so a Close racing attach is delivered in order:
 
 ```qml
+import DBus 1.0
+
 DBusAdaptor {
     service: "org.freedesktop.impl.portal.MyShell"
     path: "/org/freedesktop/portal/desktop"
@@ -53,9 +70,16 @@ DBusAdaptor {
 - **`DBus {}` proxy element** — methods and properties appear on the object as
   soon as introspection completes; PascalCase D-Bus names become camelCase QML.
 - **Auto-updating properties** — bound to `PropertiesChanged` (interface-arg
-  filtered; `invalidated_properties` re-fetched), no wiring needed.
+   filtered; `invalidated_properties` re-fetched), no wiring needed.
+  Rejected optimistic writes emit `propertyWriteFailed` and re-fetch the
+  server's value instead of inventing a rollback.
+- **Owner-bound proxy signals** — interface signals and `PropertiesChanged`
+  are accepted only from the configured service's current owner.
+  `DBusSignalWatcher` provides explicit any-sender monitoring instead.
 - **Async replies** — every call returns a `DBusPendingReply` with `finished`,
-  `isError`, `error`, `value`. Fire-and-forget `send(method, args)` plus
+   `isError`, `error`, `value`. Completion is one-shot; its handlers are
+  disconnected after delivery and completed QML replies become collectable.
+  Fire-and-forget `send(method, args)` plus
   `callTimeout`; `DBusConnection.send(message)` for message objects.
 - **`DBusAdaptor`** — export QML objects onto the bus with methods, properties,
   and signals declared inline. PascalCase D-Bus members dispatch to camelCase
@@ -71,15 +95,25 @@ DBusAdaptor {
   portal cancel lifecycle. Portal backends: `captureSubtree: true` on every
   co-located adaptor at `/org/freedesktop/portal/desktop`.
 - **Co-location** — multiple adaptors share one path/service; `_signals`
-  declares signal arg types, `_members` aliases wire↔QML names, catalog XML
-  fills in services with poor introspection (both scan paths: bundled +
-  user drop-ins).
+   declares signal arg types, `_members` aliases wire↔QML names, catalog XML
+   fills in services with poor introspection (bundled descriptors,
+   user/system drop-ins and the freedesktop interface registry).
+- **Served property access** — catalog access and QML/C++ writability drive
+  both introspection and enforcement. Writes to an effectively read-only
+   property return `PropertyReadOnly` without changing its value.
+- **Adaptor policies** — `_options` filters and validates a method's final
+  options map; `allowedSender` can restrict calls to one unique sender.
+  `heldReplyTimeout` optionally bounds deferred replies.
 - **Service identity** — `DBusConnection` naming, well-known-name acquisition
   (`allowReplacement` / `replaceExisting` / `queueOnBusy`), `nameAcquired` /
-  `nameLost`, `DBusServiceWatcher`, `DBusObjectManager`.
+   `nameLost`, `DBusServiceWatcher`, `DBusObjectManager`.
+- **Connection-loss reporting** — connections expose `connected` and
+  `disconnected()`; proxies and claims report loss. There is no automatic
+  reconnection.
 - **Call options** — `DBusConnection.asyncCall(message)` (+ promise-style
-  resolve/reject), `DBusMessage` structured values, per-call `_signatures`
-  overrides, `reloadTypes()` for the catalog.
+   resolve/reject callbacks), `DBusMessage` structured values and per-message
+   input signatures; proxy input/adaptor reply `_signatures` overrides;
+   `reloadTypes()` for the catalog.
 - **Reactive property bindings** — catalog/introspection pre-population makes
   intermediate `readonly property` layers reactive out of the box (0.3.0+).
 - **Signature-driven marshaling** — method args marshal against the
@@ -93,16 +127,22 @@ DBusAdaptor {
   struct arrays arrive as real JS `Array` / `Object` instances you can
   traverse directly.
 - **`DBusUtils`** — `textFromBytes()` / `bytesFromText()` for `ay` payloads
-  (0.3.0+); fd helpers over `DBusQML.unixFd`, the owning fd value
-  (`openFd`/`readFd`/`writeFd`/`fdUrl`; see API.md).
+   (0.3.0+), `error(name, message)` for named error throws, and fd helpers
+   (`openFd`/`readFd`/`writeFd`/`fdUrl`; see API.md).
+- **Owning file descriptors** — sending an `h` requires `DBusQML.unixFd`,
+  and received fds arrive as owning values. Call `close()` when done;
+  `take()` supplies a caller-owned duplicate number, cleaned up with
+  `DBusUtils.closeFd`. The 1.1.0 migration
+  and Qt construction/pressure-valve limits are documented in
+  [the fd reference](API.md#unix-file-descriptors-h).
 - **`SessionBus` and `SystemBus`** singletons; `connectToBus(address)` for
   peer/custom connections.
-- **Value types** — `dbusVariant`, `dbusMessage`, `dbusError`, `bytes`,
+- **Value types** — `dbusMessage`, `dbusError`, `bytes`, `unixFd`,
   `struct_`, `objectPath`, `signature`, `int16`…`uint64`, `boolean`, `dict`,
   `variant`, etc., via `import DBus 1.0 as DBusQML`. 64-bit integers keep
   full precision on the JS path.
-- **`DBusUtils`** — `textFromBytes()` / `bytesFromText()` for `ay` payloads
-  (0.3.0+); `DBusUtils.error(name, message)` for named error throws.
+- **Task guides and runnable examples** — [complete QML recipes](docs/guides/README.md)
+  cover calls, properties/signals, adaptors, fds, reply lifetime and errors.
 
 ## Install
 
@@ -136,8 +176,8 @@ Or use the helper scripts:
 
 ```sh
 scripts/build            # release build
-scripts/install          # install into Qt's QML path
-scripts/run-examples     # pick and run any bundled example
+BUILD_DIR=build-release scripts/install # install the release build
+BUILD_DIR=build-release scripts/run-examples # run every example sequentially
 scripts/run-tests        # C++ and QML tests
 ```
 
@@ -148,11 +188,11 @@ Runnable examples cover the common patterns:
 | Tier          | Examples                                                         |
 |---------------|------------------------------------------------------------------|
 | simple        | ListNames · KeyboardLayout · NetworkMonitor · PortalSettings     |
-| intermediate  | BatteryMonitor · Notify · ServiceMonitor · Caffeine (inhibit) · PortalDemo |
+| intermediate  | BatteryMonitor · Notify · ServiceMonitor · Caffeine · PortalDemo · SleepInhibitor · OpenFileWithPortal |
 | advanced      | MprisPlayer · KDEConnect · PowerControl · SystemdManager         |
 
 ```sh
-scripts/run-examples MprisPlayer   # or a category: `advanced`
+BUILD_DIR=build-release scripts/run-examples MprisPlayer # or a category: advanced
 ```
 
 ## Documentation

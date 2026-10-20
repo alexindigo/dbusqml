@@ -152,8 +152,9 @@ loop can reorder its successors — unsupported, same as today's contract
 
 Roadmaps live in plans-land. No surveyed prior-art repo keeps a
 future-work file in-repo (quickshell: `changelog/next.md` accumulator
-only). `FutureDevelopment.md` was removed; its one live item (caller
-identification via `QDBusContext`) is scheduled in the 0.10 train.
+only). `FutureDevelopment.md` was removed. Caller identification is now
+shipped as `DBusAdaptor::callerService()` and the held reply's captured
+`callerService()`; there is no in-repo roadmap for it.
 
 ## 8. KNOWN_ISSUES floor-pruning
 

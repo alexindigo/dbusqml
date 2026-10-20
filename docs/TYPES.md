@@ -16,8 +16,12 @@ In priority order (highest first):
    tests / containers). Optional.
 2. `$XDG_CONFIG_HOME/dbusqml/types/*.xml` — user's own definitions
    (usually `~/.config/dbusqml/types/`).
-3. `$XDG_DATA_DIRS/*/dbusqml/types/*.xml` — system-wide extensions.
-4. `qrc:/dbusqml/types/*.xml` — descriptors bundled with the library.
+3. `$XDG_DATA_HOME/dbusqml/types/*.xml` — user data extensions
+   (usually `~/.local/share/dbusqml/types/`).
+4. `$XDG_DATA_DIRS/*/dbusqml/types/*.xml` — system-wide extensions.
+5. `qrc:/dbusqml/types/*.xml` — descriptors bundled with the library.
+6. `<data>/dbus-1/interfaces/*.xml` — the freedesktop-standard registry
+   under Qt's generic data locations, at lowest precedence.
 
 A user file for an interface always overrides the bundled version. Bundled
 files are inside the library binary and are not overwritten by upgrades of
@@ -92,8 +96,18 @@ that interface. You are responsible for keeping it current.
 ## Reloading during development
 
 ```qml
-DBus.reloadTypes()
+import QtQuick
+import DBus 1.0
+
+Item {
+    property var endpoint: catalog
+    DBus { id: catalog }
+    Component.onCompleted: endpoint.reloadTypes()
+}
 ```
+
+Qt exposes this C++ static invokable through a QML object instance, not
+the `DBus` type name. It needs no configured service/path/interface.
 
 Rescans all search paths. Existing proxies are not re-introspected — you must
 recreate them (or change `iface`) to pick up new methods.
@@ -113,9 +127,11 @@ declared signatures drive the reply marshaling. This is what lets a
 `org.freedesktop.impl.portal.Settings` backend return `ReadAll` as
 `a{sa{sv}}` — the shape xdg-desktop-portal requires — from a plain QML object
 literal, with no per-app override. Explicit `_signatures` overrides beat the
-catalog; only malformed signatures, invalid values, or pool exhaustion warn
-and fall back to inference (every well-formed element signature is
-producible via the signature-slot pool).
+catalog. Override splitting, type validation and writer failure have
+different outcomes; see [Shape Selection](../API.md#shape-selection) for
+the proxy/adaptor cases and warning-and-inference fallbacks. Valid
+container types can use signature slots, subject to pool and walker-depth
+limits.
 
 ## `DBus::Struct` demarshal
 

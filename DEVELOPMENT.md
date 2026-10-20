@@ -36,8 +36,8 @@ builds, integration testing against user's real DBus environment.
 
 ```
 scripts/build           # release build (build-release/)
-scripts/build-dev       # dev build with warnings enabled
-scripts/build-test      # build with test targets
+scripts/build-dev       # Debug + tests in build-dev/
+scripts/build-test      # clean Debug + coverage in build-debug/, then run tests
 ```
 
 Builds happen on the host by default. To build inside the devcontainer:
@@ -50,17 +50,17 @@ docker run --rm -v "$(pwd):/workspaces/dbusqml" -w /workspaces/dbusqml \
 ## Testing
 
 ```
-scripts/run-tests                 # all four ctest targets + QML suite (wraps itself in dbus-run-session when needed)
-scripts/run-tests <build-dir>     # e.g. scripts/run-tests build-cov
-scripts/run-qml-tests <build-dir> # QML only (also self-wrapping)
+scripts/run-tests build-dev      # all four ctest targets + QML suite
+scripts/run-tests <build-dir>    # default build-debug; e.g. build-cov
+scripts/run-qml-tests build-dev  # QML only; default build-release
 ```
 
 `run-tests` runs `test_types`, `test_dbus`, `test_adaptor` (incl. the
 held-reply pins), `test_introspect`, then the `qmltestrunner` suite —
 coverage via lcov/genhtml is best-effort (Debug builds carry no `.gcda`
-data) and never fails the run. Both scripts wrap themselves in
-`dbus-run-session` when no session bus exists (QML tests abort with
-SIGABRT without one — fixed in E0).
+data) and never fails the run. CTest wraps its D-Bus targets in private
+sessions; `run-qml-tests` creates a session when no session bus exists.
+The session launchers and coverage tools honor disk-backed `TMPDIR`.
 
 ## QML Linting and Formatting
 

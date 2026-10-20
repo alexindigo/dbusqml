@@ -42,4 +42,4 @@ checklist the executor runs BEFORE handing a candidate to the ceremony.
   reference is repointed at the tag, a fresh empty `[Unreleased]`
   section (with compare link) opens above it, and a `[x.y.z]` link
   reference is added at the file bottom (canonical section order:
-  Added, Changed, Deprecated, Removed, Fixed, Security, Quality).
+   Added, Changed, Deprecated, Removed, Fixed, Security, Quality, Docs).

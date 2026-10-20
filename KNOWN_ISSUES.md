@@ -1,12 +1,32 @@
 # Known Issues
 
-Upstream Qt bugs that affect dbusqml usage patterns, discovered while
-building test coverage. The library floor is Qt 6.8: entries for older
-Qt are pruned (floor-pruning policy — history lives in git, not here).
-Most entries below are fixed in current Qt; the rest are permanent
-Qt-layer limitations (thrown-`undefined` undetectability; uncaptured
-child-path registration races; Peer on loopback) or ecosystem-normal
-behavior (Close after settle).
+Qt and library limitations affecting supported dbusqml usage patterns.
+The library floor is Qt 6.8; resolved issues below that floor live in git
+history. The create/destroy bug below affects supported Qt 6.8–6.10 and is
+fixed in 6.11. The other entries describe current constraints or normal
+ecosystem behavior.
+
+## unixFd construction and engine registration
+
+Qt can construct a `unixFd` from a number when the application declares a
+`DBusQML.unixFd`-typed property or parameter. Library helpers accept untyped
+values and refuse bare numbers; a peer declaring `h` does not trigger that
+Qt construction. The pressure valve registers engines only when the
+library delivers a valid fd, not when an engine solely constructs fds with
+`new DBusQML.unixFd(n)`. Those constructor-created values still close on
+garbage collection; explicit `close()` is the timely cleanup contract.
+
+See [Qt construction and pressure-valve scope](API.md#qt-construction-and-pressure-valve-scope)
+for the ownership and engine-registration details.
+
+## Auto-forwarded QML signals require var parameters
+
+The current signal relay connects to Qt slots taking `QVariant` arguments.
+QML signals with `var` parameters connect; native typed parameters such as
+`string` produce Qt's incompatible sender/receiver warning and are not
+auto-forwarded. Use `var` parameters with catalog or `_signals` wire-type
+declarations, or send explicitly with `emitSignal`. See
+[the adaptor reference](API.md#dbusadaptor-server-element).
 
 ---
 
@@ -96,7 +116,7 @@ exists). With `captureSubtree`, dbusqml answers that late Close as
 
 ## Qt bug: `Qt.createQmlObject(...).destroy()` crashes on `QQmlPropertyMap` subclasses
 
-**Affects:** Qt 6.5.x through 6.10.x
+**Affects:** supported Qt 6.8.x through 6.10.x
 **Fixed in:** Qt 6.11
 **Symptom:** SIGSEGV inside `QV4::QObjectWrapper::virtualResolveLookupGetter`, address `0x0`, immediately on `.destroy()`.
 
@@ -104,12 +124,13 @@ Minimum reproducer (any subclass of `QQmlPropertyMap` registered as a
 QML element will do; the `DBus` element from this module is one such):
 
 ```qml
-import DBus 1.0
+import QtQml
+import QtTest
 
 TestCase {
     function test_crash() {
         var p = Qt.createQmlObject('import DBus 1.0; DBus {}', this)
-        p.destroy()   // SIGSEGV on Qt 6.5–6.10
+        p.destroy()   // SIGSEGV on Qt 6.8–6.10; fixed in Qt 6.11
     }
 }
 ```
@@ -129,10 +150,15 @@ hit this bug — destruction is managed by the QML component teardown, not
 by the JS `destroy()` handler.
 
 ```qml
+import QtQuick
+import DBus 1.0
+
 Window {
     DBus {
         id: proxy
-        service: "..."; path: "..."; iface: "..."
+        service: "org.freedesktop.DBus"
+        path: "/org/freedesktop/DBus"
+        iface: "org.freedesktop.DBus"
     }
     // proxy is torn down with the Window; no explicit .destroy() needed.
 }
@@ -142,9 +168,10 @@ Window {
 object that will outlive it and let that parent destroy it, rather than
 calling `.destroy()` yourself:
 
-```qml
-var p = Qt.createQmlObject('import DBus 1.0; DBus {...}', someParent)
-// ...use p...
+JavaScript excerpt with an application-owned `someParent`:
+
+```js
+var p = Qt.createQmlObject('import DBus 1.0; DBus {}', someParent)
 // Do NOT call p.destroy(). Let someParent's own destruction clean up.
 ```
 
@@ -154,30 +181,10 @@ destroy`. dbusqml's own `tests/test_api.qml` uses this pattern.
 
 ---
 
-## Resolved-history section (pruned per floor policy)
-
-The `new ValueType({...})` entry (Qt 6.5–6.7, fixed in 6.8 — below the
-library floor) was removed; its workaround (QML structured-value
-assignment) is the normal form everywhere in `API.md`. The reactive
-bindings note below stays: it documents a behavior change users
-upgrading across 0.3.0 still hit.
-
----
-
 ## Reporting upstream
 
-The remaining entry has a minimal reproducer (above). Filing on
+The Qt create/destroy bug has a minimal reproducer above. Filing on
 https://bugreports.qt.io would help other Qt/QML users. If you file
-one, please link it here.
-
----
-
-## Reactive Property Bindings — RESOLVED in 0.3.0
-
-**Affects:** builds before v0.3.0 without `-DDBUSQML_REACTIVE_BINDINGS=ON`.
-
-Since v0.3.0, reactive bindings are always enabled. The
-`DBUSQML_REACTIVE_BINDINGS` flag no longer exists. Properties known
-from catalog or introspection are pre-populated as `null` placeholders,
-so bindings (including through `readonly property` layers) re-evaluate
-when real values arrive. `reactiveBindingsSupported` is hardwired `true`.
+one, please link it here. Resolved product behavior, including always-on
+reactive bindings, is documented in the API and changelog rather than as
+a current issue.
