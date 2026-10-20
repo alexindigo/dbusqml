@@ -200,6 +200,9 @@ infrastructure that materially affects consumer trust).
   arguments, properties and signals, serving interfaces, file descriptors,
   reply lifetime and troubleshooting. The README, API reference and example
   index link to the matching tasks.
+- Correct the API reference's notification call, served signal declarations,
+  signature parsing/validation behavior and message destination; align related
+  property, readiness, reply and fd notes with the task guides.
 
 ## [1.0.0] - 2026-09-27
 

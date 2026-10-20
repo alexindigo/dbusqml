@@ -4,6 +4,8 @@ This document describes the public API of the `DBus` QML module.
 
 For complete, task-oriented QML files, start with the
 [guides](docs/guides/README.md).
+Examples without the required imports or an enclosing QML root are excerpts
+to use inside your application.
 
 ## Module Import
 
@@ -34,6 +36,7 @@ A singleton representing the System Bus.
 
 Example usage:
 ```qml
+import QtQuick
 import DBus 1.0
 
 Item {
@@ -72,10 +75,12 @@ DBus {
 }
 mpris.playPause()          // → calls "PlayPause" on the D-Bus object
 mpris.seek(50000000)       // → calls "Seek" with argument
-mpris.setVolume(0.8)       // → calls "SetVolume" with argument
 ```
 
-**Dynamic properties** — D-Bus properties are exposed as QML properties with the same name:
+These calls require completed introspection. MPRIS volume is a writable
+property, not a `SetVolume` method: use `mpris.setProperty("Volume", 0.8)`.
+
+**Dynamic properties** — D-Bus properties are exposed under QML camelCase names:
 ```qml
 DBus {
     id: bat
@@ -83,12 +88,15 @@ DBus {
     path: "/org/freedesktop/UPower/devices/battery_BAT0"
     iface: "org.freedesktop.UPower.Device"
 }
-bat.percentage             // → Properties.Get("...Device", "Percentage")
-bat.isPresent              // → Properties.Get("...Device", "IsPresent")
-bat.timeToEmpty            // → Properties.Get("...Device", "TimeToEmpty")
+bat.percentage             // cached value of "Percentage"
+bat.isPresent              // cached value of "IsPresent"
+bat.timeToEmpty            // cached value of "TimeToEmpty"
 ```
 
-Properties auto-update via `PropertiesChanged` signals. Property names follow QML camelCase — see Property Name Conventions below.
+The initial `Properties.GetAll` populates these values; reading a binding
+does not issue a `Get` each time. Known properties start as `null` until
+their values arrive. Properties auto-update via `PropertiesChanged`
+signals. See Property Name Conventions below.
 
 Writes through the proxy are **optimistic**: the value is visible immediately
 and `Properties.Set` goes out on the wire. A **failed** write re-fetches the
@@ -139,8 +147,11 @@ handling owns the rest.
 `org.freedesktop.DBus.Error.Failed` and "argument N is not marshalable"
 instead of the process aborting inside QtDBus. Property writes with
 unmarshalable values are dropped with a warning; `emitSignal` skips the send.
-A malformed `_signatures` value warns ("unparseable declared signature") and
-falls back to inference.
+Override-string parsing is separate from type validation. A nonempty proxy
+`_signatures` entry that yields no complete types warns ("unparseable
+declared signature") and uses inference; a split type that fails validation
+instead fails the call locally. Partial parses and adaptor overrides have
+different behavior — see [Shape Selection](#shape-selection).
 
 #### Configuration Signals
 
@@ -204,25 +215,52 @@ purpose.
 Example usage:
 
 ```qml
+import QtQuick
 import DBus 1.0
 
-DBus {
-    id: notifications
-    service: "org.freedesktop.Notifications"
-    path: "/org/freedesktop/Notifications"
-    iface: "org.freedesktop.Notifications"
-    connection: SessionBus
+Item {
+    id: root
+    // A var reference lets static tooling handle the proxy's dynamic methods.
+    property var endpoint: notifications
 
-    onSignalReceived: (name, args) => {
-        console.log("Signal received:", name, "with args:", args)
+    DBus {
+        id: notifications
+        service: "org.freedesktop.Notifications"
+        path: "/org/freedesktop/Notifications"
+        iface: "org.freedesktop.Notifications"
+        connection: SessionBus
+        propertiesEnabled: false
+        callTimeout: 5000
     }
 
-    Component.onCompleted: {
-        // Dynamic method — calls D-Bus method "Notify" with all arguments
-        Notify("app", 0, "", "Hello", "World", [], {}, 5000)
+    Connections {
+        target: notifications
+        function onIntrospectionCompleted() {
+            // QML notify(...) calls the wire method Notify(...).
+            const reply = root.endpoint.notify("app", 0, "", "Hello", "World", [], {}, 5000)
+            reply.finished.connect(function() {
+                if (reply.isError)
+                    console.error(reply.error.name, reply.error.message)
+                else
+                    console.log("Notification ID:", reply.value)
+            })
+        }
+        function onSignalReceived(name, args) {
+            console.log("Signal received:", name, "with args:", args)
+        }
+        function onStatusChanged() {
+            if (notifications.status === DBus.Error)
+                console.error("The notifications interface could not be loaded")
+        }
     }
 }
 ```
+
+This is a complete file; it needs a notification service on the session
+bus. The callback is connected before the asynchronous reply completes.
+Use `call("Notify", args)` with the wire name when you do not want to use
+the dynamic method; signature discovery still requires introspection or
+catalog data unless you supply an override.
 
 ---
 
@@ -249,6 +287,11 @@ custom.asyncCall({...})
 | :--- | :--- | :--- |
 | `asyncCall(message)` | `dbusMessage message` | Returns a `DBusPendingReply`. |
 | `asyncCall(message, resolve, reject)` | `dbusMessage message`, `function resolve`, `function reject` | Promise-style asynchronous call. |
+
+The callback overload calls `resolve` with the **first output argument** or
+`reject` with the error, and manages its reply internally. It does not
+return a JavaScript `Promise`. Use the pending-reply overload and `values`
+when you need all output arguments.
 
 #### Connection properties and signals (P5)
 
@@ -327,6 +370,7 @@ the standalone complement to the proxy's `watchServiceStatus`.
 
 ```qml
 DBusServiceWatcher {
+    connection: SystemBus
     service: "org.bluez"
     onOwnerChanged: (oldOwner, newOwner) => console.log("bluez:", oldOwner, "->", newOwner)
     onRegisteredChanged: console.log("registered:", registered)
@@ -344,6 +388,7 @@ and follows `InterfacesAdded`/`InterfacesRemoved`.
 
 ```qml
 DBusObjectManager {
+    connection: SystemBus
     service: "org.bluez"
     path: "/"
     onManagedObjectsChanged: console.log(Object.keys(managedObjects))
@@ -354,6 +399,9 @@ DBusObjectManager {
 
 `ready` turns true after the initial `GetManagedObjects` completes;
 `managedObjects` maps object path → { interface → { property → value }}.
+These are wire property names, not proxy camelCase names. The inventory
+follows interface additions/removals, not ongoing `PropertiesChanged`
+updates; use per-object proxies for live property bindings.
 
 Changing `service`, `path` or `connection` at runtime resubscribes on the
 new target (the old subscription is dropped with the exact connection and
@@ -398,8 +446,8 @@ never disagree:
 1. **Explicit** — a `_members` map (`{ "Delete": "doDelete" }`: wire name →
    QML name) makes reserved-word or colliding members servable, and a
    `_signals` map (`{ "StateChanged": "oa{sv}" }`: wire signal name →
-   concatenated arg signature) declares wire signals that are emitted via
-   `emitSignal` but not expressible as QML `signal` declarations.
+   concatenated arg signature) declares served signal names and types,
+   including names not expressible as QML `signal` declarations.
 2. **Declared** — the interface's catalog XML (bundled types, the
    freedesktop-standard `<data>/dbus-1/interfaces/` directory, or
    user-supplied XML). Catalog method in-arg types are also served.
@@ -412,8 +460,12 @@ never disagree:
    one shared implementation, and lookups accept BOTH folds (a client-folded
    name resolves the same member).
 
-`_signals` is introspection-only — `emitSignal` remains the send path.
-`_signatures` (reply out-signatures) is unchanged.
+`_signals` supplies the served introspection declarations **and the types
+used for emission marshaling**, ahead of catalog signal declarations.
+Setting the map does not emit anything: call `emitSignal(name, args)` to
+send a declared wire signal. Ordinary QML signals are relayed automatically;
+their emission also uses the resolved declarations. `_signatures` instead
+declares method reply out-signatures.
 
 **Property casing:** `Properties.Get`/`Set` accept both the exact QML
 property name and its wire-cased form (`Get("iface", "Version")` finds
@@ -496,8 +548,8 @@ path also caps at 5 parameters and warns beyond that).
 `toDbusVariant`, so `DBusQML.variant(x)` produces a real D-Bus variant
 (`v`), and `DBusQML.dict(...)` produces `a{sv}`. A function that returns
 nothing sends an empty reply. Nested object literals with gadget values
-(`{ ns: { key: new DBusQML.variant(1) } }`) marshal correctly at any
-depth.
+(`{ ns: { key: new DBusQML.variant(1) } }`) marshal correctly within the
+documented nesting limits.
 
 Example — serving `org.freedesktop.impl.portal.Settings` (the portal
 backend pattern):
@@ -538,7 +590,7 @@ DBusAdaptor {
 **Limitations:**
 - QML `signal` declarations are automatically forwarded as D-Bus signals (maximum 5 parameters)
 - Static `DBus.emitSignal(service, path, iface, name, args)` always uses the session bus
-- Instance `emitSignal(name, args)` intentionally attempts `registerService(service)` so the signal appears to originate from that name (portal-style signals)
+- `DBusAdaptor.emitSignal(name, args)` sends on its recorded attach connection, using the adaptor's existing registration. The **proxy's** instance `emitSignal` is the API that attempts `registerService(service)`, once per service value.
 - `emitSignal(name, args)` arguments are marshaled through `toDbusVariant` — use `DBusQML.variant(x)` for variant-typed signal args (e.g. the portal `SettingChanged` `(ssv)` signature)
 - A struct **inside** a variant (`DBusQML.variant(DBusQML.struct_(...))`) marshals as a real `v` with a struct payload; return the struct directly when you need a bare `(...)` signature.
 
@@ -600,6 +652,7 @@ synchronously inside the handler to mark the call as deferred; it returns a
 `sendError(name, message)`:
 
 ```qml
+import DBus 1.0
 import DBus 1.0 as DBusQML   // alias for value types
 
 DBusAdaptor {
@@ -829,14 +882,45 @@ DBusAdaptor {
 }
 ```
 
-A declared signature is never silently ignored. An **invalid** declared
-signature (the validity rules below) fails the value instead: the call,
-signal, or reply fails locally at the send boundary rather than reaching
-the wire with an inferred type the peer never advertised. A **valid**
-signature whose value cannot produce it (or signature-slot pool
-exhaustion) logs a warning and falls back to inference — never a
-different wire type with no notice. Unregistered but valid container
-shapes mint assign-once signature-slot pool registrations (see
+**Override parsing is not type validation.** The QML property is
+`_signatures` on both elements (`signatures()` / `setSignatures()` are its
+C++ accessors). The override splitter extracts a prefix of complete types;
+it does not validate the entire string against the D-Bus rules below.
+Behavior at this step is:
+
+| Override | Proxy call arguments | Adaptor reply arguments |
+| :--- | :--- | :--- |
+| Empty string | Uses inference, without an unparseable-signature warning | Declares a void reply; a marshalable returned value is dropped with a warning |
+| Nonempty but no type can be split, e.g. `"("` | Warns `unparseable declared signature`, then uses inference for the arguments | Warns `breaks mid-parse — partial out-args used`; the empty prefix is treated as a declared void reply |
+| A parsed prefix followed by an unparseable suffix, e.g. `"s("` | Keeps the prefix (`s` here), infers remaining arguments, and does not emit the `unparseable declared signature` warning for this case | Warns `breaks mid-parse — partial out-args used` and uses only the parsed prefix as its out-argument declaration |
+
+An override entry wins even in these cases: parsing failure does **not**
+restore the catalog/introspection declaration for that method.
+
+**Proxy type validation:** each nonempty input type obtained from the
+override, introspection or catalog is then validated. A type the splitter
+can extract but the validator rejects, such as `"()"` or `"a{vs}"`, fails
+the value, warns, and completes the call locally with
+`org.freedesktop.DBus.Error.Failed`; it is not replaced by an inferred type.
+`send()` drops the invalid call with a warning instead of returning a reply.
+
+**Other marshaling paths:** the signature-driven container writer also
+rejects invalid types before constructing or registering them. Its caller
+can handle that refusal differently: `marshalBySignature` (used for raw
+message arguments, adaptor replies and declared signal arguments) warns
+`cannot produce declared signature` and falls back to inference when its
+generic container writer fails, including for an invalid container type.
+An unrecognized type code reaching that marshaller also warns and infers.
+A bad `h` value is an exception: it fails rather than inferring, on every
+path. The send boundary then checks the actual marshaled values and their
+aggregate signature; calls/replies fail or one-way messages are dropped
+when that check fails.
+
+A valid type that the generic container writer cannot produce from the
+value (including depth-limit or signature-slot exhaustion) likewise warns
+and falls back to inference, except for fd failures. Correct declarations
+and warnings rather than relying on any fallback. Unregistered valid
+container shapes use assign-once signature-slot pool registrations (see
 `dbussignatureslots.h`).
 
 **Signature limits** (D-Bus "Valid Signatures", enforced before any
@@ -895,18 +979,21 @@ flags, applied on send).
 
 Represents a D-Bus message.
 
-Can be constructed from a property map: `new DBus.dbusMessage({service: "...", path: "...", ...})`.
+Can be constructed from a property map:
+`new DBusQML.dbusMessage({service: "...", path: "...", ...})`, using
+`import DBus 1.0 as DBusQML` for the value type. `asyncCall` also accepts
+the property map directly.
 
 #### Properties
 
 | Property | Type | Description |
 | :--- | :--- | :--- |
-| `service` | `string` | The sender service. |
+| `service` | `string` | The destination's well-known or unique bus name. |
 | `path` | `string` | The object path. |
 | `iface` | `string` | The interface name. |
-| `member` | `string` | The method or signal name. |
+| `member` | `string` | The method name, in wire case. |
 | `arguments` | `list` | The arguments of the message. |
-| `signature` | `string` | The D-Bus signature. |
+| `signature` | `string` | Optional concatenated input-argument signature, not the reply signature. |
 
 ---
 
@@ -924,8 +1011,8 @@ Represents the result of an asynchronous D-Bus call.
 | `isError` | `bool` | Whether the call resulted in an error. |
 | `isValid` | `bool` | Whether the reply is valid. |
 | `error` | `dbusError` | The error if `isError` is true. |
-| `value` | `variant` | The result value of the call. |
-| `values` | `list` | The result values of the call. |
+| `value` | `variant` | The first output argument of the call. |
+| `values` | `list` | All output arguments, in order. |
 
 #### Signals
 
@@ -987,18 +1074,21 @@ import DBus 1.0
 import DBus 1.0 as DBusQML    // alias for value types
 
 // Without alias: element is DBus {}, singletons are SessionBus, etc.
-// With alias: value types are DBusQML.uint32(), DBusQML.string(), etc.
-DBusQML.uint32(42)
-DBusQML.int64(21474836470)
-DBusQML.string("hello")
-DBusQML.boolean(true)
-DBusQML.objectPath("/org/freedesktop/UPower")
-DBusQML.variant("any value")
-DBusQML.variant(["file:///tmp/x"], "as")   // variant whose payload has signature "as"
-DBusQML.dict({ key: "value" })
+// With alias: construct value types with new DBusQML.<type>(...).
+new DBusQML.uint32(42)
+new DBusQML.int64(21474836470)
+new DBusQML.string("hello")
+new DBusQML.boolean(true)
+new DBusQML.objectPath("/org/freedesktop/UPower")
+new DBusQML.variant("any value")
+new DBusQML.variant(["file:///home/user/example.txt"], "as") // variant holding as
+new DBusQML.dict({ key: "value" })
 ```
 
-Most examples don't need value types — plain JS strings/numbers/booleans work for common cases. Value types are only needed when you must force a specific D-Bus signature (e.g., distinguish `uint32` from `int32`).
+Ordinary data usually needs no wrapper: plain JS strings, numbers and
+booleans cover common cases. Wrappers select explicit types when needed
+(for example, `uint32` rather than `int32`). File descriptors are different:
+an owning `unixFd` is required, even when the `h` signature is known.
 
 | C++ Type | QML Type | Description |
 | :--- | :--- | :--- |
@@ -1020,12 +1110,16 @@ Most examples don't need value types — plain JS strings/numbers/booleans work 
 A `variant` nested inside a dict or list value is the value's payload (the
 container supplies the `v`); `variant(variant(x))` produces an explicit inner
 variant.
+
+| C++ Type | QML Type | Description |
+| :--- | :--- | :--- |
 | `DBus::Bytes` | `bytes` | Byte array (`ay`). |
 | `DBus::Struct` | `struct_` | D-Bus struct — wraps a JS array of members, marshals via `beginStructure`. Use for struct-typed values like `(ddd)` accent-color or `(uu)` StateReason. It works in every position — variant payloads, map/list values, signal args, call args. The outermost struct carries the wire signature; inner structs compose naturally. |
 | `DBus::UnixFd` | `unixFd` | An owned Unix file descriptor (`h`) — see [Unix file descriptors](#unix-file-descriptors-h). The only way to send an fd; every received fd arrives as one. |
 
-When the method signature is known (from introspection or
-catalog), plain JS values are marshaled correctly — no wrapper types needed.
+When the method signature is known (from introspection or catalog), plain
+JS values suffice for ordinary data. File descriptors still require an
+owning `unixFd`; a number never becomes an fd because of a declaration.
 Value types remain as explicit overrides for signature-less calls.
 
 ### Byte Arrays (`ay`)
@@ -1097,6 +1191,10 @@ f.close()                           // done with it on our side
 // Receive: a unixFd you own.
 var r = proxy.call("OpenThing", [])
 r.finished.connect(function() {
+    if (r.isError) {
+        console.error(r.error.name, r.error.message)
+        return
+    }
     var fd = r.value
     if (!fd.valid) return
     var bytes = DBusUtils.readFd(fd, 4096)
@@ -1145,9 +1243,10 @@ several threads.
 
 QML has no fd I/O — the same gap the `ay` codec hit (0.3.0 shipped
 `textFromBytes`/`bytesFromText` *with* `ay` support because QML lacked text
-codecs). These helpers fill it. Every fd they take or return is a `unixFd`;
-a plain number is refused with a warning, never read, written or turned into
-a URL.
+codecs). These helpers fill it. `openFd` returns a `unixFd`, and
+`readFd` / `writeFd` / `fdUrl` require one: a plain number is refused with a
+warning, never read, written or turned into a URL. `closeFd` is the separate
+numeric-duplicate cleanup helper described below.
 
 - `DBusUtils.openFd(path, mode) → unixFd` — fopen-style `mode` (`"r"`,
   `"w"`, `"rw"`); an invalid `unixFd` + warning on failure.
@@ -1163,9 +1262,11 @@ a URL.
 Caveats:
 
 - **fd taxonomy.** `readFd`/`writeFd` work on any fd — regular files,
-  pipes, sockets. `fdUrl` is **regular-file-only**: pipes, sockets, and
+  pipes, sockets. These are synchronous I/O helpers and can block.
+  `fdUrl` is useful for **regular-file-backed consumers only**: pipes, sockets, and
   anon inodes (the ScreenShot2 pipe, the `OpenPipeWireRemote` socket)
-  have no usable path — use `readFd`/`writeFd` for streams.
+  have no usable path — use `readFd`/`writeFd` for streams. The helper
+  checks that the owning value is open, but does not validate file kind.
 - **Access mode travels with the fd.** A transferred fd keeps its access
   mode; a receiver cannot read through a write-only fd — open `rw` when
   the other side must read.
@@ -1266,11 +1367,14 @@ This is inherent to Qt 6; there is no library-side fix.
 
 ### Runtime-configured proxies: dynamic methods are async
 
-For a `DBus { }` element declared with all of `service`, `path`, and `iface` set inline in QML, introspection completes before user interaction is possible, and `proxy.methodName()` works immediately.
+Introspection is asynchronous even when `service`, `path` and `iface` are
+set inline in QML. Do not assume dynamic methods exist in
+`Component.onCompleted` or before the remote introspection reply arrives.
 
 For a proxy whose properties are assigned at runtime (typically via `onActivePlayerChanged`, a selector, etc.), introspection is asynchronous — dynamic method callbacks are **not** yet installed in the same event-loop tick as the assignment.
 
-Wait for `introspectionCompleted` (or check `status === DBus.Ready`) before calling dynamic methods on a runtime-configured proxy:
+Wait for `introspectionCompleted` (or check `status === DBus.Ready`) before
+calling dynamic methods on either an inline or runtime-configured proxy:
 
 ```qml
 Connections {
