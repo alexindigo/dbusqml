@@ -59,7 +59,7 @@ qt_add_qml_module(dbusqml
         dbusobjectmanager.h
 )
 
-target_link_libraries(dbusqml PRIVATE
+target_link_libraries(dbusqml PUBLIC
     Qt6::Core Qt6::Qml Qt6::DBus
 )
 
@@ -100,8 +100,16 @@ install(TARGETS dbusqml
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
+set_target_properties(dbusqmlplugin PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../../.."
+)
+install(TARGETS dbusqmlplugin
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/qt6/qml/DBus
+)
+
 install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/DBus/
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/qt6/qml/DBus
+    PATTERN "*.so" EXCLUDE
 )
 
 install(FILES

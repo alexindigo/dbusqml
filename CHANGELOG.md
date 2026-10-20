@@ -66,6 +66,10 @@ consumer trust), then Docs (documentation); the last two are project extensions.
 
 ### Fixed
 
+- Installed CMake targets propagate their public Qt dependencies to C++
+  consumers; the QML plugin is installed with executable permissions and a
+  relative library search path instead of retaining its build-tree path.
+
 - **Peer-supplied text could forge extra lines in text logs** (finding
   #10). Warnings and info messages that print bus-derived strings — names
   from introspection XML, incoming member and property names, reply error
