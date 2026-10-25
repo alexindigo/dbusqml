@@ -917,6 +917,26 @@ void DBusProxy::teardownOwnerTracker() {
     m_currentOwner.clear();
 }
 
+void DBusProxy::insertBatch(const QVariantHash &values) {
+    // Qt 6.1+: one metaobject rebuild for all new keys. Both insert
+    // overloads notify existing bindings without invoking updateValue or
+    // emitting valueChanged (those are for writes originating in QML).
+    QVariantHash accepted = values;
+    // Qt's batch overload rejects the WHOLE hash on a reserved name. Keep
+    // the old per-key rejection semantics and Qt's diagnostic instead.
+    // validKeyName has this same list in Qt 6.8.2 and 6.11.2.
+    for (const QString &key :
+         {QStringLiteral("keys"), QStringLiteral("valueChanged"), QStringLiteral("QObject"),
+          QStringLiteral("destroyed"), QStringLiteral("deleteLater")}) {
+        auto it = accepted.find(key);
+        if (it != accepted.end()) {
+            QQmlPropertyMap::insert(key, it.value()); // rejected; diagnostic only
+            accepted.erase(it);
+        }
+    }
+    QQmlPropertyMap::insert(accepted);
+}
+
 void DBusProxy::fetchProperties() {
     QDBusMessage msg = QDBusMessage::createMethodCall(m_service, m_path,
                                                       "org.freedesktop.DBus.Properties", "GetAll");
@@ -935,14 +955,17 @@ void DBusProxy::fetchProperties() {
         if (!error.isValid() && decodeMessage(w->reply(), args, &error) && !args.isEmpty()) {
             DBus::UnixFd::noteDelivered(args.first(), qmlEngine(this)); // into the QML map
             QVariantMap props = args.first().toMap();
+            QVariantHash values;
+            values.reserve(props.size());
             for (auto it = props.begin(); it != props.end(); ++it) {
                 QString qmlName = dbusPropToQml(it.key());
                 // Don't overwrite dynamic method callbacks with property values
                 if (!m_methodArgTypes.contains(it.key()) && !m_methodArgTypes.contains(qmlName)) {
                     m_qmlToDbusName.insert(qmlName, it.key());
-                    insert(qmlName, it.value());
+                    values.insert(qmlName, it.value());
                 }
             }
+            insertBatch(values);
             m_status = Ready;
         } else {
             m_status = Error;
@@ -982,11 +1005,14 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
                 // QDBusArgument-shaped a{sv} fails qdbus_cast to an empty
                 // map silently, leaving the UI stale with zero diagnostics.
                 QVariantMap changed = unwrapped.at(1).toMap();
+                QVariantHash values;
+                values.reserve(changed.size());
                 for (auto it = changed.begin(); it != changed.end(); ++it) {
                     QString qmlName = dbusPropToQml(it.key());
                     m_qmlToDbusName.insert(qmlName, it.key());
-                    insert(qmlName, it.value());
+                    values.insert(qmlName, it.value());
                 }
+                insertBatch(values);
             }
             // A3/D3: invalidated_properties re-Get — the client re-fetches
             // each name; on error the stale value is kept with one warning
@@ -1039,6 +1065,8 @@ void DBusProxy::setupDynamicMethods(const QStringList &methodNames) {
     auto *helper = new DbusMethodHelper(this, this);
     QJSValue helperObj = engine->newQObject(helper);
 
+    QVariantHash methods;
+    methods.reserve(methodNames.size());
     for (const QString &name : methodNames) {
         if (name.isEmpty())
             continue;
@@ -1062,9 +1090,10 @@ void DBusProxy::setupDynamicMethods(const QStringList &methodNames) {
 
         m_cachedFunctions.append(fn);
         QString qmlName = dbusPropToQml(name);
-        insert(qmlName, QVariant::fromValue(fn));
+        methods.insert(qmlName, QVariant::fromValue(fn));
         m_dynamicMethodKeys.append(qmlName);
     }
+    insertBatch(methods);
 }
 
 void DBusProxy::onIntrospectionReady(const QString &xml) {
@@ -1139,12 +1168,15 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
     // and never re-evaluate when the real value is later inserted.
     // A16: the wire name is recorded HERE — a write before GetAll backfills
     // the map must go out under the wire name, not the camelCase fallback.
+    QVariantHash placeholders;
+    placeholders.reserve(propertyNames.size());
     for (const QString &propName : std::as_const(propertyNames)) {
         QString qmlName = dbusPropToQml(propName);
         m_qmlToDbusName.insert(qmlName, propName);
         if (!contains(qmlName))
-            insert(qmlName, QVariant::fromValue(nullptr));
+            placeholders.insert(qmlName, QVariant::fromValue(nullptr));
     }
+    insertBatch(placeholders);
 
     setupDynamicMethods(methodNames);
 
@@ -1225,11 +1257,14 @@ void DBusProxy::prepopulateFromCatalog() {
     if (m_service.isEmpty() || m_path.isEmpty() || m_iface.isEmpty())
         return;
     if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
+        QVariantHash placeholders;
+        placeholders.reserve(spec->properties.size());
         for (const auto &p : spec->properties) {
             QString qmlName = dbusPropToQml(p.name);
             m_qmlToDbusName.insert(qmlName, p.name);
-            insert(qmlName, QVariant::fromValue(nullptr));
+            placeholders.insert(qmlName, QVariant::fromValue(nullptr));
         }
+        insertBatch(placeholders);
     }
 }
 
