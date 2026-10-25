@@ -400,6 +400,16 @@ can warn and infer after a container writer refuses a type. The send
 boundary checks the resulting values. See
 [Shape Selection](API.md#shape-selection) for the exact path-specific rules.
 
+Basic wire values have one producer, shared by the probe, staged writer,
+recursive signature writer and top-level marshaller. It validates `g`
+contents with the message-signature validator (including the 255-byte cap)
+and `o` contents with one ASCII object-path predicate before constructing
+Qt wrappers. Staged writes consume the exact produced types. Inferred
+typed leaves use the same producer before a raw Struct can stream them.
+A basic-value refusal propagates through containers as a non-marshalable
+failure, never an inference fallback or a void reply. Empty `g` contents
+are valid nested values; only an empty top-level `g` stays refused.
+
 ### XML boundary
 
 Both XML parsers — the peer-introspection parser

@@ -51,21 +51,20 @@ QVariant marshalBySignature(const QString &sig, const QVariant &value);
 // wrapped in a QVariant (cross-marshaled by QtDBus as a request or reply
 // argument). Returns an invalid QVariant when the signature cannot be
 // produced — callers must fail loudly rather than emit a different wire type.
-// `fdError` (optional) receives the reason when an `h` position could not
-// carry an fd (see DBusFdFailure).
+// `fdError` (optional, historical name) receives a basic-value failure reason
+// (h, o or g). Callers must not replace such a refusal with inferred values.
 QVariant writeBySignature(const QString &sig, const QVariant &value, QString *fdError = nullptr);
 
-// Library-internal: what an `h` position produces for a value that is not an
-// explicit fd (a number, a closed DBusQML.unixFd). fds cross the wire only as
-// DBusQML.unixFd / QDBusUnixFileDescriptor — never inferred from a declared
-// signature (finding #4), whichever source declared the `h` (introspection,
-// catalog, override, message signature). Never wire-marshalable;
-// checkSendable reports `reason`, so every send path fails locally.
-struct DBusFdFailure {
+// Library-internal poison for an invalid basic value. Never wire-marshalable;
+// checkSendable reports the reason, including through inferred containers.
+// Unlike an invalid QVariant this cannot be mistaken for a void adaptor reply.
+struct DBusValueFailure {
     QString reason;
 };
-Q_DECLARE_METATYPE(DBusFdFailure)
-// The first DBusFdFailure reason inside v (containers recurse), or empty.
+Q_DECLARE_METATYPE(DBusValueFailure)
+// Keep existing fd consumers on the same failure channel.
+using DBusFdFailure = DBusValueFailure;
+// Historical name: first basic-value failure reason (containers recurse).
 QString fdFailureIn(const QVariant &v);
 
 // Recursively unwrap QDBusVariant / QDBusArgument values into plain QVariant

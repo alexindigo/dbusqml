@@ -181,6 +181,14 @@ public:
     }
 };
 
+// Declared reply fixture for basic values at arbitrary container positions.
+class WireValueReplyAdaptor : public DBusAdaptor {
+    Q_OBJECT
+public:
+    QVariant payload;
+    Q_INVOKABLE QVariant take() { return payload; }
+};
+
 // Declares 256 out strings — an aggregate reply signature of 256 bytes,
 // over the spec's 255-byte message-signature cap.
 class SigReplyAdaptor : public DBusAdaptor {
@@ -4185,6 +4193,33 @@ private slots:
               "valid-255", "valid-arrays32", "valid-structs32", "valid-aggregate-255",
               "sigarg-valid-255"})
             QTest::newRow(name) << QString::fromLatin1(name);
+        // All declared send paths and both streaming strategies (struct
+        // recursion versus staged array/dict leaves), under fatal libdbus checks.
+        for (const char *site : {"async", "send", "proxy", "adaptor"}) {
+            for (const char *shape : {"struct", "array", "dict"}) {
+                for (const char *value : {"long", "syntax", "max", "empty", "double-slash",
+                                          "relative", "trailing", "unicode", "root"}) {
+                    const QString row =
+                        QStringLiteral("wire-%1-%2-%3")
+                            .arg(QLatin1String(site), QLatin1String(shape), QLatin1String(value));
+                    QTest::newRow(qPrintable(row)) << row;
+                }
+            }
+        }
+        for (const char *name :
+             {"wire-inferred-struct-long", "wire-inferred-struct-empty", "wire-inferred-map-long",
+              "wire-inferred-map-empty", "wire-inferred-nested-long", "wire-inferred-nested-empty",
+              "wire-inferred-variant-long", "wire-inferred-variant-empty",
+              "wire-inferred-native-long", "wire-inferred-native-empty", "wire-async-key-long",
+              "wire-async-key-double-slash", "wire-top-empty"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+        for (const char *site : {"async", "send", "proxy", "adaptor"}) {
+            for (const char *value : {"long", "max"}) {
+                const QString row = QStringLiteral("wire-%1-deep-%2")
+                                        .arg(QLatin1String(site), QLatin1String(value));
+                QTest::newRow(qPrintable(row)) << row;
+            }
+        }
     }
 
     void testSignatureBoundary() {
@@ -4410,6 +4445,181 @@ private slots:
                 qInfo("SIGVAL_DONE");
                 QVERIFY2(!out.isValid(), "a dict entry outside an array must be rejected");
             }
+        } else if (scenario.startsWith(QLatin1String("wire-"))) {
+            const QStringList parts = scenario.split(QLatin1Char('-'));
+            const QString site = parts.at(1);
+            const QString shape = parts.at(2);
+            const QString kind = parts.mid(3).join(QLatin1Char('-'));
+            const bool path = kind == QLatin1String("double-slash") ||
+                              kind == QLatin1String("relative") ||
+                              kind == QLatin1String("trailing") ||
+                              kind == QLatin1String("unicode") || kind == QLatin1String("root");
+            const QString basic = path ? QStringLiteral("o") : QStringLiteral("g");
+            QString content;
+            if (kind == QLatin1String("long"))
+                content = QString(256, QLatin1Char('i'));
+            else if (kind == QLatin1String("max"))
+                content = QString(255, QLatin1Char('i'));
+            else if (kind == QLatin1String("syntax"))
+                content = QStringLiteral("{sv}");
+            else if (kind == QLatin1String("double-slash"))
+                content = QStringLiteral("/a//b");
+            else if (kind == QLatin1String("relative"))
+                content = QStringLiteral("x");
+            else if (kind == QLatin1String("trailing"))
+                content = QStringLiteral("/a/");
+            else if (kind == QLatin1String("unicode"))
+                content = QString::fromUtf8("/é");
+            else if (kind == QLatin1String("root"))
+                content = QStringLiteral("/");
+            const bool valid = kind == QLatin1String("max") || kind == QLatin1String("empty") ||
+                               kind == QLatin1String("root");
+            QString declared;
+            QVariant payload;
+            if (shape == QLatin1String("struct")) {
+                declared = QStringLiteral("(") + basic + QStringLiteral(")");
+                payload = QVariantList{content};
+            } else if (shape == QLatin1String("array")) {
+                declared = QStringLiteral("a") + basic;
+                payload = QVariantList{content};
+            } else {
+                declared = QStringLiteral("a{s") + basic + QStringLiteral("}");
+                payload = QVariantMap{{QStringLiteral("k"), content}};
+            }
+            if (shape == QLatin1String("deep")) {
+                declared = QStringLiteral("a(ia{s") + basic + QStringLiteral("})");
+                payload = QVariantList{
+                    QVariant(QVariantList{42, QVariantMap{{QStringLiteral("k"), content}}})};
+            }
+            if (shape == QLatin1String("key")) {
+                declared = QStringLiteral("a{") + basic + QStringLiteral("s}");
+                payload = QVariantMap{{content, QStringLiteral("v")}};
+            }
+            if (site == QLatin1String("inferred")) {
+                const QVariant leaf = QVariant::fromValue(QDBusSignature(content));
+                declared.clear();
+                if (shape == QLatin1String("struct"))
+                    payload = QVariant::fromValue(DBus::Struct(QVariantList{leaf}));
+                else if (shape == QLatin1String("nested"))
+                    payload = QVariant::fromValue(DBus::Struct(
+                        QVariantList{QVariant::fromValue(DBus::Struct(QVariantList{leaf}))}));
+                else if (shape == QLatin1String("variant"))
+                    payload = QVariant::fromValue(QDBusVariant(leaf));
+                else if (shape == QLatin1String("native")) {
+                    payload = QVariantMap{
+                        {QStringLiteral("outer"), QVariantMap{{QStringLiteral("k"), leaf}}}};
+                    declared = QStringLiteral("a{sa{sv}}");
+                } else
+                    payload = QVariantMap{{QStringLiteral("k"), leaf}};
+            }
+            if (site == QLatin1String("top")) {
+                payload = QVariant::fromValue(QDBusSignature(QString()));
+                declared.clear();
+            }
+            const bool accepted = valid && site != QLatin1String("top");
+            DBusMessage message;
+            message.setService(QStringLiteral("org.dbusqml.PayloadEcho"));
+            message.setPath(QStringLiteral("/PayloadEcho"));
+            message.setIface(QStringLiteral("org.dbusqml.PayloadEcho"));
+            message.setMember(QStringLiteral("RoundTrip"));
+            message.setSignature(declared);
+            message.setArguments({payload});
+            SessionBusConnection connection;
+            DBusProxy proxy;
+            WireValueReplyAdaptor adaptor;
+            SigAdaptorForwarder forwarder;
+            auto bus = QDBusConnection::sessionBus();
+            if (site == QLatin1String("proxy")) {
+                proxy.setSignatures({{QStringLiteral("RoundTrip"), declared}});
+                proxy.setService(message.service());
+                proxy.setPath(message.path());
+                proxy.setIface(message.iface());
+                QSignalSpy ready(&proxy, &DBusProxy::introspectionCompleted);
+                QTRY_VERIFY_WITH_TIMEOUT(!ready.isEmpty(), 5000);
+            }
+            if (site == QLatin1String("adaptor")) {
+                adaptor.setIface(QStringLiteral("org.dbusqml.WireValue"));
+                adaptor.setSignatures({{QStringLiteral("Take"), declared}});
+                adaptor.payload = payload;
+                forwarder.target = &adaptor;
+                QVERIFY(bus.registerVirtualObject(QStringLiteral("/WireValue"), &forwarder));
+            }
+            qInfo("SIGVAL_READY");
+            ConnMessageCapture capture;
+            QVariant received;
+            if (site == QLatin1String("adaptor")) {
+                const auto call = QDBusMessage::createMethodCall(
+                    bus.baseService(), QStringLiteral("/WireValue"),
+                    QStringLiteral("org.dbusqml.WireValue"), QStringLiteral("Take"));
+                const QDBusMessage reply = bus.call(call, QDBus::Block, 2500);
+                QCOMPARE(reply.type(),
+                         accepted ? QDBusMessage::ReplyMessage : QDBusMessage::ErrorMessage);
+                if (accepted) {
+                    // Cross the real wire, even when Qt optimized the local adaptor call.
+                    auto echo = QDBusMessage::createMethodCall(message.service(), message.path(),
+                                                               message.iface(), message.member());
+                    echo.setArguments(reply.arguments());
+                    const auto echoed = bus.call(echo, QDBus::Block, 1000);
+                    QCOMPARE(echoed.type(), QDBusMessage::ReplyMessage);
+                    received = unwrapDbus(echoed.arguments().first());
+                } else {
+                    QCOMPARE(reply.errorName(),
+                             QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+                }
+            } else if (site == QLatin1String("send")) {
+                connection.send(message);
+                // Same connection, ordered messages: this observes the peer AFTER send.
+                auto last = QDBusMessage::createMethodCall(message.service(), message.path(),
+                                                           message.iface(),
+                                                           QStringLiteral("LastArguments"));
+                const auto reply = bus.call(last, QDBus::Block, 1000);
+                QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+                if (accepted) {
+                    QCOMPARE(reply.arguments().size(), 1);
+                    received = unwrapDbus(reply.arguments().first());
+                } else {
+                    QVERIFY(reply.arguments().isEmpty());
+                }
+            } else {
+                auto *reply = site == QLatin1String("proxy")
+                                  ? proxy.call(QStringLiteral("RoundTrip"), {payload})
+                                  : connection.asyncCall(message);
+                QTRY_VERIFY_WITH_TIMEOUT(reply->isFinished(), 1500);
+                QCOMPARE(reply->isError(), !accepted);
+                if (accepted)
+                    received = unwrapDbus(reply->value());
+                else {
+                    QCOMPARE(reply->error().name(),
+                             QStringLiteral("org.freedesktop.DBus.Error.Failed"));
+                }
+                delete reply;
+            }
+            if (accepted) {
+                QVariant expected = shape == QLatin1String("dict") || shape == QLatin1String("map")
+                                        ? QVariant(QVariantMap{{QStringLiteral("k"), content}})
+                                        : QVariant(QVariantList{content});
+                if (shape == QLatin1String("deep"))
+                    expected = payload;
+                else if (shape == QLatin1String("nested"))
+                    expected = QVariantList{QVariant(QVariantList{content})};
+                else if (shape == QLatin1String("variant") || shape == QLatin1String("map") ||
+                         shape == QLatin1String("native")) {
+                    // Native scalar carriers survive unwrapDbus; only the raw
+                    // signature reader normalizes g to QString.
+                    const QVariant leaf = QVariant::fromValue(QDBusSignature(content));
+                    expected = leaf;
+                    if (shape == QLatin1String("map"))
+                        expected = QVariantMap{{QStringLiteral("k"), leaf}};
+                    else if (shape == QLatin1String("native"))
+                        expected = QVariantMap{
+                            {QStringLiteral("outer"), QVariantMap{{QStringLiteral("k"), leaf}}}};
+                }
+                QCOMPARE(received, expected);
+            } else {
+                QVERIFY(capture.contains(QStringLiteral("marshalable")) ||
+                        capture.contains(QStringLiteral("cannot produce declared")));
+            }
+            qInfo("SIGVAL_DONE");
         } else if (scenario.startsWith(QLatin1String("sigarg-"))) {
             // A QDBusSignature argument's content is a message signature —
             // validated before the value can reach libdbus's 255-byte cap.
