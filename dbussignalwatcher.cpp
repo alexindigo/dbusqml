@@ -1,4 +1,5 @@
 #include "dbussignalwatcher.h"
+#include "dbussubscription.h"
 #include "dbusutils.h"
 
 #include <QDBusConnection>
@@ -68,15 +69,13 @@ void DBusSignalWatcher::componentComplete() {
     resubscribe();
 }
 
-// The ONE disconnect path (setters and the destructor): drops the recorded
-// subscription with the exact connection + tuple it was made with (KDE
-// plasma-workspace dbussignalwatcher shape — disconnect before mutating).
+// Revoke before mutating: queued deliveries belong to the old receiver.
 void DBusSignalWatcher::unsubscribe() {
-    if (!m_connected)
-        return;
-    m_subConn.disconnect(m_subService, m_subPath, m_subIface, m_subMember, this,
-                         SLOT(onSignal(QDBusMessage)));
-    m_connected = false;
+    if (m_subscription) {
+        auto *subscription = m_subscription;
+        m_subscription = nullptr;
+        subscription->revoke();
+    }
 }
 
 void DBusSignalWatcher::resubscribe() {
@@ -94,14 +93,10 @@ void DBusSignalWatcher::resubscribe() {
     QDBusConnection conn =
         m_conn ? static_cast<QDBusConnection>(*m_conn) : QDBusConnection::sessionBus();
 
-    if (conn.connect(m_service, m_path, m_iface, m_member, this, SLOT(onSignal(QDBusMessage)))) {
-        m_subConn = conn;
-        m_subService = m_service;
-        m_subPath = m_path;
-        m_subIface = m_iface;
-        m_subMember = m_member;
-        m_connected = true;
-    }
+    unsubscribe();
+    m_subscription = DBusSubscription::create(
+        conn, m_service, m_path, m_iface, {m_member},
+        [this](const QDBusMessage &msg) { onSignal(msg); }, this);
 }
 
 void DBusSignalWatcher::onSignal(const QDBusMessage &msg) {

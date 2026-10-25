@@ -37,6 +37,8 @@ set(DBUSQML_SOURCES
     dbusintrospection.h
     dbuspendingreply.cpp
     dbuspendingreply.h
+    dbussubscription.cpp
+    dbussubscription.h
     dbustypes.h
     dbustypes.cpp
     dbusutils.h

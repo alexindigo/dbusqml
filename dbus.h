@@ -17,6 +17,8 @@
 #include "dbusconnection.h"
 #include "dbuspendingreply.h"
 
+class DBusSubscription;
+
 class DBusProxy : public QQmlPropertyMap, public QQmlParserStatus {
     Q_OBJECT
     Q_INTERFACES(QQmlParserStatus)
@@ -155,7 +157,6 @@ private:
     QPointer<DBusConnection> m_conn;
 
     QDBusConnection m_bus;
-    bool m_signalsConnected = false;
     bool m_signalsEnabled = true;
     int m_callTimeout = -1;
     // A3/D3: re-Get invalidated property names after a PropertiesChanged
@@ -165,11 +166,12 @@ private:
     void refetchInvalidated(const QStringList &names);
     quint64 m_refetchEpoch = 0;
 
-    // Idempotent service-watcher readiness: create-or-rewire on the CURRENT
+    // Idempotent service-watcher readiness: create-or-replace on the CURRENT
     // bus and (re-)run the initial NameHasOwner check. Safe from any entry
     // point in any order — componentComplete() backfills whatever the
     // engine's binding application order skipped.
     void ensureServiceWatcher();
+    void teardownServiceWatcher();
     // P5: session-bus disconnect watch for proxies on the default
     // connection (no DBusConnection object to relay it). Idempotent.
     void ensureSessionDisconnectWatch();
@@ -199,12 +201,8 @@ private:
     // onPropertiesChanged, catalog/live pre-populate).
     QHash<QString, QString> m_qmlToDbusName;
 
-    // Recorded signal connection parameters for exact disconnect.
-    // QtDBus disconnect requires exact-arg match with connect args.
-    QStringList m_connectedSignals;
-    QString m_connectedService;
-    QString m_connectedPath;
-    QString m_connectedIface;
+    DBusSubscription *m_signalSubscription = nullptr;
+    DBusSubscription *m_propertySubscription = nullptr;
 
     // #8: current-owner tracking behind the signal acceptance check
     // (GDBus gdbusproxy.c:1015 shape). Created together with the signal

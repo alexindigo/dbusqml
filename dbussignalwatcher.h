@@ -9,6 +9,8 @@
 
 #include "dbusconnection.h"
 
+class DBusSubscription;
+
 // Standalone signal watcher: subscribes to (service, path, iface, member) on
 // any bus with NO proxy and NO introspection requirement. Empty fields are
 // wildcards (empty member = every member of the interface; empty service =
@@ -77,18 +79,6 @@ private:
     QString m_iface;
     QString m_member;
     bool m_enabled = true;
-    bool m_connected = false;
     bool m_complete = false;
-    // Recorded identity of the live subscription (Class D): the exact
-    // connection + tuple passed to connect(). Disconnect ALWAYS uses this —
-    // QtDBus requires exact-arg match — never the re-resolved current
-    // fields (which may name a different tuple or, through a dead/null
-    // m_conn, an entirely different bus). The session-bus initializer is
-    // only a placeholder: it is overwritten at every successful connect
-    // and never used while m_connected is false.
-    QDBusConnection m_subConn = QDBusConnection::sessionBus();
-    QString m_subService;
-    QString m_subPath;
-    QString m_subIface;
-    QString m_subMember;
+    DBusSubscription *m_subscription = nullptr;
 };

@@ -1,4 +1,5 @@
 #include "dbusobjectmanager.h"
+#include "dbussubscription.h"
 #include "dbusutils.h"
 
 #include <QDBusConnection>
@@ -44,18 +45,12 @@ void DBusObjectManager::componentComplete() {
     setup();
 }
 
-// The ONE disconnect path (setters and the destructor): drops the recorded
-// subscription with the exact connection + tuple it was made with.
 void DBusObjectManager::unsubscribe() {
-    if (!m_subscribed)
-        return;
-    m_subConn.disconnect(
-        m_subService, m_subPath, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
-        QStringLiteral("InterfacesAdded"), this, SLOT(onInterfacesAdded(QDBusMessage)));
-    m_subConn.disconnect(
-        m_subService, m_subPath, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
-        QStringLiteral("InterfacesRemoved"), this, SLOT(onInterfacesRemoved(QDBusMessage)));
-    m_subscribed = false;
+    if (m_subscription) {
+        auto *subscription = m_subscription;
+        m_subscription = nullptr;
+        subscription->revoke();
+    }
 }
 
 void DBusObjectManager::setup() {
@@ -65,19 +60,17 @@ void DBusObjectManager::setup() {
     QDBusConnection conn =
         m_conn ? static_cast<QDBusConnection>(*m_conn) : QDBusConnection::sessionBus();
 
-    if (!m_subscribed) {
-        if (conn.connect(m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
-                         QStringLiteral("InterfacesAdded"), this,
-                         SLOT(onInterfacesAdded(QDBusMessage))) &&
-            conn.connect(m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
-                         QStringLiteral("InterfacesRemoved"), this,
-                         SLOT(onInterfacesRemoved(QDBusMessage)))) {
-            m_subConn = conn;
-            m_subService = m_service;
-            m_subPath = m_path;
-            m_subscribed = true;
-        }
-    }
+    if (!m_subscription)
+        m_subscription = DBusSubscription::create(
+            conn, m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
+            {QStringLiteral("InterfacesAdded"), QStringLiteral("InterfacesRemoved")},
+            [this](const QDBusMessage &msg) {
+                if (msg.member() == QLatin1String("InterfacesAdded"))
+                    onInterfacesAdded(msg);
+                else
+                    onInterfacesRemoved(msg);
+            },
+            this);
 
     fetchManagedObjects();
 }
