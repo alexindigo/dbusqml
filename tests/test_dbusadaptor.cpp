@@ -28,6 +28,7 @@
 #include <QTimer>
 #include <QDateTime>
 #include <QSemaphore>
+#include <QScopeGuard>
 
 #include <atomic>
 #include <memory>
@@ -454,6 +455,8 @@ private slots:
     // _members aliases onto private properties are refused like attach-time
     // ones.
     void testCatalogReadOnlySetRefused();
+    void testCatalogPropertyPolicy_data();
+    void testCatalogPropertyPolicy();
     void testMetaReadOnlySetRefused();
     void testOptionsFilteredForEverySpelling();
     void testRuntimeAliasPrivateRefused();
@@ -2966,6 +2969,148 @@ void TestDBusAdaptor::testCatalogReadOnlySetRefused() {
     qputenv("DBUSQML_TYPES_PATH", savedTypesPath);
     DBusCatalog::instance().reload();
     delete adaptor;
+}
+
+// Every served-property path uses the advertised identity and declared access,
+// including when the QML storage has an unrelated name (and a decoy catalog entry).
+void TestDBusAdaptor::testCatalogPropertyPolicy_data() {
+    QTest::addColumn<bool>("aliased");
+    QTest::addColumn<QString>("operation");
+    for (bool aliased : {false, true}) {
+        for (const char *operation :
+             {"xml", "set-read", "get-write", "get-all", "notify", "readwrite"}) {
+            const QByteArray row = QByteArray(aliased ? "aliased-" : "plain-") + operation;
+            QTest::newRow(row.constData()) << aliased << QString::fromLatin1(operation);
+        }
+    }
+}
+
+void TestDBusAdaptor::testCatalogPropertyPolicy() {
+    QFETCH(bool, aliased);
+    QFETCH(QString, operation);
+    QTemporaryDir userDir;
+    QVERIFY(userDir.isValid());
+    const QByteArray savedTypesPath = qgetenv("DBUSQML_TYPES_PATH");
+    const auto restoreCatalog = qScopeGuard([&] {
+        qputenv("DBUSQML_TYPES_PATH", savedTypesPath);
+        DBusCatalog::instance().reload();
+    });
+    qputenv("DBUSQML_TYPES_PATH", userDir.path().toLocal8Bit());
+    const QString readName = aliased ? QStringLiteral("PublicRead") : QStringLiteral("LocalRead");
+    const QString writeName = aliased ? QStringLiteral("SecretSink") : QStringLiteral("Sink");
+    const QString rwName = aliased ? QStringLiteral("PublicLevel") : QStringLiteral("Level");
+    QFile catalog(userDir.filePath(QStringLiteral("policy.xml")));
+    QVERIFY(catalog.open(QIODevice::WriteOnly));
+    catalog.write(QStringLiteral("<node><interface name='org.dbusqml.PropertyPolicy'>"
+                                 "<property name='%1' type='u' access='read'/>"
+                                 "<property name='%2' type='v' access='write'/>"
+                                 "<property name='%3' type='i' access='readwrite'/>%4"
+                                 "</interface></node>")
+                      .arg(readName, writeName, rwName,
+                           aliased ? QStringLiteral("<property name='LocalRead' type='s' "
+                                                    "access='readwrite'/>")
+                                   : QString())
+                      .toUtf8());
+    catalog.close();
+    DBusCatalog::instance().reload();
+
+    QByteArray qml = "import DBus 1.0\nDBusAdaptor {\n"
+                     "service: 'org.dbusqml.PropertyPolicy'\npath: '/PropertyPolicy'\n"
+                     "iface: 'org.dbusqml.PropertyPolicy'\n"
+                     "property int localRead: 10\nproperty var sink: 20\nproperty int level: 30\n";
+    if (aliased)
+        qml += "_members: ({PublicRead: 'localRead', SecretSink: 'sink', PublicLevel: 'level'})\n";
+    qml += "}\n";
+    std::unique_ptr<QObject> adaptor(createQmlAdaptor(qml));
+    QVERIFY(adaptor);
+    // Dedicated caller connection: exercise real bus dispatch, not Qt's local shortcut.
+    auto call = [&](const QString &method, const QVariantList &args) {
+        std::unique_ptr<QDBusPendingCallWatcher> watcher(asyncCallDeferred(
+            QStringLiteral("org.dbusqml.PropertyPolicy"), QStringLiteral("/PropertyPolicy"),
+            QStringLiteral("org.freedesktop.DBus.Properties"), method, args));
+        QSignalSpy finished(watcher.get(), &QDBusPendingCallWatcher::finished);
+        if (!finished.wait(5000))
+            return QDBusMessage::createError(QStringLiteral("org.dbusqml.Test.Timeout"),
+                                             QStringLiteral("property call timed out"));
+        return watcher->reply();
+    };
+    const QString iface = QStringLiteral("org.dbusqml.PropertyPolicy");
+    if (operation == QStringLiteral("xml")) {
+        const QString xml = static_cast<DBusAdaptor *>(adaptor.get())->introspect({});
+        QVERIFY2(
+            xml.contains(
+                QStringLiteral("<property name=\"%1\" type=\"u\" access=\"read\"/>").arg(readName)),
+            qPrintable(xml));
+        QVERIFY2(xml.contains(QStringLiteral("<property name=\"%1\" type=\"v\" access=\"write\"/>")
+                                  .arg(writeName)),
+                 qPrintable(xml));
+        QVERIFY2(
+            xml.contains(QStringLiteral("<property name=\"%1\" type=\"i\" access=\"readwrite\"/>")
+                             .arg(rwName)),
+            qPrintable(xml));
+    } else if (operation == QStringLiteral("set-read")) {
+        for (const QString &name :
+             {readName, QStringLiteral("localRead"), QStringLiteral("LocalRead")}) {
+            const QDBusMessage reply =
+                call(QStringLiteral("Set"), {iface, name, QVariant::fromValue(QDBusVariant(99))});
+            QCOMPARE(reply.errorName(),
+                     QStringLiteral("org.freedesktop.DBus.Error.PropertyReadOnly"));
+            QCOMPARE(adaptor->property("localRead").toInt(), 10);
+        }
+        const QDBusMessage reply = call(QStringLiteral("Get"), {iface, readName});
+        QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(unwrapDbus(reply.arguments().first()).toInt(), 10);
+    } else if (operation == QStringLiteral("get-write")) {
+        for (const QString &name : {writeName, QStringLiteral("sink"), QStringLiteral("Sink")}) {
+            const QDBusMessage reply = call(QStringLiteral("Get"), {iface, name});
+            QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+            QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+            QCOMPARE(reply.errorMessage(), QStringLiteral("Property %1 is not readable").arg(name));
+        }
+        const QDBusMessage reply =
+            call(QStringLiteral("Set"), {iface, writeName, QVariant::fromValue(QDBusVariant(99))});
+        QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(unwrapDbus(adaptor->property("sink")).toInt(), 99);
+    } else if (operation == QStringLiteral("get-all")) {
+        const QDBusMessage reply = call(QStringLiteral("GetAll"), {iface});
+        QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+        const QVariantMap props = unwrapDbus(reply.arguments().first()).toMap();
+        QCOMPARE(props.size(), 2);
+        QCOMPARE(props.value(readName).toInt(), 10);
+        QCOMPARE(props.value(rwName).toInt(), 30);
+        QVERIFY(!props.contains(writeName));
+    } else if (operation == QStringLiteral("notify")) {
+        SignalCatcher catcher;
+        auto bus = QDBusConnection::sessionBus();
+        QVERIFY(bus.connect(iface, QStringLiteral("/PropertyPolicy"),
+                            QStringLiteral("org.freedesktop.DBus.Properties"),
+                            QStringLiteral("PropertiesChanged"), &catcher,
+                            SLOT(onSignal(QDBusMessage))));
+        // Positive control proves the observer before checking write-only silence.
+        QVERIFY(adaptor->setProperty("level", 31));
+        QTRY_COMPARE_WITH_TIMEOUT(catcher.count, 1, 3000);
+        QCOMPARE(unwrapDbus(catcher.lastSignal.arguments().at(1)).toMap().value(rwName).toInt(),
+                 31);
+        QVERIFY(adaptor->setProperty("sink", 21));
+        // A non-marshalable write-only value must not leak even as an invalidation.
+        QVERIFY(adaptor->setProperty("sink", QVariant::fromValue<QObject *>(adaptor.get())));
+        QVERIFY(adaptor->setProperty("localRead", 11));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            unwrapDbus(catcher.lastSignal.arguments().at(1)).toMap().contains(readName), 3000);
+        QTest::qWait(100);
+        QCOMPARE(catcher.count, 2);
+        QCOMPARE(unwrapDbus(catcher.lastSignal.arguments().at(1)).toMap().value(readName).toInt(),
+                 11);
+        QVERIFY(unwrapDbus(catcher.lastSignal.arguments().at(2)).toStringList().isEmpty());
+    } else {
+        const QDBusMessage set =
+            call(QStringLiteral("Set"), {iface, rwName, QVariant::fromValue(QDBusVariant(99))});
+        QCOMPARE(set.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(adaptor->property("level").toInt(), 99);
+        const QDBusMessage get = call(QStringLiteral("Get"), {iface, rwName});
+        QCOMPARE(get.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(unwrapDbus(get.arguments().first()).toInt(), 99);
+    }
 }
 
 // Effective access falls back to the metaobject: a read-only (CONSTANT)

@@ -517,15 +517,25 @@ property name and its wire-cased form (`Get("iface", "Version")` finds
 `InvalidArgs` with the property unchanged.
 
 **Property access enforcement:** the access the introspection XML advertises
-is the access the bus enforces — one resolution drives both. A `Set` on a
-property whose effective access is `read` (declared by the interface's
+is the access the bus enforces — one resolved property identity drives XML,
+`Get`, `GetAll`, `Set` and change notifications. Catalog type and access are
+matched by the advertised wire name, including explicit `_members` aliases.
+A `Set` on a property whose effective access is `read` (declared by the interface's
 catalog XML, or a read-only `CONSTANT` QML/C++ property) is refused with
 `org.freedesktop.DBus.Error.PropertyReadOnly` and the value is left
 unchanged.
 
+A catalog property with `access="write"` accepts `Set`, but `Get` refuses it
+with `org.freedesktop.DBus.Error.InvalidArgs` and `Property <name> is not readable`.
+`GetAll` omits write-only properties. Catalog `readwrite` properties retain
+both directions; without a catalog access declaration, QML/C++ writability
+determines `read` or `readwrite`.
+
 **Property change notifications:** property changes emit the standard
 `org.freedesktop.DBus.Properties.PropertiesChanged` signal (with the
 advertised name; unmarshalable values report via `invalidated_properties`).
+Write-only properties are omitted entirely: their changes emit neither a
+changed value nor an invalidated name.
 Property notify signals are never broadcast as `fooChanged` bus signals.
 
 **Built-in names:** `service`, `path`, `iface`, and `connection` cannot be

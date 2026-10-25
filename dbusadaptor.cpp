@@ -21,6 +21,7 @@
 #include <QRegularExpression>
 #include <QTimer>
 #include <qqmlinfo.h>
+#include <algorithm>
 
 // Map a D-Bus PascalCase member name to the QML camelCase convention.
 // Same rule as the proxy's dbusPropToQml: fold only the first character.
@@ -821,34 +822,19 @@ void DBusAdaptor::componentComplete() {
     // they drive org.freedesktop.DBus.Properties.PropertiesChanged instead.
     QSet<int> notifyIndexes;
     QList<QPair<int, QMetaMethod>> notifies; // property index → notify signal
-    // A4: notify indexes are recorded for EVERY property — the signal loop
-    // below must know which signals are property notifies so they never get
-    // raw signal relays. Privacy/library exclusions apply at the Properties
-    // -Changed RELAY ATTACH (notifies), not before recording.
-    for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
-        QMetaProperty prop = meta->property(i);
-        if (!prop.hasNotifySignal())
-            continue;
-        const QMetaMethod ns = prop.notifySignal();
-        notifyIndexes.insert(ns.methodIndex());
-        const QString pname = QString::fromLatin1(prop.name());
-        if (isPrivateProperty(pname))
-            continue;
-        // A15: a QObject*-derived property is never advertised (no wire
-        // representation) — its relay must not attach either (no
-        // PropertiesChanged noise for a value GetAll can never serve).
-        if (prop.metaType().flags().testFlag(QMetaType::PointerToQObject))
-            continue;
-        if (pname == QStringLiteral("objectName") || pname == QStringLiteral("service") ||
-            pname == QStringLiteral("path") || pname == QStringLiteral("iface") ||
-            pname == QStringLiteral("connection"))
-            continue;
-        // P10a: library config maps never get PropertiesChanged relays
-        // (they are not served properties — same exclusion as Get/GetAll).
-        if (pname == QStringLiteral("_options") || pname == QStringLiteral("_signatures") ||
-            pname == QStringLiteral("_signals") || pname == QStringLiteral("_members"))
-            continue;
-        notifies.append({i, ns});
+    // Record EVERY notify, including excluded/write-only properties: none may
+    // escape as a raw bus signal. Relay eligibility comes only from the shared
+    // served-property enumeration. Access is checked again at emission so a
+    // catalog reload or runtime alias change cannot expose a write-only value.
+    for (int i = 0; i < meta->propertyCount(); ++i) {
+        const QMetaProperty prop = meta->property(i);
+        if (prop.hasNotifySignal())
+            notifyIndexes.insert(prop.notifySignalIndex());
+    }
+    for (const auto &served : servedProperties()) {
+        const QMetaProperty prop = meta->property(served.metaIndex);
+        if (served.hasWireType && prop.hasNotifySignal())
+            notifies.append({served.metaIndex, prop.notifySignal()});
     }
 
     for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
@@ -890,11 +876,13 @@ void DBusAdaptor::componentComplete() {
 }
 
 void DBusAdaptor::emitPropertiesChanged(int propIndex) {
-    const QMetaObject *meta = metaObject();
-    if (propIndex < 0 || propIndex >= meta->propertyCount())
+    const auto properties = servedProperties();
+    const auto it = std::find_if(properties.cbegin(), properties.cend(),
+                                 [propIndex](const auto &p) { return p.metaIndex == propIndex; });
+    if (it == properties.cend() || !it->isReadable())
         return;
-    QMetaProperty prop = meta->property(propIndex);
-    const QString qmlName = QString::fromLatin1(prop.name());
+    const ServedProperty &served = *it;
+    const QMetaProperty prop = metaObject()->property(served.metaIndex);
 
     QVariant val = prop.read(this);
     if (val.userType() == qMetaTypeId<QJSValue>())
@@ -905,15 +893,15 @@ void DBusAdaptor::emitPropertiesChanged(int propIndex) {
         QDBusMessage::createSignal(m_path, QStringLiteral("org.freedesktop.DBus.Properties"),
                                    QStringLiteral("PropertiesChanged"));
     if (wireMarshalable(val)) {
-        msg.setArguments({m_iface, QVariantMap{{advertisedName(qmlName), val}}, QStringList()});
+        msg.setArguments({m_iface, QVariantMap{{served.wireName, val}}, QStringList()});
     } else {
         // A value with no wire representation goes into invalidated_properties
         // instead of the changed dict (0.5.2 guard precedent — GetAll skips it
         // for the same reason).
         qWarning("dbusqml: property %s on %s is not marshalable (type %s) — reporting as "
                  "invalidated",
-                 qPrintable(qmlName), qPrintable(m_iface), QMetaType(val.userType()).name());
-        msg.setArguments({m_iface, QVariantMap(), QStringList{advertisedName(qmlName)}});
+                 qPrintable(served.qmlName), qPrintable(m_iface), QMetaType(val.userType()).name());
+        msg.setArguments({m_iface, QVariantMap(), QStringList{served.wireName}});
     }
     // Broadcasts go out on the ATTACH connection (recorded by value at
     // componentComplete): the null-able m_conn wrapper may already be
@@ -1093,24 +1081,56 @@ static QString metaTypeToDbusSignature(int typeId) {
     }
 }
 
-// The property's effective access — ONE resolution shared by generateXml
-// (advertise) and Properties.Set (enforce), so the wire contract and the
-// write path can never diverge: the catalog's declared access wins (A9);
-// undeclared falls back to metaobject writability. prop is the RESOLVED
-// meta-property.
-QString DBusAdaptor::effectiveAccess(const QMetaProperty &prop) const {
-    QString access = prop.isWritable() ? QStringLiteral("readwrite") : QStringLiteral("read");
-    if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
-        const QString name = QString::fromLatin1(prop.name());
-        for (const auto &p : spec->properties) {
-            if (p.name == name || dbusMemberToQml(p.name) == name) {
-                if (!p.access.isEmpty())
-                    access = p.access;
-                break;
+QList<DBusAdaptor::ServedProperty> DBusAdaptor::servedProperties() const {
+    QList<ServedProperty> properties;
+    const QMetaObject *meta = metaObject();
+    const auto catalog = DBusCatalog::instance().lookup(m_iface);
+    // Offset discipline excludes inherited members. The base-name check also
+    // excludes objectName and library configuration if redeclared by a subclass.
+    const int first = qMax(meta->propertyOffset(), DBusAdaptor::staticMetaObject.propertyCount());
+    for (int i = first; i < meta->propertyCount(); ++i) {
+        const QMetaProperty prop = meta->property(i);
+        const QString qmlName = QString::fromLatin1(prop.name());
+        if (isPrivateProperty(qmlName) ||
+            DBusAdaptor::staticMetaObject.indexOfProperty(prop.name()) >= 0)
+            continue;
+        ServedProperty served{i,
+                              qmlName,
+                              advertisedName(qmlName),
+                              std::nullopt,
+                              prop.isWritable() ? QStringLiteral("readwrite")
+                                                : QStringLiteral("read"),
+                              !prop.metaType().flags().testFlag(QMetaType::PointerToQObject)};
+        if (catalog) {
+            for (const auto &p : catalog->properties) {
+                // The advertised identity owns both type and policy. The naming
+                // ladder already resolves unaliased catalog folds; a QML-name
+                // fallback here would apply another property's policy to aliases.
+                if (p.name == served.wireName) {
+                    served.spec = p;
+                    if (!p.access.isEmpty())
+                        served.access = p.access;
+                    break;
+                }
             }
         }
+        properties.append(std::move(served));
     }
-    return access;
+    return properties;
+}
+
+std::optional<DBusAdaptor::ServedProperty>
+DBusAdaptor::resolveServedProperty(const QString &wireName) const {
+    const QStringList candidates = candidateQmlNames(wireName);
+    for (const auto &served : servedProperties()) {
+        // Preserve exact/alias and both documented folds on incoming lookup.
+        // All policy below is attached to this resolved identity, never to the
+        // spelling used by the caller.
+        if (candidates.contains(served.qmlName) ||
+            dbusFoldName(served.qmlName, true) == dbusFoldName(wireName, true))
+            return served;
+    }
+    return std::nullopt;
 }
 
 QString DBusAdaptor::generateXml() const {
@@ -1206,38 +1226,21 @@ QString DBusAdaptor::generateXml() const {
         addSignal(advertisedName(name), types, names);
     }
 
-    // Properties — wire-cased names via the ladder. Offset-based: the
-    // library's own base-class properties (service/path/iface/connection,
-    // objectName) sit below propertyOffset and can never appear here by
-    // construction — no name filter needed.
-    for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
-        QMetaProperty prop = meta->property(i);
-        QString name = QString::fromLatin1(prop.name());
-        if (isPrivateProperty(name))
-            continue;
+    for (const auto &served : servedProperties()) {
+        const QMetaProperty prop = meta->property(served.metaIndex);
         // A QObject*-derived property has no D-Bus representation — advertising
         // it (the signature fallback would promise "v") offers a value GetAll
         // can never serve. var (QVariant-typed) properties stay advertised "v".
-        if (prop.metaType().flags().testFlag(QMetaType::PointerToQObject))
+        if (!served.hasWireType)
             continue;
 
         QString dbusType = metaTypeToDbusSignature(static_cast<int>(prop.typeId()));
         // A9: the catalog's declared type wins over the metaobject
         // inference (a declared `u` must not serve as metaobject `i`/`v`).
-        if (auto spec = DBusCatalog::instance().lookup(m_iface)) {
-            for (const auto &p : spec->properties) {
-                if (p.name == name || dbusMemberToQml(p.name) == name) {
-                    if (!p.type.isEmpty())
-                        dbusType = p.type;
-                    break;
-                }
-            }
-        }
-        // A9 access: the SAME resolution Set enforces — the advertised
-        // contract is the enforced contract.
-        const QString access = effectiveAccess(prop);
+        if (served.spec && !served.spec->type.isEmpty())
+            dbusType = served.spec->type;
         xml += QStringLiteral("    <property name=\"%1\" type=\"%2\" access=\"%3\"/>\n")
-                   .arg(advertisedName(name), dbusType, access);
+                   .arg(served.wireName, dbusType, served.access);
     }
 
     // Methods — iterate over Q_INVOKABLE/Q_SLOTS methods. Offset-based: the
@@ -1512,28 +1515,16 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
 
         if (member == QStringLiteral("Get") && args.size() >= 2) {
             QString propName = args[1].toString();
-            // One resolution, then policy on the RESOLVED identity — never
-            // on the caller's spelling: privacy is decided for the
-            // meta-property the wire name resolves to, so an alias (or a
-            // fold) cannot launder a private property into a served one.
-            // A2: dual lookup — exact QML name, then the folded wire name
-            // (Get("iface", "Version") must find `property int version`),
-            // mirroring the method dispatch's exact→folded order.
-            const QStringList propCandidates = candidateQmlNames(propName);
-            for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
-                QMetaProperty prop = meta->property(i);
-                const QString name = QString::fromLatin1(prop.name());
-                // A14/D5: both folds accepted on lookup — a client-folded
-                // ("xmlConfig") and server-folded ("xMLConfig") wire name
-                // both resolve to the QML property XMLConfig.
-                if (!propCandidates.contains(name) &&
-                    dbusFoldName(name, true) != dbusFoldName(propName, true))
-                    continue;
-                // Resolved-name privacy: a private target refuses exactly
-                // like an unknown name (never leak existence). This also
-                // covers the library config maps (_options & co.).
-                if (isPrivateProperty(name))
-                    break;
+            if (const auto served = resolveServedProperty(propName)) {
+                if (!served->isReadable()) {
+                    // GLib gio/gdbusconnection.c likewise refuses Get without
+                    // READABLE with InvalidArgs: "Property “%s” is not readable".
+                    sendReply(msg.createErrorReply(
+                        QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
+                        QStringLiteral("Property %1 is not readable").arg(propName)));
+                    return true;
+                }
+                const QMetaProperty prop = meta->property(served->metaIndex);
                 QVariant val = prop.read(this);
                 if (val.userType() == qMetaTypeId<QJSValue>())
                     val = qjsValueToVariant(val.value<QJSValue>());
@@ -1564,29 +1555,16 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         }
         if (member == QStringLiteral("GetAll") && args.size() >= 1) {
             QVariantMap props;
-            for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
-                QMetaProperty prop = meta->property(i);
-                QString name = QString::fromLatin1(prop.name());
-                if (isPrivateProperty(name))
+            for (const auto &served : servedProperties()) {
+                if (!served.isReadable())
                     continue;
-                // The service/path/iface/connection built-ins are FINAL and
-                // cannot be shadowed, so no name filter is needed for them;
-                // QObject's objectName still needs the manual exclusion.
-                if (name == QStringLiteral("objectName"))
-                    continue;
+                const QMetaProperty prop = meta->property(served.metaIndex);
                 QVariant val = prop.read(this);
                 if (val.userType() == qMetaTypeId<QJSValue>())
                     val = qjsValueToVariant(val.value<QJSValue>());
                 // V-providing slot: each a{sv} map value carries its own "v",
                 // so gadget values contribute their payload (single wrap).
                 val = toDbusVariantNested(val);
-                // P10a: _options/_signatures/_signals/_members are
-                // library config, not served properties (offset
-                // discipline already protects the XML; GetAll joins it
-                // so busctl never sees a bogus "Options" property).
-                if (name == QStringLiteral("_options") || name == QStringLiteral("_signatures") ||
-                    name == QStringLiteral("_signals") || name == QStringLiteral("_members"))
-                    continue;
                 if (!wireMarshalable(val)) {
                     // GetAll cannot represent a per-property error — skip.
                     // Skipping also keeps introspection (busctl populates its
@@ -1596,7 +1574,7 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
                              qPrintable(m_iface), QMetaType(val.userType()).name());
                     continue;
                 }
-                props.insert(advertisedName(name), val);
+                props.insert(served.wireName, val);
             }
             // One send boundary, uniform with the other adaptor exits —
             // provably vacuous today (fixed "a{sv}" signature, every value
@@ -1616,22 +1594,9 @@ bool DBusAdaptor::handleMessage(const QDBusMessage &msg, const QDBusConnection &
         if (member == QStringLiteral("Set") && args.size() >= 3) {
             QString propName = args[1].toString();
             QVariant value = args[2];
-            // One resolution, then policy on the RESOLVED identity (same
-            // rule as Get): privacy first (a private target refuses like an
-            // unknown name), then the ADVERTISED access — the XML and the
-            // write path share effectiveAccess, so the contract cannot lie.
-            // A2: same dual lookup as Get — exact QML name, then folded wire name.
-            // A14/D5: both folds accepted on lookup (client vs server fold).
-            const QStringList propCandidates = candidateQmlNames(propName);
-            for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
-                QMetaProperty prop = meta->property(i);
-                const QString name = QString::fromLatin1(prop.name());
-                if (!propCandidates.contains(name) &&
-                    dbusFoldName(name, true) != dbusFoldName(propName, true))
-                    continue;
-                if (isPrivateProperty(name))
-                    break;
-                if (effectiveAccess(prop) == QStringLiteral("read")) {
+            if (const auto served = resolveServedProperty(propName)) {
+                const QMetaProperty prop = meta->property(served->metaIndex);
+                if (served->access == QStringLiteral("read")) {
                     // The advertised access is enforced: Set of a read
                     // property is refused, value unchanged.
                     sendReply(msg.createErrorReply(

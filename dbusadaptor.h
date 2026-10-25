@@ -11,6 +11,7 @@
 #include <qqmlregistration.h>
 
 #include "dbusconnection.h"
+#include "dbuscatalog.h"
 #include "dbusheldreply.h"
 
 class DBusAdaptor : public QDBusVirtualObject, public QQmlParserStatus {
@@ -200,11 +201,19 @@ private:
     QVariantMap filterOptions(const QVariantMap &whitelist, const QVariantMap &options,
                               QString *error) const;
 
-    // The property's effective access — ONE resolution shared by generateXml
-    // (advertise) and Properties.Set (enforce): the catalog's declared
-    // access wins (A9); undeclared falls back to metaobject writability.
-    // prop is the RESOLVED meta-property.
-    QString effectiveAccess(const QMetaProperty &prop) const;
+    // One identity/policy snapshot for every served-property consumer. Own the
+    // catalog entry: lookup() returns a copy, and reloads may replace the catalog.
+    struct ServedProperty {
+        int metaIndex;
+        QString qmlName;
+        QString wireName;
+        std::optional<DBusCatalog::PropertySpec> spec;
+        QString access;
+        bool hasWireType;
+        bool isReadable() const { return access != QStringLiteral("write"); }
+    };
+    QList<ServedProperty> servedProperties() const;
+    std::optional<ServedProperty> resolveServedProperty(const QString &wireName) const;
     // The naming ladder (explicit _members → catalog → first-char-upper fold):
     // the wire name advertised for a QML member name (methods and properties).
     QString advertisedName(const QString &qmlName) const;
