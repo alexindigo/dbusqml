@@ -11,6 +11,8 @@
 #include <QThread>
 #include <QDBusUnixFileDescriptor>
 #include <QProcess>
+#include <QSocketNotifier>
+#include <QTemporaryDir>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/resource.h>
@@ -29,6 +31,7 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <array>
 
 #include "../dbusconnection.h"
 #include "../dbussignatureslots.h"
@@ -541,16 +544,79 @@ public:
 // the requested signature; the caller receives it READ-mode.
 static QProcess *s_payloadEcho = nullptr;
 
+// All persistent wire peers obey the same fixture lifetime contract. Exercise
+// them on the suite's bus, independent of the shared payload echo instance.
+static QString lifetimeService(const QString &helper) {
+    return helper == QLatin1String("oracle") ? QStringLiteral("org.dbusqml.Oracle")
+                                             : QStringLiteral("org.dbusqml.Lifetime.") + helper;
+}
+
+static void startLifetimeHelper(QProcess &process, const QString &helper, const QString &owner,
+                                const QString &replyFile) {
+    QStringList args;
+    if (helper == QLatin1String("fd_helper_service"))
+        args << replyFile;
+    if (helper != QLatin1String("oracle"))
+        args << lifetimeService(helper);
+    args << owner;
+    process.start(QCoreApplication::applicationDirPath() + QLatin1Char('/') + helper, args);
+}
+
+static QString lifetimeCallError(const QString &helper, const QString &sendFile) {
+    const bool payload = helper == QLatin1String("payload_echo_service");
+    const bool fd = helper == QLatin1String("fd_helper_service");
+    const QString service = lifetimeService(helper);
+    QDBusMessage call =
+        QDBusMessage::createMethodCall(service,
+                                       payload ? QStringLiteral("/PayloadEcho")
+                                       : fd    ? QStringLiteral("/FdXfer")
+                                               : QStringLiteral("/Oracle"),
+                                       payload ? QStringLiteral("org.dbusqml.PayloadEcho")
+                                       : fd    ? service
+                                               : QStringLiteral("org.dbusqml.Oracle"),
+                                       payload ? QStringLiteral("Echo")
+                                       : fd    ? QStringLiteral("WriteThrough")
+                                               : QStringLiteral("Ping"));
+    QFile file(sendFile);
+    if (payload) {
+        call.setArguments({QStringLiteral("s"),
+                           QVariant::fromValue(QVariantList{
+                               QVariant::fromValue(QDBusVariant(QStringLiteral("owner-alive")))})});
+    } else if (fd) {
+        if (!file.open(QIODevice::ReadWrite | QIODevice::Truncate))
+            return file.errorString();
+        call.setArguments({QVariant::fromValue(QDBusUnixFileDescriptor(file.handle()))});
+    }
+    const QDBusMessage reply = QDBusConnection::sessionBus().call(call, QDBus::Block, 3000);
+    if (reply.type() != QDBusMessage::ReplyMessage)
+        return helper + QLatin1Char(' ') + reply.errorName() + QLatin1Char(' ') +
+               reply.errorMessage();
+    if (reply.arguments().size() != 1)
+        return helper + QStringLiteral(" missing reply argument");
+    if (!fd) {
+        const QString expected = payload ? QStringLiteral("owner-alive") : QStringLiteral("pong");
+        return reply.arguments().first().toString() == expected
+                   ? QString()
+                   : helper + QStringLiteral(" wrong reply value");
+    }
+    const auto received = reply.arguments().first().value<QDBusUnixFileDescriptor>();
+    char bytes[64] = {};
+    if (!received.isValid() || ::lseek(received.fileDescriptor(), 0, SEEK_SET) < 0 ||
+        ::read(received.fileDescriptor(), bytes, sizeof(bytes)) != 17 ||
+        QByteArray(bytes, 17) != QByteArrayLiteral("fd-xfer-reply-ok\n"))
+        return helper + QStringLiteral(" wrong reply fd bytes");
+    file.seek(0);
+    return file.readAll() == QByteArrayLiteral("fd-xfer-send-ok\n")
+               ? QString()
+               : helper + QStringLiteral(" wrong sent fd bytes");
+}
+
 static bool startPayloadEcho() {
     const QString helperBin =
         QCoreApplication::applicationDirPath() + QStringLiteral("/payload_echo_service");
     s_payloadEcho = new QProcess();
-    s_payloadEcho->setProgram(QStringLiteral("/bin/sh"));
-    QStringList shArgs;
-    shArgs << QStringLiteral("-c")
-           << QStringLiteral("exec '%1' org.dbusqml.PayloadEcho").arg(helperBin);
-    s_payloadEcho->setArguments(shArgs);
-    s_payloadEcho->start();
+    s_payloadEcho->start(helperBin, {QStringLiteral("org.dbusqml.PayloadEcho"),
+                                     QDBusConnection::sessionBus().baseService()});
     if (!s_payloadEcho->waitForStarted(5000))
         return false;
     // QTRY_* macros carry a bare return — illegal in a bool function; a
@@ -1015,11 +1081,115 @@ private slots:
     void cleanupTestCase() {
         if (s_payloadEcho) {
             s_payloadEcho->terminate();
-            s_payloadEcho->waitForFinished(3000);
+            if (s_payloadEcho->state() != QProcess::NotRunning &&
+                !s_payloadEcho->waitForFinished(3000)) {
+                s_payloadEcho->kill();
+                s_payloadEcho->waitForFinished(3000);
+            }
             delete s_payloadEcho;
             s_payloadEcho = nullptr;
         }
         stopPrivateBus();
+    }
+
+    void testHelperOwnerLifetime_data() {
+        QTest::addColumn<QString>("helper");
+        QTest::addColumn<QString>("ending");
+        for (const char *helper : {"payload_echo_service", "fd_helper_service", "oracle"}) {
+            for (const char *ending : {"already-gone", "normal-exit", "killed"})
+                QTest::newRow(qPrintable(QString::fromLatin1(helper) + QLatin1Char('-') +
+                                         QString::fromLatin1(ending)))
+                    << QString::fromLatin1(helper) << QString::fromLatin1(ending);
+        }
+    }
+
+    void testHelperOwnerLifetime() {
+        QFETCH(QString, helper);
+        QFETCH(QString, ending);
+        if (helper == QLatin1String("oracle") &&
+            !QFile::exists(QCoreApplication::applicationDirPath() + QStringLiteral("/oracle")))
+            QSKIP("optional libdbus oracle not built");
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QProcess owner;
+        owner.start(QCoreApplication::applicationFilePath(), {QStringLiteral("--helper-owner")});
+        QVERIFY(owner.waitForStarted(5000));
+        QVERIFY(owner.waitForReadyRead(5000));
+        const QString ownerName = QString::fromUtf8(owner.readLine().trimmed());
+        QVERIFY2(ownerName.startsWith(QLatin1Char(':')), qPrintable(ownerName));
+        QVERIFY(QDBusConnection::sessionBus().interface()->isServiceRegistered(ownerName));
+        if (ending == QLatin1String("already-gone")) {
+            owner.closeWriteChannel(); // EOF makes this owner exit normally.
+            QVERIFY(owner.waitForFinished(5000));
+            QTRY_VERIFY_WITH_TIMEOUT(
+                !QDBusConnection::sessionBus().interface()->isServiceRegistered(ownerName), 5000);
+        }
+
+        QProcess process;
+        startLifetimeHelper(process, helper, ownerName, dir.filePath(QStringLiteral("reply")));
+        QVERIFY(process.waitForStarted(5000));
+        if (ending != QLatin1String("already-gone")) {
+            QTRY_VERIFY_WITH_TIMEOUT(QDBusConnection::sessionBus().interface()->isServiceRegistered(
+                                         lifetimeService(helper)),
+                                     5000);
+            QCOMPARE(lifetimeCallError(helper, dir.filePath(QStringLiteral("send"))), QString());
+            if (ending == QLatin1String("killed"))
+                owner.kill();
+            else
+                owner.closeWriteChannel();
+            QVERIFY(owner.waitForFinished(5000));
+            QTRY_VERIFY_WITH_TIMEOUT(
+                !QDBusConnection::sessionBus().interface()->isServiceRegistered(ownerName), 5000);
+        }
+        QVERIFY2(process.state() == QProcess::NotRunning || process.waitForFinished(5000),
+                 "helper outlived its owner's unique name");
+        QCOMPARE(process.exitStatus(), QProcess::NormalExit);
+        QCOMPARE(process.exitCode(), 0);
+    }
+
+    void testHelpersOutliveSixtySeconds() {
+        // Run the peers concurrently: one 65-second wait, including in the
+        // default suite. There is no existing slow-test opt-out mechanism.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QStringList helpers = {QStringLiteral("payload_echo_service"),
+                                     QStringLiteral("fd_helper_service"), QStringLiteral("oracle")};
+        std::array<QProcess, 3> processes;
+        for (int i = 0; i < helpers.size(); ++i) {
+            if (helpers[i] == QLatin1String("oracle") &&
+                !QFile::exists(QCoreApplication::applicationDirPath() + QStringLiteral("/oracle")))
+                continue;
+            startLifetimeHelper(processes[i], helpers[i],
+                                QDBusConnection::sessionBus().baseService(),
+                                dir.filePath(QStringLiteral("reply")));
+            QVERIFY(processes[i].waitForStarted(5000));
+            QTRY_VERIFY_WITH_TIMEOUT(QDBusConnection::sessionBus().interface()->isServiceRegistered(
+                                         lifetimeService(helpers[i])),
+                                     5000);
+            QCOMPARE(lifetimeCallError(helpers[i], dir.filePath(QStringLiteral("send"))),
+                     QString());
+        }
+        QTest::qWait(65000);
+        QStringList errors;
+        for (int i = 0; i < helpers.size(); ++i) {
+            if (processes[i].program().isEmpty())
+                continue;
+            const QString error =
+                lifetimeCallError(helpers[i], dir.filePath(QStringLiteral("send")));
+            qInfo().noquote() << "call after 65 seconds:" << helpers[i]
+                              << (error.isEmpty() ? QStringLiteral("OK") : error);
+            if (!error.isEmpty())
+                errors << error;
+            // Explicit teardown also on baseline failure, without a destructor kill.
+            if (processes[i].state() != QProcess::NotRunning) {
+                processes[i].terminate();
+                if (!processes[i].waitForFinished(3000)) {
+                    processes[i].kill();
+                    QVERIFY(processes[i].waitForFinished(3000));
+                }
+            }
+        }
+        QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
     }
 
     void testDecodeDepth_data() {
@@ -5768,6 +5938,18 @@ private slots:
 
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
+
+    // Tiny independent owner for fixture lifetime tests. Closing the parent's
+    // pipe (including parent death) ends it; it never starts a private daemon.
+    if (app.arguments().contains(QStringLiteral("--helper-owner"))) {
+        const QDBusConnection bus = QDBusConnection::sessionBus();
+        if (!bus.isConnected())
+            return 2;
+        std::cout << bus.baseService().toStdString() << std::endl;
+        QSocketNotifier input(STDIN_FILENO, QSocketNotifier::Read);
+        QObject::connect(&input, &QSocketNotifier::activated, &app, &QCoreApplication::quit);
+        return QCoreApplication::exec();
+    }
 
     // QList<QVariantMap> must be a registered D-Bus metatype for the
     // aa{sv} service method to marshal.

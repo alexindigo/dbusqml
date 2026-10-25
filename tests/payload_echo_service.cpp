@@ -6,8 +6,9 @@
 #include <QCoreApplication>
 #include <QDBusArgument>
 #include <QDBusConnection>
+#include <QDBusConnectionInterface>
+#include <QDBusServiceWatcher>
 #include <QDBusVirtualObject>
-#include <QTimer>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -68,19 +69,30 @@ int main(int argc, char *argv[]) {
     registerDeepPayload<1, 32>();
     registerDeepPayload<32, 32>();
     registerDeepPayload<32, 31>();
-    if (argc < 2)
+    if (argc < 3)
         return 2;
     const QString service = argv[1];
+    const QString owner = argv[2];
 
-    auto *echo = new PayloadEchoObject();
     QDBusConnection bus = QDBusConnection::sessionBus();
-    if (!bus.registerVirtualObject(QStringLiteral("/PayloadEcho"), echo))
+    if (!bus.isConnected() || !owner.startsWith(QLatin1Char(':')))
+        return 2;
+    // Subscribe before checking: the owner may vanish during startup.
+    QDBusServiceWatcher ownerWatch(owner, bus, QDBusServiceWatcher::WatchForUnregistration);
+    QObject::connect(&ownerWatch, &QDBusServiceWatcher::serviceUnregistered, &app,
+                     &QCoreApplication::quit);
+    const QDBusReply<bool> alive = bus.interface()->isServiceRegistered(owner);
+    if (!alive.isValid())
+        return 2;
+    if (!alive.value())
+        return 0;
+
+    PayloadEchoObject echo;
+    if (!bus.registerVirtualObject(QStringLiteral("/PayloadEcho"), &echo))
         return 2;
     if (!bus.registerService(service))
         return 2;
 
-    // Safety: never outlive the test.
-    QTimer::singleShot(60000, &app, &QCoreApplication::quit);
     return QCoreApplication::exec();
 }
 #include "payload_echo_service.moc"
