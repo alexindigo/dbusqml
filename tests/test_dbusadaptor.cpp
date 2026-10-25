@@ -28,6 +28,7 @@
 #include <QTimer>
 #include <QDateTime>
 #include <QSemaphore>
+#include <QScopeGuard>
 
 #include <atomic>
 #include <memory>
@@ -38,6 +39,7 @@
 #include "dbusheldreply.h"
 #include "dbusmessage.h"
 #include "dbusservicewatcher.h"
+#include "dbussignalwatcher.h"
 #include "dbusobjectmanager.h"
 #include "dbustypes.h"
 #include <QFile>
@@ -324,6 +326,78 @@ static DBusConnection *trackedConnectToBus(const QString &addr) {
         recordConnectionName(QDBusConnection(*dc).name());
     return dc;
 }
+
+// P2: a genuinely different bus from sessionBus(), with disk-backed sockets.
+struct ConnectionIdentityBus {
+    QProcess daemon;
+    QString address;
+    std::unique_ptr<DBusConnection> wrapper;
+
+    bool start() {
+        daemon.setProcessChannelMode(QProcess::ForwardedErrorChannel);
+        daemon.start(QFINDTESTDATA("dbus-daemon-with-tmpdir.py"),
+                     {"--session", "--print-address", "--nofork"});
+        if (!daemon.waitForStarted(3000) || !daemon.waitForReadyRead(3000))
+            return false;
+        address = QString::fromLocal8Bit(daemon.readLine().trimmed());
+        wrapper.reset(trackedConnectToBus(address));
+        return wrapper != nullptr;
+    }
+
+    ~ConnectionIdentityBus() {
+        wrapper.reset();
+        daemon.terminate();
+        daemon.waitForFinished(3000);
+    }
+};
+
+// Method-call matches need a monitor, rather than an ordinary signal receiver.
+// Observe a deliberate canary first so an empty capture is meaningful.
+class ConnectionIdentityMonitor {
+public:
+    QProcess process;
+    QByteArray capture;
+
+    bool start(const QString &path, const QString &iface, const QString &argument = {}) {
+        process.setProcessChannelMode(QProcess::ForwardedErrorChannel);
+        QString match =
+            QStringLiteral("type='method_call',path='%1',interface='%2'").arg(path, iface);
+        if (!argument.isEmpty())
+            match += QStringLiteral(",arg0='%1'").arg(argument);
+        process.start(QStringLiteral("dbus-monitor"), {QStringLiteral("--session"), match});
+        if (!process.waitForStarted(3000) || !process.waitForReadyRead(3000))
+            return false;
+        process.readAllStandardOutput();
+        auto canary = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.DBus"), path,
+                                                     iface, QStringLiteral("MonitorCanary"));
+        if (!argument.isEmpty())
+            canary.setArguments({argument});
+        QDBusConnection::sessionBus().call(canary, QDBus::Block, 3000);
+        QElapsedTimer timer;
+        timer.start();
+        QByteArray seen;
+        while (!seen.contains("member=MonitorCanary") && timer.elapsed() < 3000) {
+            process.waitForReadyRead(100);
+            seen += process.readAllStandardOutput();
+        }
+        return seen.contains("member=MonitorCanary");
+    }
+
+    QByteArray finish() {
+        QTest::qWait(300);
+        process.terminate();
+        process.waitForFinished(3000);
+        capture += process.readAllStandardOutput();
+        return capture;
+    }
+
+    ~ConnectionIdentityMonitor() {
+        if (process.state() != QProcess::NotRunning) {
+            process.terminate();
+            process.waitForFinished(3000);
+        }
+    }
+};
 
 // ==================== Signal Catcher ====================
 
@@ -628,22 +702,29 @@ private slots:
     void testSignalWatcherDelivers();
     void testSignalWatcherWildcardMember();
     void testServiceWatcherAppearDisappear();
+    void testServiceWatcherReconfigureOnRecordedConnection();
 
     // Recorded subscription identity (Class D): reconfiguration and
     // teardown act on the connection + tuple recorded at connect time.
     void testSignalWatcherServiceChangeDropsOld();
     void testSignalWatcherConnectionChangeDropsOld();
     void testSignalWatcherCustomConnectionDestroyed();
+    void testSignalWatcherReconfigureOnRecordedConnection_data();
+    void testSignalWatcherReconfigureOnRecordedConnection();
 
     // 0.9.0 ObjectManager client (B6).
     void testObjectManagerClient();
 
     // Class D: ObjectManager reconfiguration resubscribes + refetches.
     void testObjectManagerPathChange();
+    void testObjectManagerRefetchOnRecordedConnection_data();
+    void testObjectManagerRefetchOnRecordedConnection();
 
     // Class D: adaptor broadcasts on the attach connection and replies on
     // the delivery connection — never the session-bus fallback.
     void testAdaptorBroadcastOnAttachConnection();
+    void testAdaptorAutoSignalOnAttachConnection();
+    void testProxyDynamicCallOnRecordedConnection();
     void testAdaptorRepliesOnDeliveryConnection();
 
     // 0.9.0 lossless 64-bit delivery (C2).
@@ -9579,6 +9660,60 @@ void TestDBusAdaptor::testServiceWatcherAppearDisappear() {
     QVERIFY(changes.last().newOwner.isEmpty());
 }
 
+void TestDBusAdaptor::testServiceWatcherReconfigureOnRecordedConnection() {
+    ConnectionIdentityBus bus;
+    QVERIFY(bus.start());
+    std::unique_ptr<DBusConnection> owner(trackedConnectToBus(bus.address));
+    QVERIFY(owner);
+    QDBusConnection privateBus = *owner;
+    const QString name = QStringLiteral("org.dbusqml.P2ServiceWatcher");
+    QVERIFY(privateBus.registerService(name));
+    auto session = QDBusConnection::sessionBus();
+    auto cleanup = qScopeGuard([&] { session.unregisterService(name); });
+
+    DBusServiceWatcher watcher;
+    watcher.setConnection(bus.wrapper.get());
+    watcher.setService(QStringLiteral("org.dbusqml.P2ServiceWatcherOld"));
+    watcher.componentComplete();
+    QVERIFY(!watcher.registered());
+    QSignalSpy changes(&watcher, &DBusServiceWatcher::ownerChanged);
+    ConnectionIdentityMonitor monitor;
+    QVERIFY(monitor.start(QStringLiteral("/org/freedesktop/DBus"),
+                          QStringLiteral("org.freedesktop.DBus"), name));
+    bus.wrapper.reset();
+    QVERIFY(watcher.connection() == nullptr);
+    watcher.setService(name);
+    const QByteArray traffic = monitor.finish();
+    QVERIFY2(!traffic.contains("member=NameHasOwner"), traffic.constData());
+    QVERIFY2(!traffic.contains("member=GetNameOwner"), traffic.constData());
+    QVERIFY(watcher.registered()); // the name exists only on the private bus
+
+    // Prove the session-side owner observer, then ensure private owner changes
+    // are visible only to the configured watcher, never this session observer.
+    QDBusServiceWatcher sessionObserver(name, session, QDBusServiceWatcher::WatchForOwnerChange);
+    QSignalSpy sessionChanges(&sessionObserver, &QDBusServiceWatcher::serviceOwnerChanged);
+    QVERIFY(session.registerService(name));
+    QTRY_COMPARE_WITH_TIMEOUT(sessionChanges.count(), 1, 5000);
+    QVERIFY(session.unregisterService(name));
+    QTRY_COMPARE_WITH_TIMEOUT(sessionChanges.count(), 2, 5000);
+    QTest::qWait(100);
+    QCOMPARE(changes.count(), 0);
+    sessionChanges.clear();
+
+    QVERIFY(privateBus.unregisterService(name));
+    QTRY_COMPARE_WITH_TIMEOUT(changes.count(), 1, 5000);
+    QVERIFY(!watcher.registered());
+    QCOMPARE(changes.at(0).at(0).toString(), privateBus.baseService());
+    QVERIFY(changes.at(0).at(1).toString().isEmpty());
+    QVERIFY(privateBus.registerService(name));
+    QTRY_COMPARE_WITH_TIMEOUT(changes.count(), 2, 5000);
+    QVERIFY(watcher.registered());
+    QVERIFY(changes.at(1).at(0).toString().isEmpty());
+    QCOMPARE(changes.at(1).at(1).toString(), privateBus.baseService());
+    QTest::qWait(300);
+    QCOMPARE(sessionChanges.count(), 0);
+}
+
 // ==================== 0.9.0 ObjectManager client (B6) ======================
 
 // A test ObjectManager service built on a served adaptor: GetManagedObjects
@@ -9932,6 +10067,85 @@ void TestDBusAdaptor::testSignalWatcherCustomConnectionDestroyed() {
     delete emitter;
 }
 
+void TestDBusAdaptor::testSignalWatcherReconfigureOnRecordedConnection_data() {
+    QTest::addColumn<QString>("setter");
+    for (const char *setter : {"service", "path", "iface", "member", "enabled"})
+        QTest::newRow(setter) << QString::fromLatin1(setter);
+}
+
+void TestDBusAdaptor::testSignalWatcherReconfigureOnRecordedConnection() {
+    QFETCH(QString, setter);
+    ConnectionIdentityBus bus;
+    QVERIFY(bus.start());
+    std::unique_ptr<DBusConnection> emitter(trackedConnectToBus(bus.address));
+    QVERIFY(emitter);
+    QDBusConnection privateBus = *emitter;
+    auto session = QDBusConnection::sessionBus();
+    const QString oldName = QStringLiteral("org.dbusqml.P2SignalWatcher");
+    const QString newName = QStringLiteral("org.dbusqml.P2SignalWatcherNew");
+    QVERIFY(privateBus.registerService(oldName));
+    QVERIFY(privateBus.registerService(newName));
+    auto cleanup = qScopeGuard([&] {
+        session.unregisterService(oldName);
+        session.unregisterService(newName);
+    });
+    QVERIFY(session.registerService(oldName));
+    QVERIFY(session.registerService(newName));
+
+    DBusSignalWatcher watcher;
+    watcher.setConnection(bus.wrapper.get());
+    watcher.setService(oldName);
+    watcher.setPath(QStringLiteral("/P2SignalWatcher"));
+    watcher.setIface(QStringLiteral("org.dbusqml.P2SignalWatcher"));
+    watcher.setMember(QStringLiteral("Changed"));
+    watcher.componentComplete();
+    QSignalSpy received(&watcher, &DBusSignalWatcher::received);
+    auto original = QDBusMessage::createSignal(watcher.path(), watcher.iface(), watcher.member());
+    original.setArguments({QStringLiteral("before-destruction")});
+    QVERIFY(privateBus.send(original));
+    QTRY_COMPARE_WITH_TIMEOUT(received.count(), 1, 5000);
+    received.clear();
+    bus.wrapper.reset();
+    QVERIFY(watcher.connection() == nullptr);
+    if (setter == QStringLiteral("service"))
+        watcher.setService(newName);
+    else if (setter == QStringLiteral("path"))
+        watcher.setPath(QStringLiteral("/P2SignalWatcherNew"));
+    else if (setter == QStringLiteral("iface"))
+        watcher.setIface(QStringLiteral("org.dbusqml.P2SignalWatcherNew"));
+    else if (setter == QStringLiteral("member"))
+        watcher.setMember(QStringLiteral("ChangedNew"));
+    else {
+        watcher.setEnabled(false);
+        watcher.setEnabled(true);
+    }
+
+    DBusSignalWatcher sessionObserver;
+    sessionObserver.setService(watcher.service());
+    sessionObserver.setPath(watcher.path());
+    sessionObserver.setIface(watcher.iface());
+    sessionObserver.setMember(watcher.member());
+    sessionObserver.componentComplete();
+    QSignalSpy sessionReceived(&sessionObserver, &DBusSignalWatcher::received);
+    auto canary = QDBusMessage::createSignal(watcher.path(), watcher.iface(), watcher.member());
+    canary.setArguments({QStringLiteral("session-canary")});
+    QVERIFY(session.send(canary));
+    QTRY_COMPARE_WITH_TIMEOUT(sessionReceived.count(), 1, 5000);
+    QTest::qWait(100);
+    QCOMPARE(received.count(), 0); // the reconfigured watcher must not hear the session bus
+    sessionReceived.clear();
+
+    auto payload = QDBusMessage::createSignal(watcher.path(), watcher.iface(), watcher.member());
+    payload.setArguments({QStringLiteral("private-after-destruction")});
+    QVERIFY(privateBus.send(payload));
+    QTRY_COMPARE_WITH_TIMEOUT(received.count(), 1, 5000);
+    QCOMPARE(received.at(0).at(0).toString(), watcher.member());
+    QCOMPARE(received.at(0).at(1).toList(),
+             QVariantList{QStringLiteral("private-after-destruction")});
+    QTest::qWait(300);
+    QCOMPARE(sessionReceived.count(), 0);
+}
+
 // Changing service/path at runtime must resubscribe (dropping the recorded
 // old subscription) AND refetch the inventory: signals keep arriving from
 // the new target only, never from the old one.
@@ -10034,6 +10248,189 @@ void TestDBusAdaptor::testObjectManagerPathChange() {
     delete client;
     delete server1;
     delete server2;
+}
+
+void TestDBusAdaptor::testObjectManagerRefetchOnRecordedConnection_data() {
+    QTest::addColumn<bool>("changePath");
+    QTest::newRow("existing-subscription") << false;
+    QTest::newRow("new-path") << true;
+}
+
+void TestDBusAdaptor::testObjectManagerRefetchOnRecordedConnection() {
+    QFETCH(bool, changePath);
+    ConnectionIdentityBus bus;
+    QVERIFY(bus.start());
+    std::unique_ptr<DBusConnection> serviceConnection(trackedConnectToBus(bus.address));
+    QVERIFY(serviceConnection);
+    QQmlEngine engine;
+    engine.addImportPath(QCoreApplication::applicationDirPath());
+    QQmlComponent component(&engine);
+    component.setData(
+        "import DBus 1.0\n"
+        "DBusAdaptor {\n"
+        " service: 'org.dbusqml.P2Manager'\n"
+        " path: '/P2Manager'\n"
+        " iface: 'org.freedesktop.DBus.ObjectManager'\n"
+        " property int _calls: 0\n"
+        " _signatures: ({ GetManagedObjects: 'a{oa{sa{sv}}}' })\n"
+        " function getManagedObjects() {\n"
+        "   _calls++; return { '/device': { 'org.dbusqml.Device': { count: _calls } } }\n"
+        " }\n"
+        "}",
+        QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    std::unique_ptr<QObject> server(component.beginCreate(engine.rootContext()));
+    QVERIFY(server);
+    server->setProperty("connection", QVariant::fromValue(serviceConnection.get()));
+    component.completeCreate();
+
+    std::unique_ptr<QObject> child;
+    if (changePath) {
+        child.reset(component.beginCreate(engine.rootContext()));
+        QVERIFY(child);
+        child->setProperty("connection", QVariant::fromValue(serviceConnection.get()));
+        child->setProperty("path", QStringLiteral("/P2Manager/child"));
+        child->setProperty("_calls", 1);
+        component.completeCreate();
+    }
+
+    DBusObjectManager manager;
+    manager.setConnection(bus.wrapper.get());
+    manager.setService(QStringLiteral("org.dbusqml.P2Manager"));
+    manager.setPath(QStringLiteral("/P2Manager"));
+    manager.componentComplete();
+    QTRY_VERIFY_WITH_TIMEOUT(manager.ready(), 5000);
+    QCOMPARE(server->property("_calls").toInt(), 1);
+    ConnectionIdentityMonitor monitor;
+    QVERIFY(monitor.start(changePath ? QStringLiteral("/P2Manager/child")
+                                     : QStringLiteral("/P2Manager"),
+                          QStringLiteral("org.freedesktop.DBus.ObjectManager")));
+    bus.wrapper.reset();
+    QVERIFY(manager.connection() == nullptr);
+    if (changePath)
+        manager.setPath(QStringLiteral("/P2Manager/child"));
+    else
+        manager.componentComplete(); // setup's refetch with the subscription still live
+    QTest::qWait(500);
+    const QByteArray traffic = monitor.finish();
+    QVERIFY2(!traffic.contains("member=GetManagedObjects"), traffic.constData());
+    QTRY_COMPARE_WITH_TIMEOUT((changePath ? child : server)->property("_calls").toInt(), 2, 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(manager.managedObjects()
+                                  .value(QStringLiteral("/device"))
+                                  .toMap()
+                                  .value(QStringLiteral("org.dbusqml.Device"))
+                                  .toMap()
+                                  .value(QStringLiteral("count"))
+                                  .toInt(),
+                              2, 5000);
+}
+
+void TestDBusAdaptor::testAdaptorAutoSignalOnAttachConnection() {
+    ConnectionIdentityBus bus;
+    QVERIFY(bus.start());
+    std::unique_ptr<DBusConnection> observer(trackedConnectToBus(bus.address));
+    QVERIFY(observer);
+    QDBusConnection privateBus = *observer;
+    QQmlEngine engine;
+    engine.addImportPath(QCoreApplication::applicationDirPath());
+    QQmlComponent component(&engine);
+    component.setData("import DBus 1.0\n"
+                      "DBusAdaptor {\n"
+                      " path: '/P2Signal'\n"
+                      " iface: 'org.dbusqml.P2Signal'\n"
+                      " signal ping(value: var)\n"
+                      " _signals: ({ Ping: 's' })\n"
+                      " function fire() { ping('private-payload') }\n"
+                      "}",
+                      QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    std::unique_ptr<QObject> server(component.beginCreate(engine.rootContext()));
+    QVERIFY(server);
+    server->setProperty("connection", QVariant::fromValue(bus.wrapper.get()));
+    component.completeCreate();
+    SignalCatcher privateSignals, sessionSignals;
+    QVERIFY(privateBus.connect({}, QStringLiteral("/P2Signal"),
+                               QStringLiteral("org.dbusqml.P2Signal"), QStringLiteral("Ping"),
+                               &privateSignals, SLOT(onSignal(QDBusMessage))));
+    auto session = QDBusConnection::sessionBus();
+    QVERIFY(session.connect({}, QStringLiteral("/P2Signal"), QStringLiteral("org.dbusqml.P2Signal"),
+                            QStringLiteral("Ping"), &sessionSignals, SLOT(onSignal(QDBusMessage))));
+    // Prove the negative-side match before relying on its zero count.
+    auto canary =
+        QDBusMessage::createSignal(QStringLiteral("/P2Signal"),
+                                   QStringLiteral("org.dbusqml.P2Signal"), QStringLiteral("Ping"));
+    QVERIFY(session.send(canary));
+    QTRY_COMPARE_WITH_TIMEOUT(sessionSignals.count, 1, 5000);
+    sessionSignals.count = 0;
+    QVERIFY(QMetaObject::invokeMethod(server.get(), "fire"));
+    QTRY_COMPARE_WITH_TIMEOUT(privateSignals.count, 1, 5000);
+    bus.wrapper.reset();
+    QVERIFY(server->property("connection").value<DBusConnection *>() == nullptr);
+    QVERIFY(QMetaObject::invokeMethod(server.get(), "fire"));
+    QTest::qWait(500);
+    QCOMPARE(sessionSignals.count, 0);
+    QTRY_COMPARE_WITH_TIMEOUT(privateSignals.count, 2, 5000);
+    QCOMPARE(privateSignals.lastSignal.arguments(),
+             QVariantList{QStringLiteral("private-payload")});
+}
+
+void TestDBusAdaptor::testProxyDynamicCallOnRecordedConnection() {
+    ConnectionIdentityBus bus;
+    QVERIFY(bus.start());
+    std::unique_ptr<DBusConnection> serviceConnection(trackedConnectToBus(bus.address));
+    QVERIFY(serviceConnection);
+    QQmlEngine engine;
+    engine.addImportPath(QCoreApplication::applicationDirPath());
+    QQmlComponent serverComponent(&engine);
+    serverComponent.setData("import DBus 1.0\n"
+                            "DBusAdaptor {\n"
+                            " service: 'org.dbusqml.P2Proxy'\n"
+                            " path: '/P2Proxy'\n"
+                            " iface: 'org.dbusqml.P2Proxy'\n"
+                            " property int _calls: 0\n"
+                            " _signatures: ({ Ping: 's' })\n"
+                            " function ping() { _calls++; return 'private-result' }\n"
+                            "}",
+                            QUrl());
+    QVERIFY2(serverComponent.isReady(), qPrintable(serverComponent.errorString()));
+    std::unique_ptr<QObject> server(serverComponent.beginCreate(engine.rootContext()));
+    QVERIFY(server);
+    server->setProperty("connection", QVariant::fromValue(serviceConnection.get()));
+    serverComponent.completeCreate();
+    QQmlComponent proxyComponent(&engine);
+    proxyComponent.setData("import DBus 1.0\n"
+                           "DBus {\n"
+                           " service: 'org.dbusqml.P2Proxy'\n"
+                           " path: '/P2Proxy'\n"
+                           " iface: 'org.dbusqml.P2Proxy'\n"
+                           " propertiesEnabled: false\n"
+                           "}",
+                           QUrl());
+    QVERIFY2(proxyComponent.isReady(), qPrintable(proxyComponent.errorString()));
+    std::unique_ptr<QObject> proxy(proxyComponent.beginCreate(engine.rootContext()));
+    QVERIFY(proxy);
+    proxy->setProperty("connection", QVariant::fromValue(bus.wrapper.get()));
+    proxyComponent.completeCreate();
+    auto *typedProxy = qobject_cast<DBusProxy *>(proxy.get());
+    QVERIFY(typedProxy);
+    QTRY_COMPARE_WITH_TIMEOUT(typedProxy->status(), DBusProxy::Ready, 5000);
+    QVERIFY(typedProxy->value(QStringLiteral("ping")).value<QJSValue>().isCallable());
+    ConnectionIdentityMonitor monitor;
+    QVERIFY(monitor.start(QStringLiteral("/P2Proxy"), QStringLiteral("org.dbusqml.P2Proxy")));
+    bus.wrapper.reset();
+    QVERIFY(typedProxy->connection() == nullptr);
+    QJSValue dynamicMethod = typedProxy->value(QStringLiteral("ping")).value<QJSValue>();
+    QJSValue result = dynamicMethod.call();
+    QVERIFY2(!result.isError(), qPrintable(result.toString()));
+    auto *reply = qobject_cast<DBusPendingReply *>(result.toQObject());
+    QVERIFY(reply);
+    QTRY_VERIFY_WITH_TIMEOUT(reply->isFinished(), 5000);
+    const QByteArray traffic = monitor.finish();
+    QVERIFY2(!traffic.contains("member=Ping"), traffic.constData());
+    QVERIFY2(!reply->isError(), qPrintable(reply->error().message()));
+    QCOMPARE(reply->value().toString(), QStringLiteral("private-result"));
+    QCOMPARE(server->property("_calls").toInt(), 1);
+    delete reply;
 }
 
 // Broadcasts (emitSignal and PropertiesChanged) go out on the ATTACH

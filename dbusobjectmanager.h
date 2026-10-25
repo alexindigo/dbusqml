@@ -69,6 +69,10 @@ private slots:
 
 private:
     QPointer<DBusConnection> m_conn;
+    // Resolve when connection is configured, not when a later fetch or
+    // service/path change finds that the wrapper has been destroyed. Fetches
+    // can run even when subscribing failed, so this is not subscription state.
+    QDBusConnection m_bus = QDBusConnection::sessionBus();
     QString m_service;
     QString m_path;
     bool m_ready = false;

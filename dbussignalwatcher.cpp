@@ -14,6 +14,7 @@ void DBusSignalWatcher::setConnection(DBusConnection *v) {
         return;
     unsubscribe();
     m_conn = v;
+    m_bus = v ? static_cast<QDBusConnection>(*v) : QDBusConnection::sessionBus();
     emit connectionChanged();
     resubscribe();
 }
@@ -91,11 +92,8 @@ void DBusSignalWatcher::resubscribe() {
     if (m_path.isEmpty() || m_iface.isEmpty())
         return;
 
-    QDBusConnection conn =
-        m_conn ? static_cast<QDBusConnection>(*m_conn) : QDBusConnection::sessionBus();
-
-    if (conn.connect(m_service, m_path, m_iface, m_member, this, SLOT(onSignal(QDBusMessage)))) {
-        m_subConn = conn;
+    if (m_bus.connect(m_service, m_path, m_iface, m_member, this, SLOT(onSignal(QDBusMessage)))) {
+        m_subConn = m_bus;
         m_subService = m_service;
         m_subPath = m_path;
         m_subIface = m_iface;

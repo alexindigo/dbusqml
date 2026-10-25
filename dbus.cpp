@@ -55,9 +55,7 @@ public:
         : QObject(parent), m_proxy(proxy) {}
 
     Q_INVOKABLE DBusPendingReply *callMethod(const QString &method, const QVariantList &args) {
-        QDBusConnection bus = m_proxy->connection()
-                                  ? static_cast<QDBusConnection>(*m_proxy->connection())
-                                  : QDBusConnection::sessionBus();
+        const QDBusConnection &bus = m_proxy->busConnection();
 
         // Convert arguments to match expected D-Bus types (override → introspected → inference).
         QVariantList converted = args;
@@ -279,7 +277,7 @@ void DBusProxy::ensureSessionDisconnectWatch() {
     QDBusMessage ping = QDBusMessage::createMethodCall(
         QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
         QStringLiteral("org.freedesktop.DBus"), QStringLiteral("NameHasOwner"));
-    ping.setArguments({QDBusConnection::sessionBus().baseService()});
+    ping.setArguments({m_bus.baseService()});
     QDBusPendingCall call = m_bus.asyncCall(ping);
     auto *watcher = new QDBusPendingCallWatcher(call, this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {

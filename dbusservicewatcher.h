@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDBusConnection>
 #include <QObject>
 #include <QQmlParserStatus>
 #include <QString>
@@ -49,6 +50,9 @@ private:
     void setRegistered(bool v);
 
     QPointer<DBusConnection> m_conn;
+    // Rebuilding the watch after a service change must retain this transport
+    // even when the configured QML connection wrapper has been destroyed.
+    QDBusConnection m_bus = QDBusConnection::sessionBus();
     QString m_service;
     bool m_registered = false;
     bool m_complete = false;

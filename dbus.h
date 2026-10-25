@@ -64,6 +64,8 @@ public:
 
     DBusConnection *connection() const { return m_conn.data(); }
     void setConnection(DBusConnection *v);
+    // Transport identity is retained independently of the QML wrapper.
+    const QDBusConnection &busConnection() const { return m_bus; }
 
     Status status() const { return m_status; }
 
