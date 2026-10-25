@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<!-- <!DOCTYPE node []> is only comment text. -->
+<?probe ignored?>
+<!DOCTYPE node SYSTEM "unused[>file.dtd" [
+<!ENTITY type "s">
+<!ATTLIST arg type CDATA "&type;&type;">
+]>
+<node><interface name="org.freedesktop.DBus.Properties"><method name="Probe"><arg/></method></interface></node>

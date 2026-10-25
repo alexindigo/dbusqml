@@ -1044,9 +1044,11 @@ aborting inside libdbus.
 
 **Introspection and catalog XML limits** (one policy for both parsers):
 an XML document larger than 4 MiB (encoded size) is refused before
-parsing, and a document whose DTD declares any entity (`<!ENTITY …>`) is
-refused at the DTD token — before any content is scanned, so no entity
-expansion can ever run. A plain DOCTYPE without entity declarations
+parsing, and any DOCTYPE with an internal DTD subset (`[ … ]`, even empty)
+is refused with "document declares an internal DTD subset" by a prolog
+scan before any input reaches Qt's XML parser. This prevents DTD processing,
+including entity references in attribute defaults and parameter entities.
+A DOCTYPE with only an external identifier
 (the kind every real libdbus `Introspect()` reply starts with) parses
 normally. A refused introspection reply is treated as if the interface
 were absent from the XML (the catalog/inference tiers take over), and a

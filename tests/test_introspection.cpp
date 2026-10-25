@@ -1,6 +1,14 @@
 #include <QTest>
 #include <QElapsedTimer>
+#include <QBuffer>
+#include <QStringConverter>
 #include "dbusintrospection.h"
+
+class SequentialXmlBuffer : public QBuffer {
+public:
+    using QBuffer::QBuffer;
+    bool isSequential() const override { return true; }
+};
 
 // Warning capture for the refusal tests: a refused document must produce
 // exactly one warning (nothing silently swallowed, no warning storm).
@@ -170,11 +178,203 @@ private slots:
         QCOMPARE(data.methodArgTypes.value(QStringLiteral("Second")),
                  QStringList({QStringLiteral("i")}));
     }
-    // --- XML hardening (P5): one policy for every parsed document -------
-    // Input > 4 MiB is refused before parsing; a DOCTYPE is allowed (real
-    // libdbus Introspect() replies carry one) but ANY entity declaration
-    // refuses the document at the DTD token — before any content, so
-    // before any entity expansion can happen.
+    // --- XML hardening: one policy for every parsed document ------------
+    // Input > 4 MiB and internal DTD subsets are refused before parsing.
+    // External-only DOCTYPEs (real libdbus replies) remain accepted.
+
+    void testPrologBoundary_data() {
+        QTest::addColumn<QString>("prolog");
+        QTest::addColumn<bool>("internalSubset");
+
+        QTest::newRow("entity") << QStringLiteral("<!DOCTYPE node [<!ENTITY t 's'>]>") << true;
+        QTest::newRow("attribute-default-entity")
+            << QStringLiteral("<!DOCTYPE node [<!ENTITY t 's'><!ATTLIST arg type CDATA '&t;&t;'>]>")
+            << true;
+        QTest::newRow("parameter-entity")
+            << QStringLiteral(
+                   "<!DOCTYPE node [<!ENTITY % p '<!ATTLIST arg type CDATA \"s\">'>%p;]>")
+            << true;
+        QTest::newRow("empty-subset") << QStringLiteral("<!DOCTYPE node []>") << true;
+        QTest::newRow("attribute-default-no-entity")
+            << QStringLiteral("<!DOCTYPE node [<!ATTLIST arg type CDATA 's'>]>") << true;
+        QTest::newRow("prolog-before-subset")
+            << QStringLiteral("<?xml version='1.0'?> \t\r\n<!-- <!DOCTYPE fake []> -->"
+                              "<?probe <!DOCTYPE fake []>?>\n<!DOCTYPE node []>")
+            << true;
+        QTest::newRow("external-and-subset")
+            << QStringLiteral("<!DOCTYPE node SYSTEM 'unused.dtd' []>") << true;
+        QTest::newRow("quoted-close-before-subset")
+            << QStringLiteral("<!DOCTYPE node SYSTEM 'unused>file.dtd' []>") << true;
+        QTest::newRow("truncated-subset") << QStringLiteral("<!DOCTYPE node [") << true;
+        QTest::newRow("no-doctype") << QString() << false;
+        QTest::newRow("bare-doctype") << QStringLiteral("<!DOCTYPE node>") << false;
+        QTest::newRow("comment-not-declaration")
+            << QStringLiteral("<!-- <!DOCTYPE node [<!ENTITY t 's'>]> -->") << false;
+        QTest::newRow("pi-not-declaration")
+            << QStringLiteral("<?probe <!DOCTYPE node []>?>") << false;
+        QTest::newRow("quoted-system-bracket-single")
+            << QStringLiteral("<!DOCTYPE node SYSTEM 'unused[>\"file.dtd'>") << false;
+        QTest::newRow("quoted-system-bracket-double")
+            << QStringLiteral("<!DOCTYPE node SYSTEM \"unused[>'file.dtd\">") << false;
+        QTest::newRow("freedesktop")
+            << QStringLiteral(
+                   "<!DOCTYPE node PUBLIC '-//freedesktop//DTD D-BUS Object Introspection 1.0//EN' "
+                   "'http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd'>")
+            << false;
+        QTest::newRow("comment-then-external")
+            << QStringLiteral("<?xml version='1.0'?>\n<!-- <!DOCTYPE fake []> -->"
+                              "<?probe ignored?><!DOCTYPE node SYSTEM 'unused.dtd'>")
+            << false;
+    }
+
+    void testPrologBoundary() {
+        QFETCH(QString, prolog);
+        QFETCH(bool, internalSubset);
+        const QString xml =
+            prolog +
+            QStringLiteral(
+                "<node><!-- <!DOCTYPE fake []> --><![CDATA[<!DOCTYPE fake []>]]>"
+                "<interface name='org.test.Foo'><method name='Bar'><arg type='s'/></method>"
+                "</interface></node>");
+        const QString refusal = QStringLiteral("document declares an internal DTD subset");
+        auto checkReader = [&](DBusHardenedXmlReader &reader) {
+            // The refusal is established by construction, before even the
+            // synthetic StartDocument token: no DTD parsing/expansion can run.
+            QCOMPARE(reader.refused(), internalSubset);
+            if (internalSubset) {
+                QCOMPARE(reader.refusalReason(), refusal);
+                QVERIFY(reader.atEnd());
+                QVERIFY(!reader.hasError());
+                QCOMPARE(reader.readNext(), QXmlStreamReader::Invalid);
+                QVERIFY(!reader.isStartElement());
+            } else {
+                QStringList methods;
+                while (!reader.atEnd()) {
+                    reader.readNext();
+                    if (reader.isStartElement() && reader.name() == QLatin1String("method"))
+                        methods << reader.attributes().value("name").toString();
+                }
+                QVERIFY2(!reader.hasError(), qPrintable(reader.errorString()));
+                QVERIFY(!reader.refused());
+                QCOMPARE(methods, QStringList{QStringLiteral("Bar")});
+            }
+        };
+        DBusHardenedXmlReader textReader(xml);
+        checkReader(textReader);
+
+        // Cover both device paths and the Unicode encodings Qt autodetects,
+        // with/without BOM. A byte-only search must not miss a wide DOCTYPE.
+        for (auto encoding :
+             {QStringConverter::Utf8, QStringConverter::Utf16LE, QStringConverter::Utf16BE,
+              QStringConverter::Utf32LE, QStringConverter::Utf32BE}) {
+            for (auto flags : {QStringConverter::Flags{},
+                               QStringConverter::Flags{QStringConverter::Flag::WriteBom}}) {
+                QStringEncoder encoder(encoding, flags);
+                QByteArray bytes = encoder(xml);
+                QBuffer device(&bytes);
+                QVERIFY(device.open(QIODevice::ReadOnly));
+                DBusHardenedXmlReader deviceReader(&device);
+                checkReader(deviceReader);
+                SequentialXmlBuffer sequential(&bytes);
+                QVERIFY(sequential.open(QIODevice::ReadOnly));
+                DBusHardenedXmlReader sequentialReader(&sequential);
+                checkReader(sequentialReader);
+            }
+        }
+
+        g_warnings.clear();
+        const QtMessageHandler prev = qInstallMessageHandler(captureWarnings);
+        const auto data = parseDBusIntrospection(xml, QStringLiteral("org.test.Foo"));
+        qInstallMessageHandler(prev);
+        if (internalSubset) {
+            QVERIFY(data.methodNames.isEmpty());
+            QVERIFY(data.methodArgTypes.isEmpty());
+            QCOMPARE(g_warnings.size(), 1);
+            QVERIFY(g_warnings.first().contains(refusal));
+        } else {
+            QCOMPARE(data.methodNames, QStringList{QStringLiteral("Bar")});
+            QCOMPARE(data.methodArgTypes.value(QStringLiteral("Bar")),
+                     QStringList{QStringLiteral("s")});
+            QVERIFY(g_warnings.isEmpty());
+        }
+    }
+
+    void testDeviceDeclaredEncoding_data() {
+        QTest::addColumn<QByteArray>("bytes");
+        QTest::addColumn<bool>("internalSubset");
+        for (auto encoding :
+             {QStringConverter::Utf8, QStringConverter::Latin1, QStringConverter::Utf16LE,
+              QStringConverter::Utf16BE, QStringConverter::Utf32LE, QStringConverter::Utf32BE}) {
+            for (bool subset : {false, true}) {
+                const QByteArray name = QStringConverter::nameForEncoding(encoding);
+                const QString xml =
+                    QStringLiteral("<?xml version='1.0' encoding='%1'?>"
+                                   "<!-- \u00e9 -->%2<node/>")
+                        .arg(QString::fromLatin1(name),
+                             subset ? QStringLiteral("<!DOCTYPE node []>") : QString());
+                QStringEncoder encoder(encoding);
+                QTest::newRow((name + (subset ? "-subset" : "-accepted")).constData())
+                    << QByteArray(encoder(xml)) << subset;
+            }
+        }
+    }
+
+    void testDeviceDeclaredEncoding() {
+        QFETCH(QByteArray, bytes);
+        QFETCH(bool, internalSubset);
+        QBuffer device(&bytes);
+        QVERIFY(device.open(QIODevice::ReadOnly));
+        DBusHardenedXmlReader reader(&device);
+        QCOMPARE(reader.refused(), internalSubset);
+        if (internalSubset) {
+            QCOMPARE(reader.refusalReason(),
+                     QStringLiteral("document declares an internal DTD subset"));
+            QCOMPARE(reader.readNext(), QXmlStreamReader::Invalid);
+        } else {
+            bool sawRoot = false;
+            while (!reader.atEnd()) {
+                reader.readNext();
+                if (reader.isStartElement() && reader.name() == QLatin1String("node"))
+                    sawRoot = true;
+            }
+            QVERIFY2(!reader.hasError(), qPrintable(reader.errorString()));
+            QVERIFY(sawRoot);
+        }
+    }
+
+    void testDeviceSizeBoundary_data() {
+        QTest::addColumn<bool>("sequential");
+        QTest::addColumn<bool>("oversize");
+        QTest::newRow("random-at-cap") << false << false;
+        QTest::newRow("random-over-cap") << false << true;
+        QTest::newRow("sequential-at-cap") << true << false;
+        QTest::newRow("sequential-over-cap") << true << true;
+    }
+
+    void testDeviceSizeBoundary() {
+        QFETCH(bool, sequential);
+        QFETCH(bool, oversize);
+        QByteArray bytes("<node><!--");
+        bytes += QByteArray(DBusHardenedXmlReader::sizeLimitBytes - bytes.size() - 10, 'x');
+        bytes += "--></node>";
+        if (oversize)
+            bytes += ' ';
+        QBuffer random(&bytes);
+        SequentialXmlBuffer stream(&bytes);
+        QBuffer &device = sequential ? stream : random;
+        QVERIFY(device.open(QIODevice::ReadOnly));
+        DBusHardenedXmlReader reader(&device);
+        QCOMPARE(reader.refused(), oversize);
+        if (oversize) {
+            QVERIFY(
+                reader.refusalReason().contains(QStringLiteral("exceeds the 4 MiB size limit")));
+            QCOMPARE(reader.readNext(), QXmlStreamReader::Invalid);
+        } else {
+            while (!reader.atEnd())
+                reader.readNext();
+            QVERIFY2(!reader.hasError(), qPrintable(reader.errorString()));
+        }
+    }
 
     void testEntityDeclarationsRefused_data() {
         QTest::addColumn<QString>("xml");
@@ -236,7 +436,7 @@ private slots:
         // Exactly one warning, naming the refusal.
         QCOMPARE(g_warnings.size(), 1);
         QVERIFY(g_warnings.first().contains(QStringLiteral("refused")));
-        QVERIFY(g_warnings.first().contains(QStringLiteral("declares XML entities")));
+        QVERIFY(g_warnings.first().contains(QStringLiteral("declares an internal DTD subset")));
     }
 
     void testOversizeDocumentRefused_data() {
