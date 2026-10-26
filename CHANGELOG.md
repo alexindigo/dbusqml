@@ -12,6 +12,102 @@ consumer trust), then Docs (documentation); the last two are project extensions.
 
 ## [Unreleased]
 
+### Changed
+
+- **Catalog write-only properties are no longer readable over D-Bus.**
+  `Properties.Get` refuses a property declared `access="write"` with
+  `org.freedesktop.DBus.Error.InvalidArgs` and `Property <name> is not readable`;
+  `GetAll` omits it, and `PropertiesChanged` emits neither its value nor its
+  invalidated name. `Set` remains available. Plain C++ `DBusAdaptor` instances
+  also stop serving library configuration (`service`, `path`, …) through
+  `Get`: those names are excluded from the served property surface, just as
+  they are for QML adaptors.
+
+### Fixed
+
+- **Invalid signature and object-path values could reach libdbus from
+  nested containers.** One basic-value producer now validates `g` contents
+  as message signatures, including the 255-byte encoded-length cap, and `o`
+  contents against the ASCII object-path rules before constructing their Qt
+  wire wrappers. The same checks cover scalar values, struct members, arrays,
+  dictionary keys and values, variants and inferred typed wrappers. Invalid
+  values fail locally, or one-way messages are dropped with a warning; a
+  rejected value never falls back to an inferred wire type. Valid nested
+  empty `g` values are accepted; top-level empty `g` remains refused.
+
+- **Traffic could switch to the session bus after a custom connection's
+  QML wrapper was destroyed.** Auto-forwarded adaptor signals, generated
+  proxy method calls, ObjectManager refetches and replacement subscriptions,
+  and signal/service watcher reconfiguration now use the connection recorded
+  at attach or configuration time. Service-presence and proxy liveness
+  lookups use that same bus, so losing the wrapper does not redirect later
+  traffic or subscriptions.
+
+- **Aliased adaptor properties could use another catalog property's type
+  or access policy.** Introspection, `Get`, `GetAll`, `Set` and change
+  notifications now share one served-property identity, matching the catalog
+  by the advertised wire name, including `_members` aliases. A read-only
+  alias refuses `Set` with `PropertyReadOnly` and leaves its value unchanged
+  for every accepted spelling; privacy and library-property exclusions apply
+  consistently across the same paths.
+
+- **Signals queued for a revoked subscription could still reach its
+  consumer.** Signal watchers, ObjectManager and proxy signal/property hooks
+  now have per-subscription receivers that stop forwarding on revocation,
+  even when QtDBus already posted the delivery. Retargeting or disabling no
+  longer delivers old arguments or mutates the new target's inventory or
+  property cache; a QML handler that revokes its subscription also stops the
+  old delivery's remaining cache update. Retired proxy status/owner watchers
+  cannot forward old events or seed their replacements with stale replies.
+
+- **Large interfaces could stall the QML thread with quadratic proxy-map
+  insertion.** Dynamic methods, introspection and catalog placeholders,
+  `GetAll` results and `PropertiesChanged` updates now insert new keys in a
+  batch instead of rebuilding the dynamic metaobject for each key. In the
+  Qt 6.11.2 test VM, learning 4000 methods and 4000 properties fell from
+  20.6 seconds to 0.12 seconds. Property bindings still receive updates, and
+  a reserved Qt map name is rejected individually without losing valid
+  siblings. The API reference clarifies that inherited `valueChanged` is
+  for QML writes, not D-Bus cache updates.
+
+- **The XML entity check ran after Qt had already processed the internal
+  DTD subset.** This corrects the 1.1.0 entry's claim that rejection at the
+  DTD token prevents that work: Qt processes declarations, parameter
+  references and entity references in attribute defaults before producing
+  the token. Introspection and catalog XML now share an encoding-aware
+  prolog scan that refuses any internal subset, even an empty `[]`, before
+  input reaches Qt's XML parser. External-only DOCTYPEs remain accepted.
+  Device input is snapshotted under the existing 4 MiB cap, continuing
+  across positive short reads, so the scan and parser see the same bytes.
+
+### Quality
+
+- **Slow test runs no longer lose their wire helpers after 60 seconds.**
+  The payload echo, fd helper and Qt-free wire oracle now follow the owning
+  test's D-Bus unique name, subscribing before checking initial ownership
+  and exiting when that owner disappears. Suite cleanup also stops and
+  waits for them. Lifetime regressions include real calls after 65 seconds;
+  the default connection suite therefore takes approximately 65 seconds
+  longer, while avoiding the fixed-lifetime sanitizer failures.
+
+- **TSan report tools handle long input and literal artifact filenames
+  without changing classification.** Frame, thread-creation header and
+  source-path parsing now use linear passes instead of overlapping regex
+  repetitions. The crosscheck reads its dump through stdin redirection, so
+  names such as `ARGC=999999999`, `x=y`, `-v` and `-` are files rather than
+  awk assignments, options or stdin markers. Timed adversarial and filename
+  selftests cover these cases; outputs remain byte-identical across the
+  existing 38 fixture combinations.
+
+### Docs
+
+- **Document the permanent 64-slot process-wide signature pool limit.**
+  `KNOWN_ISSUES.md`, linked from the API's Shape selection section, explains
+  which container element shapes consume slots, why Qt's signature-pointer
+  lifetime requires assign-once registration, and how new registrations
+  fail loudly at exhaustion while previously assigned shapes remain usable.
+  The existing caller-specific inference fallback is described explicitly.
+
 ## [1.1.0] - 2026-10-20
 
 ### Added
