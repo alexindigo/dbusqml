@@ -983,6 +983,17 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
         // Owner unknown → the daemon's sender= match rule is the filter.
         if (!m_currentOwner.isEmpty() && msg.service() != m_currentOwner)
             return;
+        // The interface-wide hook replaces per-member match rules. Preserve
+        // the discovered/catalog signal list as the delivery filter, before
+        // decoding any payload. With no known names, no interface hook is
+        // installed.
+        // PropertiesChanged keeps its independent subscription and policy.
+        const bool propertiesChanged =
+            msg.interface() == QLatin1String("org.freedesktop.DBus.Properties") &&
+            msg.member() == QLatin1String("PropertiesChanged");
+        if (!propertiesChanged && msg.interface() == m_iface &&
+            !m_knownSignals.contains(msg.member()))
+            return;
         QVariantList unwrapped;
         if (!decodeMessage(msg, unwrapped))
             return;
@@ -1107,7 +1118,7 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
     m_methodArgTypes.clear();
 
     DBusIntrospectionData data = parseDBusIntrospection(xml, m_iface);
-    QStringList signalNames = data.signalNames;
+    QSet<QString> signalNames(data.signalNames.cbegin(), data.signalNames.cend());
     QStringList methodNames = data.methodNames;
     m_methodArgTypes = data.methodArgTypes;
     QStringList propertyNames = data.propertyNames;
@@ -1125,8 +1136,7 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
             }
         }
         for (auto it = spec->signals_.constBegin(); it != spec->signals_.constEnd(); ++it) {
-            if (!signalNames.contains(it.key()))
-                signalNames << it.key();
+            signalNames.insert(it.key());
         }
     } else if (methodNames.isEmpty() && signalNames.isEmpty()) {
         static QSet<QString> warned;
@@ -1144,19 +1154,25 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
     }
 
     disconnectSignals();
+    m_knownSignals = std::move(signalNames);
     if (m_signalsEnabled) {
         // #8: bind every subscription to the configured service — the
         // daemon's match rule then resolves the well-known name to its
         // current owner on each delivery, so a peer that merely emits the
         // same path/iface/member never reaches this proxy.
-        // (DBusSignalWatcher stays the wildcard-listening component.)
-        // PropertiesChanged has one owner even when Properties is itself
-        // the configured interface and introspection also advertises it.
-        if (m_iface == QLatin1String("org.freedesktop.DBus.Properties"))
-            signalNames.removeAll(QStringLiteral("PropertiesChanged"));
-        m_signalSubscription = DBusSubscription::create(
-            m_bus, m_service, m_path, m_iface, signalNames,
-            [this](const QDBusMessage &msg) { onPropertiesChanged(msg); }, this);
+        if (!m_knownSignals.isEmpty()) {
+            m_signalSubscription = DBusSubscription::create(
+                m_bus, m_service, m_path, m_iface, {QString()},
+                [this](const QDBusMessage &msg) {
+                    // When Properties itself is proxied, both hooks match this
+                    // member. Only the dedicated property hook may forward it.
+                    if (msg.interface() == QLatin1String("org.freedesktop.DBus.Properties") &&
+                        msg.member() == QLatin1String("PropertiesChanged"))
+                        return;
+                    onPropertiesChanged(msg);
+                },
+                this);
+        }
         m_propertySubscription = DBusSubscription::create(
             m_bus, m_service, m_path, QStringLiteral("org.freedesktop.DBus.Properties"),
             {QStringLiteral("PropertiesChanged")},

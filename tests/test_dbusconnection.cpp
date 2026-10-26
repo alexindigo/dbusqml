@@ -42,6 +42,7 @@
 #include "../dbus.h"
 #include "../dbusadaptor.h"
 #include "../dbussignalwatcher.h"
+#include "../dbussubscription.h"
 #include "../dbusobjectmanager.h"
 #include "dbustypes.h"
 #include "../dbusutils.h"
@@ -555,7 +556,7 @@ bool PropertyServerObject::s_declarePayload = false;
 bool PropertyServerObject::s_servePayload = false;
 
 // Owner-binding fixture (#8): introspection declares one signal (Ping) so
-// the proxy makes a per-signal subscription, plus a Level property for the
+// the proxy's known-signal filter accepts it, plus a Level property for the
 // PropertiesChanged leg. The test drives emissions from whichever connection
 // currently owns — or does not own — the service name.
 class SignalOwnerObject : public QDBusVirtualObject {
@@ -639,6 +640,13 @@ public:
     }
     QDBusConnection bus;
     bool valid = false;
+};
+
+class ProxySignalPeer : public SubscriptionPeer {
+public:
+    using SubscriptionPeer::SubscriptionPeer;
+    QString xml;
+    QString introspect(const QString &) const override { return xml; }
 };
 
 // Payload-echo helper: launched as a separate process (payload_echo_service)
@@ -2683,6 +2691,165 @@ private slots:
         QTest::qWait(500);
         QCOMPARE(PropertyServerObject::s_lastSetProp, QStringLiteral("PayloadLevel"));
         PropertyServerObject::s_declarePayload = false;
+    }
+
+    void testProxySignalMatchRule_data() {
+        QTest::addColumn<int>("count");
+        QTest::newRow("no-signals") << 0;
+        QTest::newRow("1000-signals") << 1000;
+        QTest::newRow("5000-signals") << 5000;
+    }
+
+    void testProxySignalMatchRule() {
+        QFETCH(int, count);
+        ProxySignalPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        peer.xml = QStringLiteral("<interface name='org.dbusqml.Subscription'>");
+        for (int i = 0; i < count; ++i)
+            peer.xml += QStringLiteral("<signal name='Signal%1'/>").arg(i);
+        peer.xml += QStringLiteral("</interface>");
+
+        QProcess monitor;
+        QByteArray observed;
+        connect(&monitor, &QProcess::readyReadStandardOutput, &monitor,
+                [&] { observed += monitor.readAllStandardOutput(); });
+        monitor.start(QStringLiteral("dbus-monitor"),
+                      {QStringLiteral("--session"),
+                       QStringLiteral("type='method_call',interface='org.freedesktop.DBus',"
+                                      "member='AddMatch'"),
+                       QStringLiteral("type='method_call',interface='org.freedesktop.DBus',"
+                                      "member='GetId'")});
+        QVERIFY(monitor.waitForStarted(3000));
+        const auto stop = qScopeGuard([&] {
+            monitor.terminate();
+            monitor.waitForFinished(3000);
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(observed.contains("NameAcquired"), 3000);
+
+        DBusProxy proxy;
+        QElapsedTimer timer;
+        timer.start();
+        proxy.setService(QStringLiteral("org.dbusqml.SubOld"));
+        proxy.setPath(QStringLiteral("/SubOld"));
+        proxy.setIface(peer.ifaceName);
+        proxy.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 10000);
+        const qint64 elapsed = timer.elapsed();
+        qInfo("proxy setup: %d signals, %lld ms", count, static_cast<long long>(elapsed));
+        // A generous wall-clock ceiling; the wire assertion below pins the
+        // constant subscription count independently of machine speed.
+        QVERIFY2(elapsed < 3000, "proxy signal setup exceeded 3 seconds");
+        QVERIFY(peer.postDeliveries());
+        // The monitor must consume the receiver's ordered barrier too, not
+        // just a prefix of the asynchronous AddMatch stream.
+        QTRY_VERIFY_WITH_TIMEOUT(observed.count("member=GetId") >= 2, 3000);
+        monitor.terminate();
+        QVERIFY(monitor.waitForFinished(3000));
+        observed += monitor.readAllStandardOutput();
+        int rules = 0;
+        bool wildcard = true;
+        for (const QByteArray &line : observed.split('\n')) {
+            if (!line.contains("interface='org.dbusqml.Subscription'"))
+                continue;
+            ++rules;
+            wildcard = wildcard && !line.contains("member='");
+        }
+        qInfo("interface AddMatch rules: %d", rules);
+        QCOMPARE(rules, count == 0 ? 0 : 1);
+        QVERIFY(wildcard);
+    }
+
+    void testProxyKnownSignals_data() {
+        QTest::addColumn<QString>("source");
+        for (const char *source : {"introspection", "catalog", "merged", "no-signals", "fallback"})
+            QTest::newRow(source) << QString::fromLatin1(source);
+    }
+
+    void testProxyKnownSignals() {
+        QFETCH(QString, source);
+        ProxySignalPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        if (source == QLatin1String("introspection") || source == QLatin1String("merged"))
+            peer.xml = QStringLiteral("<interface name='org.dbusqml.Subscription'>"
+                                      "<signal name='Ping'/></interface>");
+        else if (source == QLatin1String("no-signals"))
+            peer.xml = QStringLiteral("<interface name='org.dbusqml.Subscription'>"
+                                      "<property name='Level' type='u' access='read'/>"
+                                      "</interface>");
+        QTemporaryDir catalog;
+        QVERIFY(catalog.isValid());
+        const bool hadPath = qEnvironmentVariableIsSet("DBUSQML_TYPES_PATH");
+        const QByteArray oldPath = qgetenv("DBUSQML_TYPES_PATH");
+        const auto restore = qScopeGuard([&] {
+            if (hadPath)
+                qputenv("DBUSQML_TYPES_PATH", oldPath);
+            else
+                qunsetenv("DBUSQML_TYPES_PATH");
+            DBusProxy::reloadTypes();
+        });
+        if (source == QLatin1String("catalog") || source == QLatin1String("merged")) {
+            QFile file(catalog.filePath(QStringLiteral("signals.xml")));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QVERIFY(file.write("<node><interface name='org.dbusqml.Subscription'>"
+                               "<signal name='Pong'/></interface></node>") > 0);
+            file.close();
+        }
+        qputenv("DBUSQML_TYPES_PATH", catalog.path().toUtf8());
+        DBusProxy::reloadTypes();
+
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.SubOld"));
+        proxy.setPath(QStringLiteral("/SubOld"));
+        proxy.setIface(peer.ifaceName);
+        proxy.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        QSignalSpy delivered(&proxy, &DBusProxy::signalReceived);
+        QVERIFY(peer.send(QStringLiteral("Undeclared"), {}));
+        QVERIFY(peer.send(QStringLiteral("Ping"), {42}));
+        QVERIFY(peer.send(QStringLiteral("Pong"), {43}));
+        QVERIFY(
+            peer.send(QStringLiteral("PropertiesChanged"),
+                      {peer.ifaceName, QVariantMap{{QStringLiteral("Level"), 99u}}, QStringList{}},
+                      proxy.path(), QStringLiteral("org.freedesktop.DBus.Properties")));
+        QVERIFY(peer.postDeliveries());
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        QStringList names;
+        for (const auto &delivery : delivered)
+            names << delivery.at(0).toString();
+        QStringList expected;
+        if (source == QLatin1String("introspection") || source == QLatin1String("merged"))
+            expected << QStringLiteral("Ping");
+        if (source == QLatin1String("catalog") || source == QLatin1String("merged"))
+            expected << QStringLiteral("Pong");
+        expected << QStringLiteral("PropertiesChanged");
+        QCOMPARE(names, expected);
+        QCOMPARE(proxy.value(QStringLiteral("level")).toUInt(), 99u);
+        for (const auto &delivery : delivered) {
+            if (delivery.at(0).toString() == QLatin1String("Ping"))
+                QCOMPARE(delivery.at(1).toList(), QVariantList{42});
+            if (delivery.at(0).toString() == QLatin1String("Pong"))
+                QCOMPARE(delivery.at(1).toList(), QVariantList{43});
+        }
+    }
+
+    void testSubscriptionWildcardDeduplicates() {
+        SubscriptionPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        int deliveries = 0;
+        auto *subscription = DBusSubscription::create(
+            QDBusConnection::sessionBus(), QStringLiteral("org.dbusqml.SubOld"),
+            QStringLiteral("/SubOld"), peer.ifaceName, {QString(), QString()},
+            [&](const QDBusMessage &) { ++deliveries; }, this);
+        QVERIFY(subscription);
+        QVERIFY(peer.send(QStringLiteral("Arbitrary"), {}));
+        QVERIFY(peer.postDeliveries());
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        QCOMPARE(deliveries, 1);
+        QVERIFY(peer.send(QStringLiteral("Queued"), {}));
+        QVERIFY(peer.postDeliveries());
+        subscription->revoke();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        QCOMPARE(deliveries, 1);
     }
 
     // ---- Revocation also drops deliveries already posted by QtDBus ----
