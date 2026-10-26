@@ -12,6 +12,34 @@ consumer trust), then Docs (documentation); the last two are project extensions.
 
 ## [Unreleased]
 
+### Changed
+
+- **Received file-descriptor references have one budget per message.**
+  Every `h` reference, including repeated references to one attached fd and
+  invalid references, counts against `clamp(RLIMIT_NOFILE soft / 4, 64, 1024)`
+  across all arguments and nested containers. Exceeding the budget or failing
+  to duplicate a valid fd rejects the whole decode and closes every `unixFd`
+  it created: method calls receive `InvalidArgs`, replies settle as `Failed`,
+  and signals are dropped with a warning naming the member and limit. An
+  invalid fd within the budget still arrives as `valid === false`.
+
+### Fixed
+
+- **Large signal lists caused quadratic proxy subscription setup and one
+  match rule per signal.** A proxy with known signal names now installs one
+  interface-wide match rule and filters members through a `QSet` built from
+  the same introspection and catalog sources. Shared subscriptions also
+  deduplicate members with a `QSet`. With no known signals, no interface hook
+  is installed and no interface signals are delivered, preserving 1.1.1
+  behavior. `PropertiesChanged` retains its separate subscription and single
+  delivery; current-owner checks and queued-delivery revocation are unchanged.
+
+- **Raw received fd references consumed a redundant descriptor copy.**
+  Raw `h` reads now adopt Qt's freshly demarshalled duplicate instead of
+  duplicating it again, so each reference creates one owning descriptor.
+  Shared native Qt fd carriers still require an independent duplicate to
+  preserve listener ownership; ordinary `unixFd` constructors keep duplicating.
+
 ## [1.1.1] - 2026-10-25
 
 ### Changed
