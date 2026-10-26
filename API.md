@@ -227,7 +227,7 @@ purpose.
 | Signal | Arguments | Description |
 | :--- | :--- | :--- |
 | `signalReceived(name, args)` | `string name`, `list args` | Emitted when a D-Bus signal from the configured service's current owner is received. |
-| `valueChanged(key, value)` | `string key`, `variant value` | Emitted when a dynamic property changes (from QQmlPropertyMap). |
+| `valueChanged(key, value)` | `string key`, `variant value` | Emitted for dynamic-property writes originating in QML (from QQmlPropertyMap). Cache updates from D-Bus notify property bindings, but do not emit this signal. |
 
 #### Toggle Signals
 

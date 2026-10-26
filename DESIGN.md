@@ -358,6 +358,16 @@ QML
   └── TypedValues → Q_GADGET value types with QML_CONSTRUCTIBLE_VALUE.
 ```
 
+### Proxy map updates
+
+All multi-key proxy map updates (method closures, catalog/introspection
+placeholders, GetAll replies and PropertiesChanged) use one private batch
+insertion path. Qt's `QQmlPropertyMap::insert(QVariantHash)` creates new
+keys with one dynamic-metaobject rebuild rather than one rebuild per key.
+Existing bindings still receive per-property notifications; cache updates
+do not invoke the QML-write hook or emit `valueChanged`. Reserved map names
+are rejected individually so one bad member cannot discard valid siblings.
+
 ### Why JS closures instead of runtime QMetaMethod?
 
 Attempting to synthesize new `Q_INVOKABLE` slots at runtime via

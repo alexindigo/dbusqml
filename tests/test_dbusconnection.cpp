@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <sys/resource.h>
 #include <QTemporaryFile>
+#include <QFile>
 #include <QDBusConnectionInterface>
 #include <QDBusContext>
 #include <QDBusMetaType>
@@ -400,6 +401,49 @@ public:
             msg.member() == QLatin1String("Good"))
             return conn.send(msg.createReply(QVariantList{QStringLiteral("ok")}));
         return false;
+    }
+};
+
+// Peer-sized member sets for the proxy map tests. GetAll can deliberately
+// omit declared properties, so placeholder and reply insertion are tested
+// independently. Everything crosses QtDBus, including later notifications.
+class ProxyBatchObject : public QDBusVirtualObject {
+public:
+    QStringList methods{QStringLiteral("Ping")};
+    QStringList properties;
+    QVariantMap values;
+    int sets = 0;
+
+    QString introspect(const QString &) const override {
+        QString xml = QStringLiteral("<interface name=\"org.dbusqml.Batch\">");
+        for (const QString &name : methods)
+            xml += QStringLiteral("<method name=\"%1\"/>").arg(name);
+        for (const QString &name : properties)
+            xml +=
+                QStringLiteral("<property name=\"%1\" type=\"i\" access=\"readwrite\"/>").arg(name);
+        return xml + QStringLiteral("</interface>");
+    }
+
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.interface() == QLatin1String("org.freedesktop.DBus.Properties")) {
+            if (msg.member() == QLatin1String("GetAll"))
+                return conn.send(msg.createReply(QVariantList{values}));
+            if (msg.member() == QLatin1String("Set")) {
+                ++sets;
+                return conn.send(msg.createReply());
+            }
+        }
+        if (msg.interface() == QLatin1String("org.dbusqml.Batch"))
+            return conn.send(msg.createReply(QVariantList{msg.member()}));
+        return false;
+    }
+
+    bool notify(const QVariantMap &changed) const {
+        auto msg = QDBusMessage::createSignal(QStringLiteral("/Batch"),
+                                              QStringLiteral("org.freedesktop.DBus.Properties"),
+                                              QStringLiteral("PropertiesChanged"));
+        msg.setArguments({QStringLiteral("org.dbusqml.Batch"), changed, QStringList{}});
+        return QDBusConnection::sessionBus().send(msg);
     }
 };
 
@@ -2461,6 +2505,154 @@ private slots:
         QCOMPARE(proxy.property("level").toUInt(), 999u);
     }
 
+    void testProxyBatchBindings_data() {
+        QTest::addColumn<QString>("source");
+        for (const char *source : {"introspection", "catalog", "getall", "changed"})
+            QTest::newRow(source) << QString::fromLatin1(source);
+    }
+
+    void testProxyBatchBindings() {
+        QFETCH(QString, source);
+        auto bus = QDBusConnection::sessionBus();
+        ProxyBatchObject peer;
+        if (source == QLatin1String("introspection"))
+            peer.properties = {QStringLiteral("Level0"), QStringLiteral("Level1")};
+        if (source == QLatin1String("getall"))
+            peer.values = {{QStringLiteral("Level0"), 10}, {QStringLiteral("Level1"), 11}};
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/Batch"), &peer));
+        const auto unregister =
+            qScopeGuard([&] { bus.unregisterObject(QStringLiteral("/Batch")); });
+
+        // A private catalog exercises synchronous prepopulation before
+        // introspection. Restore the global catalog even on an assertion exit.
+        QTemporaryDir catalog;
+        QVERIFY(catalog.isValid());
+        const bool hadPath = qEnvironmentVariableIsSet("DBUSQML_TYPES_PATH");
+        const QByteArray oldPath = qgetenv("DBUSQML_TYPES_PATH");
+        const auto restore = qScopeGuard([&] {
+            if (hadPath)
+                qputenv("DBUSQML_TYPES_PATH", oldPath);
+            else
+                qunsetenv("DBUSQML_TYPES_PATH");
+            DBusProxy::reloadTypes();
+        });
+        if (source == QLatin1String("catalog")) {
+            QFile file(catalog.filePath(QStringLiteral("batch.xml")));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QVERIFY(file.write("<node><interface name=\"org.dbusqml.Batch\">"
+                               "<property name=\"Level0\" type=\"i\" access=\"readwrite\"/>"
+                               "<property name=\"Level1\" type=\"i\" access=\"readwrite\"/>"
+                               "</interface></node>") > 0);
+            file.close();
+            qputenv("DBUSQML_TYPES_PATH", catalog.path().toUtf8());
+            DBusProxy::reloadTypes();
+        }
+
+        QQmlEngine engine;
+        DBusProxy proxy;
+        QQmlEngine::setContextForObject(&proxy, engine.rootContext());
+        engine.rootContext()->setContextProperty(QStringLiteral("endpoint"), &proxy);
+        QQmlComponent observer(&engine);
+        observer.setData("import QtQml\nQtObject { property var seen: endpoint.level0 }", QUrl());
+        QVERIFY2(observer.isReady(), qPrintable(observer.errorString()));
+        QScopedPointer<QObject> before(observer.create());
+        QVERIFY(before);
+        QSignalSpy qmlWrites(&proxy, &QQmlPropertyMap::valueChanged);
+        proxy.setService(bus.baseService());
+        proxy.setPath(QStringLiteral("/Batch"));
+        proxy.setIface(QStringLiteral("org.dbusqml.Batch"));
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        if (source == QLatin1String("changed"))
+            QVERIFY(peer.notify({{QStringLiteral("Level0"), 10}, {QStringLiteral("Level1"), 11}}));
+        QTRY_VERIFY_WITH_TIMEOUT(proxy.value(QStringLiteral("level1")).isValid(), 5000);
+        QCOMPARE(before->property("seen"), proxy.value(QStringLiteral("level0")));
+
+        // level1 has never been read by QML: its first creation above must
+        // come from the chosen batch path. Bind AFTER that insertion too.
+        observer.setData("import QtQml\nQtObject { property var seen: endpoint.level1 }", QUrl());
+        QScopedPointer<QObject> after(observer.create());
+        QVERIFY(after);
+        QCOMPARE(after->property("seen"), proxy.value(QStringLiteral("level1")));
+        for (int value : {20, 30}) {
+            QVERIFY(peer.notify(
+                {{QStringLiteral("Level0"), value}, {QStringLiteral("Level1"), value + 1}}));
+            QTRY_COMPARE_WITH_TIMEOUT(before->property("seen").toInt(), value, 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(after->property("seen").toInt(), value + 1, 5000);
+        }
+        QCOMPARE(qmlWrites.count(), 0); // C++ cache updates are not QML writes
+        QCOMPARE(peer.sets, 0);         // and must not invoke updateValue/Set
+    }
+
+    void testProxyBatchReservedNames_data() {
+        QTest::addColumn<QString>("source");
+        for (const char *source : {"methods", "introspection", "catalog", "getall", "changed"})
+            QTest::newRow(source) << QString::fromLatin1(source);
+    }
+
+    void testProxyBatchReservedNames() {
+        QFETCH(QString, source);
+        auto bus = QDBusConnection::sessionBus();
+        ProxyBatchObject peer;
+        const QStringList names{QStringLiteral("Keys"),      QStringLiteral("ValueChanged"),
+                                QStringLiteral("Destroyed"), QStringLiteral("DeleteLater"),
+                                QStringLiteral("Level0"),    QStringLiteral("Level1")};
+        QVariantMap values;
+        for (const QString &name : names)
+            values.insert(name, 42);
+        if (source == QLatin1String("methods"))
+            peer.methods = names;
+        if (source == QLatin1String("introspection"))
+            peer.properties = names;
+        if (source == QLatin1String("getall"))
+            peer.values = values;
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/Batch"), &peer));
+        const auto unregister =
+            qScopeGuard([&] { bus.unregisterObject(QStringLiteral("/Batch")); });
+        QTemporaryDir catalog;
+        QVERIFY(catalog.isValid());
+        const bool hadPath = qEnvironmentVariableIsSet("DBUSQML_TYPES_PATH");
+        const QByteArray oldPath = qgetenv("DBUSQML_TYPES_PATH");
+        const auto restore = qScopeGuard([&] {
+            if (hadPath)
+                qputenv("DBUSQML_TYPES_PATH", oldPath);
+            else
+                qunsetenv("DBUSQML_TYPES_PATH");
+            DBusProxy::reloadTypes();
+        });
+        if (source == QLatin1String("catalog")) {
+            peer.properties = names;
+            QFile file(catalog.filePath(QStringLiteral("batch.xml")));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QVERIFY(file.write(
+                        (QStringLiteral("<node>") + peer.introspect({}) + QStringLiteral("</node>"))
+                            .toUtf8()) > 0);
+            file.close();
+            peer.properties.clear();
+            qputenv("DBUSQML_TYPES_PATH", catalog.path().toUtf8());
+            DBusProxy::reloadTypes();
+        }
+        QQmlEngine engine;
+        DBusProxy proxy;
+        QQmlEngine::setContextForObject(&proxy, engine.rootContext());
+        proxy.setService(bus.baseService());
+        proxy.setPath(QStringLiteral("/Batch"));
+        proxy.setIface(QStringLiteral("org.dbusqml.Batch"));
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        if (source == QLatin1String("changed"))
+            QVERIFY(peer.notify(values));
+        QTRY_VERIFY_WITH_TIMEOUT(proxy.value(QStringLiteral("level1")).isValid(), 5000);
+        QVERIFY(proxy.value(QStringLiteral("level0")).isValid());
+        for (const QString &key : {QStringLiteral("keys"), QStringLiteral("valueChanged"),
+                                   QStringLiteral("destroyed"), QStringLiteral("deleteLater")})
+            QVERIFY(!proxy.contains(key));
+        if (source == QLatin1String("methods"))
+            QVERIFY(proxy.value(QStringLiteral("level0")).value<QJSValue>().isCallable());
+        else if (source == QLatin1String("getall") || source == QLatin1String("changed"))
+            QCOMPARE(proxy.value(QStringLiteral("level0")).toInt(), 42);
+        else
+            QVERIFY(proxy.value(QStringLiteral("level0")).isNull());
+    }
+
     void testProxyPlaceholderRecordsWireName() {
         // A16: properties known only from live introspection must record the
         // wire name at placeholder time — a write before GetAll backfills the
@@ -3497,6 +3689,70 @@ private slots:
         QVERIFY2(!reply->isError(),
                  qPrintable(reply->error().name() + ": " + reply->error().message()));
         delete reply;
+    }
+
+    void testProxyBatchScale_data() {
+        QTest::addColumn<QString>("source");
+        for (const char *source : {"introspection", "getall", "changed"})
+            QTest::newRow(source) << QString::fromLatin1(source);
+    }
+
+    void testProxyBatchScale() {
+        QFETCH(QString, source);
+        auto bus = QDBusConnection::sessionBus();
+        ProxyBatchObject peer;
+        QVariantMap values;
+        if (source == QLatin1String("introspection"))
+            peer.methods.clear();
+        for (int i = 0; i < 4000; ++i) {
+            if (source == QLatin1String("introspection")) {
+                peer.methods << QStringLiteral("Method%1").arg(i);
+                peer.properties << QStringLiteral("Level%1").arg(i);
+            }
+            values.insert(QStringLiteral("Level%1").arg(i), i);
+        }
+        if (source != QLatin1String("changed"))
+            peer.values = values;
+        QVERIFY(bus.registerVirtualObject(QStringLiteral("/Batch"), &peer));
+        const auto unregister =
+            qScopeGuard([&] { bus.unregisterObject(QStringLiteral("/Batch")); });
+        QQmlEngine engine;
+        DBusProxy proxy;
+        QQmlEngine::setContextForObject(&proxy, engine.rootContext());
+        proxy.setService(bus.baseService());
+        proxy.setPath(QStringLiteral("/Batch"));
+        if (source == QLatin1String("changed")) {
+            proxy.setIface(QStringLiteral("org.dbusqml.Batch"));
+            QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        }
+        QElapsedTimer timer;
+        timer.start();
+        if (source == QLatin1String("changed")) {
+            QVERIFY(peer.notify(values));
+            QTRY_COMPARE_WITH_TIMEOUT(proxy.value(QStringLiteral("level3999")).toInt(), 3999,
+                                      30000);
+        } else {
+            proxy.setIface(QStringLiteral("org.dbusqml.Batch"));
+            QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 30000);
+        }
+        const qint64 elapsed = timer.elapsed();
+        qInfo("proxy batch scale %s: %lld ms (4000 properties%s)", qPrintable(source),
+              static_cast<long long>(elapsed),
+              source == QLatin1String("introspection") ? " + 4000 methods" : "");
+        for (int i = 0; i < 4000; ++i) {
+            QCOMPARE(proxy.value(QStringLiteral("level%1").arg(i)).toInt(), i);
+            if (source == QLatin1String("introspection"))
+                QVERIFY(
+                    proxy.value(QStringLiteral("method%1").arg(i)).value<QJSValue>().isCallable());
+        }
+        // VM calibration includes ASan: ~1.6 s for introspection and
+        // ~0.5 s for the other paths. Leave >3x margin in every build;
+        // the quadratic baseline takes ~21 s / ~4.8 s / ~4.8 s.
+        const int bound = source == QLatin1String("introspection") ? 6000 : 3000;
+        QVERIFY2(elapsed < bound,
+                 qPrintable(QStringLiteral("multi-key event took %1 ms (bound %2 ms)")
+                                .arg(elapsed)
+                                .arg(bound)));
     }
 
     void testDynamicMethodsExist() {

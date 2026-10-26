@@ -149,6 +149,7 @@ private:
     void doIntrospect();
     void scheduleIntrospect();
     void onIntrospectionReady(const QString &xml);
+    void insertBatch(const QVariantHash &values);
     void setupDynamicMethods(const QStringList &methodNames);
     void disconnectSignals();
     void prepopulateFromCatalog();
