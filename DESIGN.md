@@ -447,10 +447,17 @@ are valid nested values; only an empty top-level `g` stays refused.
 Both XML parsers — the peer-introspection parser
 (`parseDBusIntrospection`) and the local catalog loader — go through one
 hardened reader (`DBusHardenedXmlReader`). Inputs larger than 4 MiB are
-refused before parsing; a DTD is allowed (real libdbus `Introspect()`
-replies carry one) but any entity declaration refuses the document at
-the DTD token — before any content is scanned, so no entity expansion
-can run. A refused document yields no data: the introspection parser
+refused before parsing. The reader scans the bounded input's prolog before
+handing any input to Qt: it skips the XML declaration, whitespace, comments
+and processing instructions, then examines DOCTYPEs with quote-aware
+delimiters. An unquoted `[` refuses the document, including empty internal
+subsets; quoted brackets in external identifiers remain accepted. Device
+input is snapshotted under the same size cap and decoded for this scan
+using its XML encoding. The scan stops at the document body. External-only
+DOCTYPEs (real libdbus `Introspect()` replies) remain accepted. Qt processes
+DTD attribute defaults and parameter entity references before returning
+the DTD token, so the token-level entity check is defence in depth only.
+A refused document yields no data: the introspection parser
 returns empty (the catalog/inference tiers take over), the catalog
 loader discards the file whole; each path warns once.
 

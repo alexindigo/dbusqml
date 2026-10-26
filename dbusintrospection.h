@@ -12,16 +12,13 @@ class QIODevice;
 //
 //   * an input larger than 4 MiB (its encoded size: UTF-16 bytes for
 //     in-memory text, device bytes for files) is refused before parsing;
-//   * a DOCTYPE is allowed (real libdbus Introspect() replies carry one),
-//     but ANY entity declaration in it refuses the document at the DTD
-//     token.
+//   * a DOCTYPE with only an external id is allowed (real libdbus
+//     Introspect() replies carry one), but an internal DTD subset is
+//     refused by a prolog scan before any input is handed to Qt's parser.
 //
-// Refusing at the DTD token means no entity expansion can ever happen:
-// QXmlStreamReader guarantees the DTD token precedes every content token,
-// and declared entities are expanded only while scanning content and
-// attribute values (Qt 6.11.2: qxmlstreamparser_p.h emits the DTD token
-// after the internal subset is scanned; expansion runs from entityHash in
-// the content scanner only).
+// Qt parses DTD declarations (including attribute defaults and parameter
+// entity references) inside readNext(), before returning the DTD token.
+// The token-level entity check remains as defence in depth, not the gate.
 //
 // A refused document yields no data: callers check refused() after the
 // parse loop (atEnd() covers refusal) and discard the whole document with
@@ -48,7 +45,7 @@ public:
 
 private:
     QXmlStreamReader m_reader;
-    QByteArray m_bounded; // backing store for sequential devices
+    QByteArray m_bounded; // bounded, pre-scanned snapshot of any device
     QString m_refusal;
 };
 

@@ -173,7 +173,7 @@ void DBusCatalog::loadFile(const QString &filePath) {
 
     if (reader.refused()) {
         // Same discard-whole policy as a malformed file: oversize or
-        // entity-declaring documents are never merged.
+        // internal-subset documents are never merged.
         qWarning() << "DBusCatalog: XML refused in" << filePath
                    << "- skipping file:" << reader.refusalReason();
         return;

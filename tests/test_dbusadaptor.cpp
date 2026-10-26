@@ -686,7 +686,9 @@ private slots:
     void testAliasJsPathPrecision64();
     void testCatalogSourcesAndPrecedence();
     void testCatalogMalformedXmlSkipped();
+    void testCatalogEntityDeclarationsRefused_data();
     void testCatalogEntityDeclarationsRefused();
+    void testCatalogDoctypeWithoutEntitiesAccepted_data();
     void testCatalogDoctypeWithoutEntitiesAccepted();
     void testCatalogOversizeRefused();
 
@@ -9004,22 +9006,37 @@ void TestDBusAdaptor::testCatalogMalformedXmlSkipped() {
     DBusCatalog::instance().reload();
 }
 
-// XML hardening (P5): a catalog file that declares XML entities is refused
-// whole at the DTD token — the same policy as peer introspection XML (no
-// entity expansion ever runs), one warning, nothing merged.
+// Catalog files use the same pre-parse internal-subset refusal as peer XML:
+// one warning, nothing merged, even without any entity declarations.
+void TestDBusAdaptor::testCatalogEntityDeclarationsRefused_data() {
+    QTest::addColumn<QByteArray>("declarations");
+    QTest::newRow("entity") << QByteArray("<!ENTITY t 's'>");
+    QTest::newRow("attribute-default-entity")
+        << QByteArray("<!ENTITY t 's'><!ATTLIST arg type CDATA '&t;&t;'>");
+    QTest::newRow("parameter-entity")
+        << QByteArray("<!ENTITY % p '<!ATTLIST arg type CDATA \"s\">'>%p;");
+    QTest::newRow("empty-subset") << QByteArray();
+    QTest::newRow("attribute-default-no-entity") << QByteArray("<!ATTLIST arg type CDATA 's'>");
+}
+
 void TestDBusAdaptor::testCatalogEntityDeclarationsRefused() {
+    QFETCH(QByteArray, declarations);
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     {
         QFile f(dir.filePath(QStringLiteral("entities.xml")));
         QVERIFY(f.open(QIODevice::WriteOnly));
-        f.write("<!DOCTYPE node [ <!ENTITY t \"s\"> ]>\n"
+        f.write("<?xml version='1.0'?><!-- <!DOCTYPE fake []> --><?probe ignored?>"
+                "<!DOCTYPE node [" +
+                declarations +
+                "]>\n"
                 "<node><interface name=\"org.dbusqml.EntityCat\">"
-                "<method name=\"M\"><arg type=\"&t;\" direction=\"in\"/></method>"
+                "<method name=\"M\"><arg direction=\"in\"/></method>"
                 "</interface></node>");
     }
-    QTest::ignoreMessage(QtWarningMsg,
-                         QRegularExpression(QStringLiteral("DBusCatalog: XML refused")));
+    QTest::ignoreMessage(
+        QtWarningMsg, QRegularExpression(QStringLiteral(
+                          "DBusCatalog: XML refused.*document declares an internal DTD subset")));
     qputenv("DBUSQML_TYPES_PATH", dir.path().toLocal8Bit());
     DBusCatalog::instance().reload();
     QVERIFY(!DBusCatalog::instance().lookup(QStringLiteral("org.dbusqml.EntityCat")).has_value());
@@ -9028,18 +9045,27 @@ void TestDBusAdaptor::testCatalogEntityDeclarationsRefused() {
 }
 
 // The DOCTYPE itself is allowed — real libdbus introspection XML carries
-// one; only entity declarations refuse the file.
+// one; an internal subset refuses the file.
+void TestDBusAdaptor::testCatalogDoctypeWithoutEntitiesAccepted_data() {
+    QTest::addColumn<QByteArray>("prolog");
+    QTest::newRow("freedesktop") << QByteArray(
+        "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\"\n"
+        "  \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n");
+    QTest::newRow("comment") << QByteArray("<!-- <!DOCTYPE node []> -->");
+    QTest::newRow("pi") << QByteArray("<?probe <!DOCTYPE node []>?>");
+    QTest::newRow("quoted-bracket") << QByteArray("<!DOCTYPE node SYSTEM 'unused[>\"file.dtd'>");
+}
+
 void TestDBusAdaptor::testCatalogDoctypeWithoutEntitiesAccepted() {
+    QFETCH(QByteArray, prolog);
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     {
         QFile f(dir.filePath(QStringLiteral("doctype.xml")));
         QVERIFY(f.open(QIODevice::WriteOnly));
-        f.write("<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\"\n"
-                "  \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n"
-                "<node><interface name=\"org.dbusqml.DoctypeCat\">"
-                "<method name=\"Ping\"><arg type=\"s\" direction=\"in\"/></method>"
-                "</interface></node>");
+        f.write(prolog + "<node><interface name=\"org.dbusqml.DoctypeCat\">"
+                         "<method name=\"Ping\"><arg type=\"s\" direction=\"in\"/></method>"
+                         "</interface></node>");
     }
     qputenv("DBUSQML_TYPES_PATH", dir.path().toLocal8Bit());
     DBusCatalog::instance().reload();

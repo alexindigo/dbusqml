@@ -1,11 +1,109 @@
 #include "dbusintrospection.h"
 
 #include <QIODevice>
+#include <QStringConverter>
+
+static bool isXmlSpace(QChar c) {
+    return c == u' ' || c == u'\t' || c == u'\r' || c == u'\n';
+}
+
+// Only inspect the prolog. Markup-looking text in comments, PIs, quoted
+// external identifiers and the document body is not a DTD declaration.
+static bool declaresInternalSubset(QStringView xml) {
+    qsizetype pos = !xml.isEmpty() && xml.front() == QChar::ByteOrderMark ? 1 : 0;
+    while (pos < xml.size()) {
+        if (isXmlSpace(xml[pos])) {
+            ++pos;
+        } else if (xml.sliced(pos).startsWith(QLatin1String("<!--"))) {
+            const qsizetype end = xml.indexOf(QLatin1String("-->"), pos + 4);
+            if (end < 0)
+                return false; // malformed XML remains the parser's responsibility
+            pos = end + 3;
+        } else if (xml.sliced(pos).startsWith(QLatin1String("<?"))) {
+            const qsizetype end = xml.indexOf(QLatin1String("?>"), pos + 2);
+            if (end < 0)
+                return false;
+            pos = end + 2;
+        } else if (xml.sliced(pos).startsWith(QLatin1String("<!DOCTYPE"))) {
+            pos += 9;
+            QChar quote;
+            while (pos < xml.size()) {
+                const QChar c = xml[pos++];
+                if (!quote.isNull()) {
+                    if (c == quote)
+                        quote = QChar();
+                } else if (c == u'\'' || c == u'"') {
+                    quote = c;
+                } else if (c == u'[') {
+                    return true;
+                } else if (c == u'>') {
+                    break;
+                }
+            }
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
+// Match Qt's byte-input encoding detection, including an explicit encoding
+// in the XML declaration. Decoding is bounded by the input cap and does not
+// parse a DTD or resolve entities. The original bytes still go to Qt.
+static QString decodeXmlForProlog(const QByteArray &bytes) {
+    const auto encoding =
+        QStringDecoder::encodingForData(bytes, u'<').value_or(QStringDecoder::Utf8);
+    QStringDecoder decoder(encoding);
+    QString text = decoder(bytes);
+    QStringView xml(text);
+    if (!xml.isEmpty() && xml.front() == QChar::ByteOrderMark)
+        xml = xml.sliced(1);
+    if (!xml.startsWith(QLatin1String("<?xml")) || xml.size() <= 5 || !isXmlSpace(xml[5]))
+        return text;
+    const qsizetype end = xml.indexOf(QLatin1String("?>"), 5);
+    if (end < 0)
+        return text;
+    xml = xml.first(end);
+    qsizetype pos = 5;
+    while (pos < xml.size()) {
+        while (pos < xml.size() && isXmlSpace(xml[pos]))
+            ++pos;
+        const qsizetype nameStart = pos;
+        while (pos < xml.size() && !isXmlSpace(xml[pos]) && xml[pos] != u'=')
+            ++pos;
+        const QStringView name = xml.sliced(nameStart, pos - nameStart);
+        while (pos < xml.size() && isXmlSpace(xml[pos]))
+            ++pos;
+        if (pos == xml.size() || xml[pos++] != u'=')
+            break;
+        while (pos < xml.size() && isXmlSpace(xml[pos]))
+            ++pos;
+        if (pos == xml.size() || (xml[pos] != u'\'' && xml[pos] != u'"'))
+            break;
+        const QChar quote = xml[pos++];
+        const qsizetype valueStart = pos;
+        pos = xml.indexOf(quote, pos);
+        if (pos < 0)
+            break;
+        if (name == QLatin1String("encoding")) {
+            QStringDecoder declared(xml.sliced(valueStart, pos - valueStart));
+            if (declared.isValid())
+                return declared(bytes);
+            break; // Qt reports an unsupported encoding
+        }
+        ++pos;
+    }
+    return text;
+}
 
 DBusHardenedXmlReader::DBusHardenedXmlReader(const QString &xml) {
     if (qint64(xml.size()) * qint64(sizeof(QChar)) > sizeLimitBytes) {
         m_refusal = QStringLiteral("document exceeds the %1 MiB size limit")
                         .arg(sizeLimitBytes / 1024 / 1024);
+        return;
+    }
+    if (declaresInternalSubset(xml)) {
+        m_refusal = QStringLiteral("document declares an internal DTD subset");
         return;
     }
     m_reader.addData(xml);
@@ -16,33 +114,43 @@ DBusHardenedXmlReader::DBusHardenedXmlReader(QIODevice *device) {
         m_refusal = QStringLiteral("no input device");
         return;
     }
-    if (device->isSequential()) {
-        // Size unknown up front: bound the read instead.
-        m_bounded = device->read(sizeLimitBytes + 1);
-        if (m_bounded.size() > sizeLimitBytes) {
-            m_refusal = QStringLiteral("document exceeds the %1 MiB size limit")
-                            .arg(sizeLimitBytes / 1024 / 1024);
-            m_bounded.clear();
-            return;
-        }
-        m_reader.addData(m_bounded);
-    } else {
-        if (device->size() > sizeLimitBytes) {
-            m_refusal = QStringLiteral("document exceeds the %1 MiB size limit")
-                            .arg(sizeLimitBytes / 1024 / 1024);
-            return;
-        }
-        m_reader.setDevice(device);
+    if (!device->isSequential() && device->size() > sizeLimitBytes) {
+        m_refusal = QStringLiteral("document exceeds the %1 MiB size limit")
+                        .arg(sizeLimitBytes / 1024 / 1024);
+        return;
     }
+    // Snapshot every device before parsing, including non-sequential files:
+    // Qt must never read unexamined bytes (or a later revision of the file).
+    char chunk[16 * 1024];
+    while (m_bounded.size() <= sizeLimitBytes) {
+        const qint64 remaining = sizeLimitBytes + 1 - m_bounded.size();
+        const qint64 count = device->read(chunk, qMin(remaining, qint64(sizeof(chunk))));
+        // A short positive read is not EOF. Both 0 (no current data) and
+        // -1 (error or permanent stream end) stop this non-blocking snapshot;
+        // the accumulated bytes still go through the same XML validation.
+        if (count <= 0)
+            break;
+        m_bounded.append(chunk, count);
+    }
+    if (m_bounded.size() > sizeLimitBytes) {
+        m_refusal = QStringLiteral("document exceeds the %1 MiB size limit")
+                        .arg(sizeLimitBytes / 1024 / 1024);
+        m_bounded.clear();
+        return;
+    }
+    if (declaresInternalSubset(decodeXmlForProlog(m_bounded))) {
+        m_refusal = QStringLiteral("document declares an internal DTD subset");
+        return;
+    }
+    m_reader.addData(m_bounded);
 }
 
 QXmlStreamReader::TokenType DBusHardenedXmlReader::readNext() {
     if (refused())
         return QXmlStreamReader::Invalid;
     const QXmlStreamReader::TokenType token = m_reader.readNext();
-    // The DTD token precedes all content tokens, and entity expansion runs
-    // only while scanning content — refusing here means nothing this
-    // document declares was ever expanded.
+    // Defence in depth only: Qt has already parsed the internal subset by
+    // this point, including attribute defaults and parameter references.
     if (token == QXmlStreamReader::DTD && !m_reader.entityDeclarations().isEmpty())
         m_refusal = QStringLiteral("document declares XML entities");
     return token;
@@ -154,8 +262,7 @@ DBusIntrospectionData parseDBusIntrospection(const QString &xml, const QString &
         break; // only one target interface
     }
 
-    // Refusal (size cap before parsing, entity declarations at the DTD
-    // token): no data from the document is used, one warning.
+    // Refusal: no data from the document is used, one warning.
     if (reader.refused()) {
         qWarning("DBus: introspection XML refused for %s: %s", qPrintable(iface),
                  qPrintable(reader.refusalReason()));
