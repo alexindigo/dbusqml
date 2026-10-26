@@ -121,7 +121,17 @@ DBusHardenedXmlReader::DBusHardenedXmlReader(QIODevice *device) {
     }
     // Snapshot every device before parsing, including non-sequential files:
     // Qt must never read unexamined bytes (or a later revision of the file).
-    m_bounded = device->read(sizeLimitBytes + 1);
+    char chunk[16 * 1024];
+    while (m_bounded.size() <= sizeLimitBytes) {
+        const qint64 remaining = sizeLimitBytes + 1 - m_bounded.size();
+        const qint64 count = device->read(chunk, qMin(remaining, qint64(sizeof(chunk))));
+        // A short positive read is not EOF. Both 0 (no current data) and
+        // -1 (error or permanent stream end) stop this non-blocking snapshot;
+        // the accumulated bytes still go through the same XML validation.
+        if (count <= 0)
+            break;
+        m_bounded.append(chunk, count);
+    }
     if (m_bounded.size() > sizeLimitBytes) {
         m_refusal = QStringLiteral("document exceeds the %1 MiB size limit")
                         .arg(sizeLimitBytes / 1024 / 1024);

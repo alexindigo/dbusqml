@@ -2,12 +2,40 @@
 #include <QElapsedTimer>
 #include <QBuffer>
 #include <QStringConverter>
+#include <algorithm>
+#include <cstring>
 #include "dbusintrospection.h"
 
-class SequentialXmlBuffer : public QBuffer {
+class ChunkedXmlDevice : public QIODevice {
 public:
-    using QBuffer::QBuffer;
+    ChunkedXmlDevice(const QByteArray &bytes, qint64 terminalResult, qint64 chunkSize = 7)
+        : m_bytes(bytes), m_terminalResult(terminalResult), m_chunkSize(chunkSize) {}
     bool isSequential() const override { return true; }
+    bool waitForReadyRead(int) override {
+        ++waitCalls;
+        return false;
+    }
+    qsizetype consumed() const { return m_pos; }
+    int waitCalls = 0;
+
+protected:
+    qint64 readData(char *data, qint64 maxSize) override {
+        if (maxSize == 0)
+            return 0;
+        if (m_pos == m_bytes.size())
+            return m_terminalResult;
+        const qint64 count = std::min({maxSize, m_chunkSize, qint64(m_bytes.size() - m_pos)});
+        std::memcpy(data, m_bytes.constData() + m_pos, size_t(count));
+        m_pos += count;
+        return count;
+    }
+    qint64 writeData(const char *, qint64) override { return -1; }
+
+private:
+    QByteArray m_bytes;
+    qint64 m_terminalResult;
+    qint64 m_chunkSize;
+    qsizetype m_pos = 0;
 };
 
 // Warning capture for the refusal tests: a refused document must produce
@@ -275,7 +303,7 @@ private slots:
                 QVERIFY(device.open(QIODevice::ReadOnly));
                 DBusHardenedXmlReader deviceReader(&device);
                 checkReader(deviceReader);
-                SequentialXmlBuffer sequential(&bytes);
+                ChunkedXmlDevice sequential(bytes, 0, bytes.size());
                 QVERIFY(sequential.open(QIODevice::ReadOnly));
                 DBusHardenedXmlReader sequentialReader(&sequential);
                 checkReader(sequentialReader);
@@ -342,6 +370,68 @@ private slots:
         }
     }
 
+    void testChunkedDeviceSnapshot_data() {
+        QTest::addColumn<QByteArray>("bytes");
+        QTest::addColumn<qint64>("terminalResult");
+        QTest::addColumn<QString>("outcome");
+        const QByteArray body("<node><method name='Later'/></node>");
+        const QByteArray prolog("<?xml version='1.0'?><!-- ignored -->");
+        const QByteArray suffix("--><method name='Later'/></node>");
+        QByteArray atCap("<node><!--");
+        atCap +=
+            QByteArray(DBusHardenedXmlReader::sizeLimitBytes - atCap.size() - suffix.size(), 'x');
+        atCap += suffix;
+        for (qint64 terminal : {qint64(0), qint64(-1)}) {
+            const QByteArray ending = terminal == 0 ? "-zero" : "-minus-one";
+            QTest::newRow(("valid" + ending).constData())
+                << prolog + "<!DOCTYPE node SYSTEM 'unused[>file.dtd'>" + body << terminal
+                << QStringLiteral("valid");
+            QTest::newRow(("later-subset" + ending).constData())
+                << prolog + "<!DOCTYPE node [<!ATTLIST method name CDATA 'Default'>]>" + body
+                << terminal << QStringLiteral("subset");
+            QTest::newRow(("at-cap" + ending).constData())
+                << atCap << terminal << QStringLiteral("valid");
+            QTest::newRow(("over-cap" + ending).constData())
+                << atCap + QByteArray(100, ' ') << terminal << QStringLiteral("oversize");
+            QTest::newRow(("truncated" + ending).constData())
+                << prolog + "<node><method name='Later'/>" << terminal
+                << QStringLiteral("truncated");
+        }
+    }
+
+    void testChunkedDeviceSnapshot() {
+        QFETCH(QByteArray, bytes);
+        QFETCH(qint64, terminalResult);
+        QFETCH(QString, outcome);
+        ChunkedXmlDevice device(bytes, terminalResult);
+        QVERIFY(device.open(QIODevice::ReadOnly | QIODevice::Unbuffered));
+        DBusHardenedXmlReader reader(&device);
+        QCOMPARE(device.waitCalls, 0);
+        if (outcome == QLatin1String("subset") || outcome == QLatin1String("oversize")) {
+            QVERIFY(reader.refused());
+            QCOMPARE(reader.refusalReason(),
+                     outcome == QLatin1String("subset")
+                         ? QStringLiteral("document declares an internal DTD subset")
+                         : QStringLiteral("document exceeds the 4 MiB size limit"));
+            QCOMPARE(reader.readNext(), QXmlStreamReader::Invalid);
+            QVERIFY(!reader.isStartElement());
+        } else {
+            QVERIFY(!reader.refused());
+            QStringList methods;
+            while (!reader.atEnd()) {
+                reader.readNext();
+                if (reader.isStartElement() && reader.name() == QLatin1String("method"))
+                    methods << reader.attributes().value("name").toString();
+            }
+            QCOMPARE(reader.hasError(), outcome == QLatin1String("truncated"));
+            QCOMPARE(methods, QStringList{QStringLiteral("Later")});
+        }
+        // The snapshot drains all currently readable bytes, but never asks
+        // for a byte beyond the cap's single oversize sentinel.
+        QCOMPARE(device.consumed(),
+                 std::min(qint64(bytes.size()), DBusHardenedXmlReader::sizeLimitBytes + 1));
+    }
+
     void testDeviceSizeBoundary_data() {
         QTest::addColumn<bool>("sequential");
         QTest::addColumn<bool>("oversize");
@@ -360,10 +450,10 @@ private slots:
         if (oversize)
             bytes += ' ';
         QBuffer random(&bytes);
-        SequentialXmlBuffer stream(&bytes);
-        QBuffer &device = sequential ? stream : random;
-        QVERIFY(device.open(QIODevice::ReadOnly));
-        DBusHardenedXmlReader reader(&device);
+        ChunkedXmlDevice stream(bytes, 0, bytes.size());
+        QIODevice *device = sequential ? static_cast<QIODevice *>(&stream) : &random;
+        QVERIFY(device->open(QIODevice::ReadOnly));
+        DBusHardenedXmlReader reader(device);
         QCOMPARE(reader.refused(), oversize);
         if (oversize) {
             QVERIFY(
