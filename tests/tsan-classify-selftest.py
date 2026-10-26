@@ -55,8 +55,10 @@ import importlib.util
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # tests/
@@ -109,6 +111,36 @@ def expect_crosscheck(name, dump_text, want_flagged):
         print(f"FAIL: {name} (crosscheck rc={p.returncode}, wanted "
               f"{'flagged' if want_flagged else 'clean'})")
         print(f"      {p.stdout.strip()} {p.stderr.strip()}")
+
+
+def crosscheck_filename_cases(dump_text):
+    # Pass the literal basename, not an absolute/./-prefixed path: awk treats
+    # NAME=value operands as assignments even after --. Keep fixtures on disk
+    # under TMPDIR, and bound the pre-fix ARGC-induced argv walk too.
+    with tempfile.TemporaryDirectory(prefix="tsan-crosscheck-") as work:
+        for filename in ("ARGC=999999999", "x=y", "-v", "-"):
+            for dirty in (False, True):
+                text = dump_text + ("    #9 test_filename_probe\n" if dirty else "")
+                with open(os.path.join(work, filename), "w") as f:
+                    f.write(text)
+                name = f"crosscheck: literal {filename!r}, {'dirty' if dirty else 'clean'}"
+                with subprocess.Popen(["bash", CROSSCHECK, filename], cwd=work,
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, text=True,
+                                      start_new_session=True) as p:
+                    try:
+                        out, err = p.communicate(timeout=1)
+                        expected = "DISAGREEMENT" if dirty else "clean (zero artifact"
+                        ok = p.returncode == int(dirty) and expected in out + err
+                    except subprocess.TimeoutExpired:
+                        os.killpg(p.pid, signal.SIGKILL)
+                        p.communicate()
+                        ok = False
+                if ok:
+                    print(f"PASS: {name}")
+                else:
+                    failures.append(name)
+                    print(f"FAIL: {name} (wrong result or exceeded 1 s)")
 
 
 def load_classifier():
@@ -198,8 +230,96 @@ def warning_parser_cases():
         print(f"FAIL: {name}: {len(mismatches)} mismatches, first {mismatches[0]!r}")
 
 
+def linear_parser_cases():
+    cls = load_classifier()
+
+    def frame_sections(line):
+        block = cls.Block("data race")
+        block.raw = ["WARNING: ThreadSanitizer: data race", line,
+                     "SUMMARY: ThreadSanitizer: data race"]
+        cls.sectionize(block)
+        return block.sections
+
+    n = 100_000
+    frame = "    #0 x" + " " * n + "y"
+    cases = [
+        ("frame whitespace tail", lambda: frame_sections(frame),
+         [(cls.ACCESS, "", [frame])]),
+        ("creation header without marker",
+         lambda: cls.section_kind("  Thread " + "x" * n), None),
+        ("source path with many slashes",
+         lambda: cls.parse_function("func " + "/" * n + "!"),
+         "func " + "/" * n + "!"),
+        ("source path with whitespace run",
+         lambda: cls.parse_function("func " + " " * n + "/a:!"),
+         "func " + " " * n + "/a:!"),
+        ("source path with missing column",
+         lambda: cls.parse_function("func /a:" + "1" * n + ":"),
+         "func /a:" + "1" * n + ":"),
+    ]
+
+    def expired(_signum, _frame):
+        raise TimeoutError("parser exceeded 1 s")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    try:
+        for label, parse, want in cases:
+            name = f"linear parser: {label}, 100000 characters, < 1 s"
+            t0 = time.perf_counter()
+            try:
+                signal.setitimer(signal.ITIMER_REAL, 1)
+                got = parse()
+                dt = time.perf_counter() - t0
+                ok = got == want and dt < 1
+            except TimeoutError:
+                dt, ok = time.perf_counter() - t0, False
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            if ok:
+                print(f"PASS: {name} ({dt:.6f} s)")
+            else:
+                failures.append(name)
+                print(f"FAIL: {name} ({dt:.6f} s)")
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+
+    # Pin token boundaries and the original source-tail rule independently
+    # of the large inputs (relative paths, Unicode decimal digits, :: guard).
+    for rest, want in [
+            ("free /src/a.cpp:12", "free"),
+            ("free ../../src/a.cpp:12:3", "free"),
+            ("free /a:١٢", "free"),
+            ("free /a:²", "free /a:²"),
+            ("free /:12", "free /:12"),
+            ("free //:12", "free"),
+            ("free /a:12:bad", "free /a:12:bad"),
+            ("ns::free /a:12", "ns::free /a:12"),
+            ("free\t/a:12", "free"),
+            ("operator delete(void*, unsigned long) ../../src/a.cpp:12", "operator delete"),
+            ("<null> (libc.so.6+0x12) (BuildId: abcd)", "")]:
+        name = f"function token: {rest!r}"
+        if cls.parse_function(rest) == want:
+            print(f"PASS: {name}")
+        else:
+            failures.append(name)
+            print(f"FAIL: {name}")
+    for header, want in [
+            ("  Thread T1 created by main thread:", cls.CREATION),
+            ("  Thread !created by main thread:", cls.CREATION),
+            ("  Thread created by main thread:", None),
+            ("  Thread T1 xcreated by main thread:", None),
+            ("  Thread T1 created bytes:", None)]:
+        name = f"creation header: {header!r}"
+        if cls.section_kind(header) == want:
+            print(f"PASS: {name}")
+        else:
+            failures.append(name)
+            print(f"FAIL: {name}")
+
+
 def main():
     warning_parser_cases()
+    linear_parser_cases()
 
     # 4. captured real logs
     expect("real pure-ours canary log fails", "ours-pure-canary.log", True)
@@ -334,6 +454,7 @@ def main():
         real_foreign = f.read()
     expect_crosscheck("crosscheck: real foreign dump (creation-stack ours "
                       "frames) stays clean", real_foreign, False)
+    crosscheck_filename_cases(real_foreign)
     bad = real_foreign.replace(
         "    #1 <null> <null> (libQt6Core.so.6+0x2ae895)",
         "    #1 DBusProxy::touchSharedState() /home/tester/dbusqml-tip/dbus.cpp:93 "
