@@ -295,6 +295,12 @@ The adaptor:
   exact → first-char fold)
 - Handles property get/set via the Properties interface dispatch in
   `handleMessage()` (Get/GetAll/Set with catalog-typed XML)
+- Resolves property identity, catalog type/access and advertised name once per
+  operation through a shared served-property enumeration. The catalog key is
+  the advertised wire name (including `_members` aliases); privacy, library
+  configuration and `objectName` exclusions have one owner. XML, Get, GetAll,
+  Set and notify relays consume that representation. Catalog `read` refuses
+  Set; `write` refuses Get and never appears in GetAll or PropertiesChanged.
 - Emits signals via `QDBusConnection::send(QDBusMessage::createSignal(...))`
 
 Multiple interfaces on the same path use multiple `DBusAdaptor` instances with the same `service` and `path` but different `iface`.

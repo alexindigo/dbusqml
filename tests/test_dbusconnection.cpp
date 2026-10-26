@@ -3491,7 +3491,8 @@ private slots:
         adaptor.componentComplete();
         QTest::qWait(500);
 
-        // Read the 'service' property via Properties.Get
+        // Library configuration is not a served property, including for a
+        // plain C++ adaptor (whose propertyOffset starts inside the library).
         DBusMessage msg;
         msg.setService("org.dbusqml.AdaptorGetTest");
         msg.setPath("/Test");
@@ -3508,8 +3509,25 @@ private slots:
         QVERIFY(reply != nullptr);
         QSignalSpy spy(reply, &DBusPendingReply::finished);
         QVERIFY(spy.wait(3000));
-        QVERIFY(!reply->isError());
-        QCOMPARE(reply->value().toString(), QStringLiteral("org.dbusqml.AdaptorGetTest"));
+        QVERIFY(reply->isError());
+        QCOMPARE(reply->error().name(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+        delete reply;
+
+        // Preserve the successful async Get round-trip on an actual declared
+        // property, rather than using the library's configuration as payload.
+        DecodeProbeAdaptor served;
+        served.setService(QStringLiteral("org.dbusqml.AdaptorGetTest"));
+        served.setPath(QStringLiteral("/Served"));
+        served.setIface(QStringLiteral("org.dbusqml.AdaptorGetTest"));
+        served.componentComplete();
+        msg.setPath(QStringLiteral("/Served"));
+        msg.setArguments({QStringLiteral("org.dbusqml.AdaptorGetTest"), QStringLiteral("Payload")});
+        reply = bus.asyncCall(msg);
+        QVERIFY(reply != nullptr);
+        QSignalSpy servedSpy(reply, &DBusPendingReply::finished);
+        QVERIFY(servedSpy.wait(3000));
+        QVERIFY2(!reply->isError(), qPrintable(reply->error().message()));
+        QCOMPARE(reply->value().toString(), QStringLiteral("unchanged"));
         delete reply;
     }
 
