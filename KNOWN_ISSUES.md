@@ -30,6 +30,33 @@ declarations, or send explicitly with `emitSignal`. See
 
 ---
 
+## Signature-slot pool limit (permanent Qt-layer limitation)
+
+**Affects:** all dbusqml connections in the same process.
+
+Container element shapes that QtDBus cannot resolve to a metatype, beyond
+dbusqml's built-in mappings, consume a slot from a **64-slot process-wide
+pool** (`dbussignatureslots.h`, `SignatureSlotPoolSize`). For example,
+marshaling `a(ii)` assigns a slot to its `(ii)` element shape. Each distinct
+shape consumes one slot on first use; subsequent uses share that slot.
+Shapes can come from the application's own type declarations or from live
+introspection of services the application proxies.
+
+Slots are permanent for the lifetime of the process: QtDBus provides no
+way to remove `QDBusMetaType::registerCustomType` signature registrations.
+Assign-once registration is required for thread safety because Qt's
+`typeToSignature` returns a pointer into the registered signature after
+releasing its registry lock; replacing that signature could invalidate a
+pointer still in use by another thread.
+
+When the pool is full, registration of a new shape fails loudly with a
+`signature-slot pool exhausted` warning and an invalid metatype. Shapes
+already assigned a slot keep working. The caller-specific inference
+fallback described in [Shape selection](API.md#shape-selection) still
+applies when a declared container cannot be produced.
+
+---
+
 ## Thrown-`undefined` after `holdReply()` is undetectable (permanent Qt-layer limitation)
 
 **Affects:** all Qt versions (not version-gated — the indistinguishability
