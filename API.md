@@ -1048,7 +1048,7 @@ value (including depth-limit or signature-slot exhaustion) likewise warns
 and falls back to inference, except for basic-value failures. Correct
 declarations and warnings rather than relying on any fallback. Unregistered
 valid container shapes use assign-once signature-slot pool registrations (see
-`dbussignatureslots.h`).
+`dbussignatureslots.h` and the [64-slot process-wide pool limit](KNOWN_ISSUES.md#signature-slot-pool-limit-permanent-qt-layer-limitation)).
 
 **Signature limits** (D-Bus "Valid Signatures", enforced before any
 signature is registered or used): a signature is a list of complete types
