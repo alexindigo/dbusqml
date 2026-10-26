@@ -27,6 +27,15 @@ public:
     }
 
     bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.member() == QLatin1String("RoundTrip")) {
+            lastArguments = msg.arguments();
+            conn.send(msg.createReply(lastArguments));
+            return true;
+        }
+        if (msg.member() == QLatin1String("LastArguments")) {
+            conn.send(msg.createReply(lastArguments));
+            return true;
+        }
         if (msg.member() == QLatin1String("Deep33")) {
             conn.send(msg.createReply({QVariant::fromValue(DeepPayload<1, 32>{})}));
             return true;
@@ -62,6 +71,9 @@ public:
         conn.send(msg.createReply({payload}));
         return true;
     }
+
+private:
+    QVariantList lastArguments;
 };
 
 int main(int argc, char *argv[]) {

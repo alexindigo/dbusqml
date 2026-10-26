@@ -28,7 +28,25 @@
 #include <QQmlEngine>
 #include <QTimer>
 
-bool wireMarshalable(const QVariant &v) {
+static QVariant produceBasic(const QString &sig, const QVariant &v, QString *why);
+
+// D-Bus object-path elements are nonempty ASCII [A-Za-z0-9_]+.
+static bool validObjectPath(const QString &path) {
+    if (path == QLatin1String("/"))
+        return true;
+    if (!path.startsWith(QLatin1Char('/')) || path.endsWith(QLatin1Char('/')) ||
+        path.contains(QLatin1String("//")))
+        return false;
+    for (const QChar c : path) {
+        const ushort u = c.unicode();
+        if (!((u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z') || (u >= '0' && u <= '9') ||
+              u == '_' || u == '/'))
+            return false;
+    }
+    return true;
+}
+
+static bool wireMarshalableImpl(const QVariant &v, bool nested) {
     if (!v.isValid())
         return false;
     const int t = v.userType();
@@ -37,7 +55,7 @@ bool wireMarshalable(const QVariant &v) {
     if (t == qMetaTypeId<QVariantMap>()) {
         const QVariantMap map = v.toMap();
         for (auto it = map.constBegin(); it != map.constEnd(); ++it) {
-            if (!wireMarshalable(it.value()))
+            if (!wireMarshalableImpl(it.value(), true))
                 return false;
         }
         return true;
@@ -45,36 +63,28 @@ bool wireMarshalable(const QVariant &v) {
     if (t == qMetaTypeId<QVariantList>()) {
         const QVariantList list = v.toList();
         for (const QVariant &e : list) {
-            if (!wireMarshalable(e))
+            if (!wireMarshalableImpl(e, true))
                 return false;
         }
         return true;
     }
     if (t == qMetaTypeId<QDBusVariant>())
-        return wireMarshalable(v.value<QDBusVariant>().variant());
+        return wireMarshalableImpl(v.value<QDBusVariant>().variant(), true);
     // QDBusArgument carries its own signature — always marshalable.
     if (t == qMetaTypeId<QDBusArgument>())
         return true;
     // Object paths and signatures must be STRUCTURALLY valid — an invalid
     // path content passes QtDBus's type lookup and fails only at marshal
     // time (the caller would time out with zero diagnostics).
-    if (t == qMetaTypeId<QDBusObjectPath>()) {
-        const QString p = v.value<QDBusObjectPath>().path();
-        if (p.isEmpty() || (!p.startsWith(QLatin1Char('/'))))
-            return false;
-        for (const QChar &c : p) {
-            if (!(c.isLetterOrNumber() || c == QLatin1Char('/') || c == QLatin1Char('_')))
-                return false;
-        }
-        return true;
-    }
+    if (t == qMetaTypeId<QDBusObjectPath>())
+        return validObjectPath(v.value<QDBusObjectPath>().path());
     if (t == qMetaTypeId<QDBusSignature>()) {
         // A 'g' value is a message signature — validated with the full
         // spec rules (the 255-byte cap in particular: an over-long g value
         // reaches the same libdbus assert as an over-long message
-        // signature). Empty stays rejected (the existing contract).
+        // signature). Empty stays rejected only at the top-level boundary.
         const QString g = v.value<QDBusSignature>().signature();
-        if (g.isEmpty())
+        if (!nested && g.isEmpty())
             return false;
         return validateSignature(g, SignatureKind::Message);
     }
@@ -93,6 +103,10 @@ bool wireMarshalable(const QVariant &v) {
     // QStringList, QDBusObjectPath, QDBusSignature, registered types). QJSValue,
     // QObject*, and unregistered gadgets return null → false.
     return QDBusMetaType::typeToSignature(QMetaType(t)) != nullptr;
+}
+
+bool wireMarshalable(const QVariant &v) {
+    return wireMarshalableImpl(v, false);
 }
 
 namespace {
@@ -247,7 +261,7 @@ QVariant unwrapDbus(const QVariant &v) {
 // payload directly (the enclosing "v" wraps it — a nested QDBusVariant would
 // otherwise double-wrap to v(v(x))); in a free slot it carries the QDBusVariant
 // wrapper itself (so a top-level `variant(x)` is a real "v").
-static QVariant toDbusVariantImpl(const QVariant &v, bool nested) {
+static QVariant toDbusVariantImpl(const QVariant &v, bool nested, bool structMember = false) {
     int type = v.userType();
 
     if (type == qMetaTypeId<DBus::Bool>())
@@ -270,10 +284,20 @@ static QVariant toDbusVariantImpl(const QVariant &v, bool nested) {
         return QVariant::fromValue(v.value<DBus::Byte>().value);
     if (type == qMetaTypeId<DBus::String>())
         return QVariant::fromValue(v.value<DBus::String>().value);
-    if (type == qMetaTypeId<DBus::ObjectPath>())
-        return QVariant::fromValue(v.value<DBus::ObjectPath>().value);
-    if (type == qMetaTypeId<DBus::Signature>())
-        return QVariant::fromValue(v.value<DBus::Signature>().value);
+    if (type == qMetaTypeId<DBus::ObjectPath>() || type == qMetaTypeId<QDBusObjectPath>() ||
+        type == qMetaTypeId<DBus::Signature>() || type == qMetaTypeId<QDBusSignature>()) {
+        const bool path =
+            type == qMetaTypeId<DBus::ObjectPath>() || type == qMetaTypeId<QDBusObjectPath>();
+        const QVariant native = type == qMetaTypeId<DBus::ObjectPath>()
+                                    ? QVariant::fromValue(v.value<DBus::ObjectPath>().value)
+                                : type == qMetaTypeId<DBus::Signature>()
+                                    ? QVariant::fromValue(v.value<DBus::Signature>().value)
+                                    : v;
+        QString why;
+        const QVariant basic =
+            produceBasic(path ? QStringLiteral("o") : QStringLiteral("g"), native, &why);
+        return basic.isValid() ? basic : QVariant::fromValue(DBusValueFailure{why});
+    }
     if (type == qMetaTypeId<DBus::Bytes>())
         return QVariant::fromValue(v.value<DBus::Bytes>().value);
     if (type == qMetaTypeId<DBus::UnixFd>()) {
@@ -297,15 +321,19 @@ static QVariant toDbusVariantImpl(const QVariant &v, bool nested) {
         // Struct members are variant-free slots: a Variant member must carry
         // its own "v" (so (ssv) stays (ssv), not (ssx)).
         for (auto &m : members) {
-            if (m.userType() != qMetaTypeId<DBus::Struct>())
-                m = toDbusVariantImpl(m, false);
+            m = toDbusVariantImpl(m, false, true);
             if (!fdFailureIn(m).isEmpty())
                 return m; // the struct cannot be sent; the boundary reports why
         }
+        if (structMember)
+            return QVariant::fromValue(DBus::Struct(members));
         QDBusArgument arg;
         arg << DBus::Struct(members);
         return QVariant::fromValue(arg);
     }
+    if (type == qMetaTypeId<QDBusVariant>())
+        return QVariant::fromValue(
+            QDBusVariant(toDbusVariantImpl(v.value<QDBusVariant>().variant(), false)));
     // Containers provide the "v" for their values: recurse as nested.
     if (type == qMetaTypeId<QVariantMap>()) {
         QVariantMap m = v.toMap();
@@ -579,8 +607,8 @@ QMetaType metaTypeForSignature(const QString &sig);
 // `arg`) and returns the elements in final streaming form, or an
 // invalid QVariant when unproducible — and only begin the container
 // when every element probed valid. appendStaged then streams
-// pre-validated input and cannot fail. Basic-type probes mirror the
-// streaming expressions in writeValueBySignature exactly.
+// pre-validated input and cannot fail. Basic values have one producer;
+// appendStaged consumes its exact C++ types without another conversion.
 // The one fd send rule (finding #4): an `h` position carries only an explicit
 // fd — a DBusQML.unixFd (toDbusVariant gives the message its own dup) or a
 // C++ QDBusUnixFileDescriptor. A number is refused at every `h` site, whatever
@@ -606,11 +634,19 @@ static bool wireFd(const QVariant &v, QDBusUnixFileDescriptor *out, QString *fdE
     return false;
 }
 
-static QVariant writeProbe(const QString &sig, const QVariant &value, int depth,
-                           QString *fdError = nullptr) {
-    if (depth > 32)
+static bool isBasicSignature(const QString &sig) {
+    return sig.size() == 1 && QStringLiteral("ybnqiuxtdsogh").contains(sig.at(0));
+}
+
+// The only producer of basic wire values. Validate the original strings before
+// Qt wrappers can clear invalid input, and before any QDBusArgument is written.
+static QVariant produceBasic(const QString &sig, const QVariant &v, QString *why) {
+    const QString failure = fdFailureIn(v);
+    if (!failure.isEmpty()) {
+        if (why && why->isEmpty())
+            *why = failure;
         return {};
-    const QVariant v = toDbusVariant(value);
+    }
     if (sig == QLatin1String("y"))
         return QVariant::fromValue(static_cast<uchar>(v.toUInt()));
     if (sig == QLatin1String("b"))
@@ -631,17 +667,48 @@ static QVariant writeProbe(const QString &sig, const QVariant &value, int depth,
         return QVariant::fromValue(v.toDouble());
     if (sig == QLatin1String("s"))
         return QVariant::fromValue(v.toString());
-    if (sig == QLatin1String("o"))
-        return QVariant::fromValue(QDBusObjectPath(v.toString()));
-    if (sig == QLatin1String("g"))
-        return QVariant::fromValue(QDBusSignature(v.toString()));
+    if (sig == QLatin1String("o") || sig == QLatin1String("g")) {
+        const bool path = sig == QLatin1String("o");
+        const QString text = path && v.userType() == qMetaTypeId<QDBusObjectPath>()
+                                 ? v.value<QDBusObjectPath>().path()
+                             : !path && v.userType() == qMetaTypeId<QDBusSignature>()
+                                 ? v.value<QDBusSignature>().signature()
+                                 : v.toString();
+        if (path ? !validObjectPath(text) : !validateSignature(text, SignatureKind::Message)) {
+            if (why && why->isEmpty())
+                *why = path ? QStringLiteral("object-path (o) value is not marshalable")
+                            : QStringLiteral("signature (g) value is not marshalable (invalid "
+                                             "message signature or exceeds 255 bytes)");
+            return {};
+        }
+        return path ? QVariant::fromValue(QDBusObjectPath(text))
+                    : QVariant::fromValue(QDBusSignature(text));
+    }
     if (sig == QLatin1String("h")) {
         QDBusUnixFileDescriptor fd;
-        if (!wireFd(v, &fd, fdError))
+        if (!wireFd(v, &fd, why))
             return {};
         return QVariant::fromValue(fd);
     }
+    return {};
+}
+
+static QVariant writeProbe(const QString &sig, const QVariant &value, int depth,
+                           QString *fdError = nullptr) {
+    if (depth > 32)
+        return {};
+    const QVariant v = toDbusVariant(value);
+    if (isBasicSignature(sig))
+        return produceBasic(sig, v, fdError);
     if (sig == QLatin1String("v")) {
+        if (!wireMarshalableImpl(v, true)) {
+            if (fdError && fdError->isEmpty()) {
+                *fdError = fdFailureIn(v);
+                if (fdError->isEmpty())
+                    *fdError = QStringLiteral("variant payload is not marshalable");
+            }
+            return {};
+        }
         if (v.userType() == qMetaTypeId<QDBusVariant>())
             return v;
         return QVariant::fromValue(QDBusVariant(v));
@@ -720,51 +787,51 @@ static QVariant writeProbe(const QString &sig, const QVariant &value, int depth,
 
 static void appendStaged(QDBusArgument &arg, const QString &sig, const QVariant &staged) {
     if (sig == QLatin1String("y")) {
-        arg << static_cast<uchar>(staged.toUInt());
+        arg << staged.value<uchar>();
         return;
     }
     if (sig == QLatin1String("b")) {
-        arg << staged.toBool();
+        arg << staged.value<bool>();
         return;
     }
     if (sig == QLatin1String("n")) {
-        arg << static_cast<short>(staged.toInt());
+        arg << staged.value<short>();
         return;
     }
     if (sig == QLatin1String("q")) {
-        arg << static_cast<ushort>(staged.toUInt());
+        arg << staged.value<ushort>();
         return;
     }
     if (sig == QLatin1String("i")) {
-        arg << staged.toInt();
+        arg << staged.value<int>();
         return;
     }
     if (sig == QLatin1String("u")) {
-        arg << staged.toUInt();
+        arg << staged.value<uint>();
         return;
     }
     if (sig == QLatin1String("x")) {
-        arg << static_cast<qint64>(staged.toLongLong());
+        arg << staged.value<qint64>();
         return;
     }
     if (sig == QLatin1String("t")) {
-        arg << static_cast<quint64>(staged.toULongLong());
+        arg << staged.value<quint64>();
         return;
     }
     if (sig == QLatin1String("d")) {
-        arg << staged.toDouble();
+        arg << staged.value<double>();
         return;
     }
     if (sig == QLatin1String("s")) {
-        arg << staged.toString();
+        arg << staged.value<QString>();
         return;
     }
     if (sig == QLatin1String("o")) {
-        arg << QDBusObjectPath(staged.toString());
+        arg << staged.value<QDBusObjectPath>();
         return;
     }
     if (sig == QLatin1String("g")) {
-        arg << QDBusSignature(staged.toString());
+        arg << staged.value<QDBusSignature>();
         return;
     }
     if (sig == QLatin1String("h")) {
@@ -842,68 +909,11 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
     // unwrapped as we recurse per element below.
     const QVariant v = toDbusVariant(value);
 
-    if (sig == QLatin1String("y")) {
-        arg << static_cast<uchar>(v.toUInt());
-        return true;
-    }
-    if (sig == QLatin1String("b")) {
-        arg << v.toBool();
-        return true;
-    }
-    if (sig == QLatin1String("n")) {
-        arg << static_cast<short>(v.toInt());
-        return true;
-    }
-    if (sig == QLatin1String("q")) {
-        arg << static_cast<ushort>(v.toUInt());
-        return true;
-    }
-    if (sig == QLatin1String("i")) {
-        arg << v.toInt();
-        return true;
-    }
-    if (sig == QLatin1String("u")) {
-        arg << v.toUInt();
-        return true;
-    }
-    if (sig == QLatin1String("x")) {
-        arg << static_cast<qint64>(v.toLongLong());
-        return true;
-    }
-    if (sig == QLatin1String("h")) {
-        // Unix fd: only an explicit fd value (wireFd); the sender's unixFd
-        // stays open — the message carries its own dup.
-        QDBusUnixFileDescriptor fd;
-        if (!wireFd(v, &fd, fdError))
+    if (isBasicSignature(sig) || sig == QLatin1String("v")) {
+        const QVariant staged = writeProbe(sig, v, depth, fdError);
+        if (!staged.isValid())
             return false;
-        arg << fd;
-        return true;
-    }
-    if (sig == QLatin1String("t")) {
-        arg << static_cast<quint64>(v.toULongLong());
-        return true;
-    }
-    if (sig == QLatin1String("d")) {
-        arg << v.toDouble();
-        return true;
-    }
-    if (sig == QLatin1String("s")) {
-        arg << v.toString();
-        return true;
-    }
-    if (sig == QLatin1String("o")) {
-        arg << QDBusObjectPath(v.toString());
-        return true;
-    }
-    if (sig == QLatin1String("g")) {
-        arg << QDBusSignature(v.toString());
-        return true;
-    }
-    if (sig == QLatin1String("v")) {
-        if (v.userType() == qMetaTypeId<QDBusVariant>())
-            arg << v.value<QDBusVariant>();
-        else
-            arg << QDBusVariant(v);
+        appendStaged(arg, sig, staged);
         return true;
     }
     if (sig == QLatin1String("ay")) {
@@ -929,40 +939,13 @@ static bool writeValueBySignature(QDBusArgument &arg, const QString &sig, const 
     }
 
     if (sig.startsWith(QLatin1Char('('))) {
-        const QString inner = sig.mid(1, sig.size() - 2);
-        // "()" / "(": an empty struct is not a valid D-Bus type — writing one
-        // aborts inside libdbus. Loud-fail instead.
-        if (inner.isEmpty())
+        // Probe the whole structure before opening it, just like arrays/maps.
+        // A rejected first member must not leave even an empty wire structure.
+        const QVariant staged = writeProbe(sig, v, depth, fdError);
+        if (!staged.isValid())
             return false;
-        // L2 (ledger-zero, LSan-proven): the old code wrote members
-        // directly into `arg` after beginStructure() — any member failure
-        // (`return false`) skipped endStructure(), leaving the container
-        // open and leaking the half-built libdbus message inside QtDBus
-        // (152B beginStructure leak, fork-VM-proven). Validate-then-write
-        // per member instead: each member is attempted, and on failure
-        // the (complete, balanced) prefix is still closed — `arg` is
-        // never left half-open. A failed member still fails the call
-        // loud (the caller sends InvalidArgs on false).
-        arg.beginStructure();
-        const QVariantList members = v.toList();
-        int pos = 0;
-        int mi = 0;
-        bool ok = true;
-        while (pos < inner.size()) {
-            const QString memberSig = firstCompleteType(inner, pos);
-            if (memberSig.isEmpty()) {
-                ok = false;
-                break;
-            }
-            const QVariant mv = mi < members.size() ? members.at(mi) : QVariant();
-            if (!writeValueBySignature(arg, memberSig, mv, depth + 1, fdError)) {
-                ok = false;
-                break;
-            }
-            ++mi;
-        }
-        arg.endStructure();
-        return ok;
+        appendStaged(arg, sig, staged);
+        return true;
     }
 
     if (sig.startsWith(QLatin1Char('a'))) {
@@ -1057,6 +1040,12 @@ QVariant marshalBySignature(const QString &sig, const QVariant &value) {
     if (sig.isEmpty())
         return toDbusVariant(value);
 
+    if (isBasicSignature(sig)) {
+        QString why;
+        const QVariant basic = produceBasic(sig, toDbusVariant(value), &why);
+        return basic.isValid() ? basic : QVariant::fromValue(DBusValueFailure{why});
+    }
+
     // Explicit DBus.* wrapper types always win — the caller chose the type.
     // D4: the short-circuit applies ONLY when the value's own wire signature
     // EQUALS the declared one; otherwise fall through to the declared
@@ -1073,43 +1062,6 @@ QVariant marshalBySignature(const QString &sig, const QVariant &value) {
         if (own && sig == QLatin1String(own))
             return converted;
     }
-
-    // Basic types — coerce the QVariant to the exact C++ type.
-    if (sig == QLatin1String("y"))
-        return QVariant::fromValue(static_cast<uchar>(value.toUInt()));
-    if (sig == QLatin1String("b"))
-        return QVariant::fromValue(value.toBool());
-    if (sig == QLatin1String("n"))
-        return QVariant::fromValue(static_cast<short>(value.toInt()));
-    if (sig == QLatin1String("q"))
-        return QVariant::fromValue(static_cast<ushort>(value.toUInt()));
-    if (sig == QLatin1String("i"))
-        return QVariant::fromValue(value.toInt());
-    if (sig == QLatin1String("u"))
-        return QVariant::fromValue(value.toUInt());
-    if (sig == QLatin1String("h")) {
-        // Unix fd: only an explicit fd value (wireFd) — a number is never
-        // turned into a descriptor (finding #4). B4: anything else fails
-        // LOUD at the send boundary (DBusFdFailure carries the reason)
-        // instead of carrying a dead fd that leaves the caller timing out.
-        QDBusUnixFileDescriptor fd;
-        QString why;
-        if (wireFd(toDbusVariant(value), &fd, &why))
-            return QVariant::fromValue(fd);
-        return QVariant::fromValue(DBusFdFailure{why});
-    }
-    if (sig == QLatin1String("x"))
-        return QVariant::fromValue(static_cast<qint64>(value.toLongLong()));
-    if (sig == QLatin1String("t"))
-        return QVariant::fromValue(static_cast<quint64>(value.toULongLong()));
-    if (sig == QLatin1String("d"))
-        return QVariant::fromValue(value.toDouble());
-    if (sig == QLatin1String("s"))
-        return QVariant::fromValue(value.toString());
-    if (sig == QLatin1String("o"))
-        return QVariant::fromValue(QDBusObjectPath(value.toString()));
-    if (sig == QLatin1String("g"))
-        return QVariant::fromValue(QDBusSignature(value.toString()));
 
     // Byte array — ay. Accept string (UTF-8), number array, or QByteArray.
     if (sig == QLatin1String("ay")) {
@@ -1181,6 +1133,12 @@ static QVariant marshalContainerBySignature(const QString &sig, const QVariant &
             QVariantMap inner = it.value().toMap();
             for (auto jt = inner.begin(); jt != inner.end(); ++jt)
                 jt.value() = toDbusVariant(jt.value());
+            // Once sealed into QMap<QString, QVariantMap>, Qt exposes only
+            // the registered outer signature to the send guard. Validate the
+            // still-inspectable values first, including any producer failure.
+            QString why;
+            if (!checkSendable({inner}, &why))
+                return QVariant::fromValue(DBusValueFailure{why});
             typed.insert(it.key(), inner);
         }
         return QVariant::fromValue(typed);
@@ -1215,9 +1173,8 @@ static QVariant marshalContainerBySignature(const QString &sig, const QVariant &
         QVariant walked = writeBySignature(sig, value, &fdError);
         if (walked.isValid())
             return walked;
-        // An `h` position refused its value: never fall back to inference
-        // (that would send the number as a non-fd type) — the send boundary
-        // fails the call with the reason.
+        // A basic position refused its value (h/o/g): never replace it with
+        // inference, which could bypass the validation or change its wire type.
         if (!fdError.isEmpty())
             return QVariant::fromValue(DBusFdFailure{fdError});
         qWarning("dbusqml: cannot produce declared signature %s for value of type %s — "

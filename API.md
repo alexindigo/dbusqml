@@ -1015,16 +1015,16 @@ message arguments, adaptor replies and declared signal arguments) warns
 `cannot produce declared signature` and falls back to inference when its
 generic container writer fails, including for an invalid container type.
 An unrecognized type code reaching that marshaller also warns and infers.
-A bad `h` value is an exception: it fails rather than inferring, on every
-path. The send boundary then checks the actual marshaled values and their
-aggregate signature; calls/replies fail or one-way messages are dropped
-when that check fails.
+A bad basic `h`, `o` or `g` value is an exception: it fails rather than
+inferring, at every nesting depth. The send boundary then checks the actual
+marshaled values and their aggregate signature; calls/replies fail or one-way
+messages are dropped when that check fails.
 
 A valid type that the generic container writer cannot produce from the
 value (including depth-limit or signature-slot exhaustion) likewise warns
-and falls back to inference, except for fd failures. Correct declarations
-and warnings rather than relying on any fallback. Unregistered valid
-container shapes use assign-once signature-slot pool registrations (see
+and falls back to inference, except for basic-value failures. Correct
+declarations and warnings rather than relying on any fallback. Unregistered
+valid container shapes use assign-once signature-slot pool registrations (see
 `dbussignatureslots.h`).
 
 **Signature limits** (D-Bus "Valid Signatures", enforced before any
@@ -1041,6 +1041,17 @@ proxy and adaptor signals, adaptor replies, held replies): a message that
 would exceed the cap fails locally (`Failed` error reply / `InvalidArgs`)
 or is dropped with a warning on paths without a reply channel, instead of
 aborting inside libdbus.
+
+**Signature and object-path values:** one basic-value producer validates `g`
+contents as message signatures (including the 255-byte encoded-length cap)
+and `o` contents as object paths before constructing their Qt wire wrappers.
+This applies inside structs, arrays, dictionaries (keys and values), and
+variants as well as to scalar arguments and inferred typed wrappers.
+Object paths start with `/`; root `/` is valid, but other paths cannot end
+with `/`, contain empty elements (`//`), or use characters outside ASCII
+`[A-Za-z0-9_]` in an element. Invalid values fail locally with a diagnostic,
+or are dropped with a warning for one-way sends/signals. An empty top-level
+`g` remains refused; an empty `g` in a container or variant is valid.
 
 **Introspection and catalog XML limits** (one policy for both parsers):
 an XML document larger than 4 MiB (encoded size) is refused before
