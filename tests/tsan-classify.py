@@ -107,8 +107,11 @@ FOREIGN_MODULE_RE = re.compile(
 WARNING_PREFIX = "WARNING: ThreadSanitizer:"
 PID_TAIL_RE = re.compile(r"\(pid=\d+\)\Z")
 SUMMARY_RE = re.compile(r"^SUMMARY: ThreadSanitizer:")
-FRAME_RE = re.compile(r"^\s+#(\d+)\s+(.*?)\s*$")
-CREATION_HDR_RE = re.compile(r"^\s+Thread\s+\S+.*\bcreated by\b")
+# Match only the delimited prefix. Trimming/searching the remainder separately
+# avoids overlapping wildcard/whitespace and token/wildcard repetitions.
+FRAME_PREFIX_RE = re.compile(r"^\s+#(\d+)\s+")
+CREATION_PREFIX_RE = re.compile(r"^\s+Thread\s+(?=\S)")
+CREATED_BY_RE = re.compile(r"\bcreated by\b")
 LOCATION_HDR_RE = re.compile(r"^\s+Location")
 ACCESS_HDR_RE = re.compile(
     r"^\s+(Previous\s+)?((?:[Aa]tomic\s+)?[Ww]rite|(?:[Aa]tomic\s+)?[Rr]ead"
@@ -141,8 +144,17 @@ CREATION = "creation"  # never attributes; census context only
 NONSTACK = "nonstack"  # headers like "Cycle in lock order graph", Hint, ...
 
 
+def parse_frame(line):
+    """(index text, frame text) or None; input is one splitlines() line."""
+    m = FRAME_PREFIX_RE.match(line)
+    return (m.group(1), line[m.end():].rstrip()) if m else None
+
+
 def section_kind(header):
-    if CREATION_HDR_RE.match(header):
+    creation = CREATION_PREFIX_RE.match(header)
+    # The old \S+ consumed at least one character before the marker. Do not
+    # greedily consume the whole token: '!created by' is a valid old match.
+    if creation and CREATED_BY_RE.search(header, creation.end() + 1):
         return CREATION
     if LOCATION_HDR_RE.match(header):
         return ALLOC
@@ -190,7 +202,14 @@ def parse_function(rest):
     # the first "/" would leave a stray ".." segment in the token, so strip
     # a trailing path-looking token with a line suffix instead.
     if "/" in core and "::" not in core:
-        core = re.sub(r"\s+\S*/\S+:\d+(?::\d+)?$", "", core)
+        parts = core.rsplit(None, 1)
+        if len(parts) == 2:
+            path, colon, line = parts[1].rpartition(":")
+            # \S+ already allowed ':line', so the optional :column in the
+            # former regex was redundant. Require one character between an
+            # eligible slash and the final colon; isdecimal matches \d.
+            if colon and line.isdecimal() and "/" in path[:-1]:
+                core = parts[0]
     # strip args
     core = core.split("(")[0].strip()
     return core
@@ -287,7 +306,7 @@ def sectionize(block):
     for line in block.raw[1:]:  # skip the WARNING line itself
         if SUMMARY_RE.match(line):
             break
-        fm = FRAME_RE.match(line)
+        fm = parse_frame(line)
         if fm:
             cur_frames.append(line)
             continue
@@ -396,7 +415,7 @@ def build_arrangement(block):
             return None, None
         # frame #0: interceptor slot. A libtsan-module frame is an
         # interceptor frame; its function token is the interceptor name.
-        f0 = FRAME_RE.match(frames[0]).group(2)
+        f0 = parse_frame(frames[0])[1]
         f0_mod = parse_module(f0)
         if f0_mod and f0_mod.startswith("libtsan"):
             interceptor = norm_interceptor(parse_function(f0) or "unnamed")
@@ -407,7 +426,7 @@ def build_arrangement(block):
         below_module = "none"
         anchor = "none"
         for fl in below:
-            frest = FRAME_RE.match(fl).group(2)
+            frest = parse_frame(fl)[1]
             m, off = parse_module_offset(frest)
             if m and m.startswith("libtsan"):
                 # interceptor-internal frame: GCC's libtsan prints the
@@ -448,8 +467,7 @@ def classify_block(block):
     for kind, _header, frames in block.sections:
         is_creation = kind == CREATION and not leak_attribution
         for line in frames:
-            fm = FRAME_RE.match(line)
-            rest = fm.group(2)
+            rest = parse_frame(line)[1]
             mod = parse_module(rest)
             if is_creation:
                 if mod:

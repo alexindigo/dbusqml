@@ -30,7 +30,7 @@ hits=$(awk '
   inblock && /^[[:space:]]*$/ { increation=0; next }
   inblock && /created by/ { increation=1; next }
   inblock && !increation { print }
-' "$DUMP" | grep -cE 'libdbusqml|dbusqml[^ )]*\.(cpp|h|qml)|test_|fuzz_|tsan_canary' || true)
+' <"$DUMP" | grep -cE 'libdbusqml|dbusqml[^ )]*\.(cpp|h|qml)|test_|fuzz_|tsan_canary' || true)
 
 if [ "$hits" != "0" ]; then
     echo "tsan-crosscheck: DISAGREEMENT — $hits artifact-basename line(s) in" \
