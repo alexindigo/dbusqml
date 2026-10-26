@@ -12,6 +12,8 @@ consumer trust), then Docs (documentation); the last two are project extensions.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-25
+
 ### Changed
 
 - **Catalog write-only properties are no longer readable over D-Bus.**
@@ -1213,7 +1215,8 @@ on older Qt should be aware of.
 - **FutureDevelopment.md** — replaced legacy `DBUS_w_QML.md` scratch
   notes (later removed when its content was fully absorbed).
 
-[Unreleased]: https://github.com/alexindigo/dbusqml/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/alexindigo/dbusqml/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/alexindigo/dbusqml/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/alexindigo/dbusqml/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/alexindigo/dbusqml/compare/v0.9.0...v1.0.0
 [0.9.0]: https://github.com/alexindigo/dbusqml/compare/v0.8.0...v0.9.0
