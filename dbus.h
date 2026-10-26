@@ -206,6 +206,7 @@ private:
 
     DBusSubscription *m_signalSubscription = nullptr;
     DBusSubscription *m_propertySubscription = nullptr;
+    QSet<QString> m_knownSignals;
 
     // #8: current-owner tracking behind the signal acceptance check
     // (GDBus gdbusproxy.c:1015 shape). Created together with the signal

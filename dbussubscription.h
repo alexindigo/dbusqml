@@ -3,6 +3,7 @@
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QObject>
+#include <QSet>
 #include <QStringList>
 #include <functional>
 
@@ -15,7 +16,8 @@ public:
     using Handler = std::function<void(const QDBusMessage &)>;
 
     // All members share the recorded connection/service/path/interface.
-    // A partial setup is rolled back; no live hooks escape a failed setup.
+    // An empty member matches every signal on the interface. Duplicate
+    // members install only one hook. A partial setup is rolled back.
     static DBusSubscription *create(const QDBusConnection &connection, const QString &service,
                                     const QString &path, const QString &iface,
                                     const QStringList &members, Handler handler, QObject *parent);
@@ -36,7 +38,7 @@ private:
     QString m_service;
     QString m_path;
     QString m_iface;
-    QStringList m_members;
+    QSet<QString> m_members;
     Handler m_handler;
     bool m_revoked = false;
 };

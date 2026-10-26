@@ -209,12 +209,22 @@ fetches keep their existing data on decode failure and report the failure;
 an initial proxy fetch enters `Error`, and an initial ObjectManager fetch
 does not set `ready`.
 
-**Sender binding:** the proxy subscribes to every discovered signal (and to
-`PropertiesChanged`) with the configured `service` as the sender and accepts
-a signal only from the service's **current owner**. The bus match rule names
-the service, so the daemon itself resolves the well-known name to its owner
-on every delivery; the proxy additionally tracks the owner (an initial
-`GetNameOwner` plus an owner-change watch) and drops a signal whose sender
+**Signal selection:** when signal names are known, the proxy uses one
+interface-wide signal subscription, plus the separate `PropertiesChanged`
+subscription, regardless of how many signals the peer advertises. Delivered
+members are filtered against a set of signal names from live introspection
+and the catalog (catalog names fill in
+missing signals). Unknown members are silently dropped before decoding. If
+neither source supplies any signal names, no interface signal subscription is
+created and no interface signals are delivered. `PropertiesChanged` retains
+its separate handling and is delivered only once even when the proxy's
+interface is `org.freedesktop.DBus.Properties`.
+
+**Sender binding:** both subscriptions use the configured `service` as the
+sender and accept a signal only from the service's **current owner**. The bus
+match rule names the service, so the daemon itself resolves the well-known
+name to its owner on every delivery; the proxy additionally tracks the owner
+(an initial `GetNameOwner` plus an owner-change watch) and drops a signal whose sender
 differs — e.g. one from a stale previous owner still queued across a
 restart. A unique (`:1.…`) `service` compares directly. While the owner is
 not yet known (right after subscribing) the daemon's match rule is the

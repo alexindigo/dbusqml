@@ -326,8 +326,8 @@ QML
   │     │                 the property map; PropertiesChanged updates in
   │     │                 place. Nested a{sv}/a{ss} unwrapped to
   │     │                 QVariantMap/QVariantList so JS can traverse them.
-  │     └── Signals   → QDBusConnection::connect on each discovered signal
-  │                       name → emitted through signalReceived(name, args).
+  │     └── Signals   → one QDBusConnection::connect with wildcard member
+  │                       → known-name set filter → signalReceived(name, args).
   │
   ├── DBusAdaptor (server-side, subclass of QDBusVirtualObject)
   │     ├── Builds introspection XML from Q_PROPERTY / method / signal
@@ -389,6 +389,16 @@ plus user/system drop-ins (`$XDG_CONFIG_HOME/dbusqml/types/`,
 see `docs/TYPES.md`.
 
 ### Subscription lifetime
+
+Proxy signal setup uses one wildcard-member hook for its interface when signal
+names are known, plus the separate PropertiesChanged hook. The known signal
+names from introspection and catalog merging live in a QSet: setup and deduplication are linear in
+the advertised list, and delivery checks membership before decoding. Unknown
+members are silently dropped; without a signal list, no interface hook is
+installed and no interface signals are delivered. When Properties itself is
+proxied, the wildcard hook leaves PropertiesChanged exclusively to the property hook.
+DBusSubscription also records members in a QSet, so duplicate members (including
+the empty wildcard) install only one hook.
 
 Signal hooks in `DBusSignalWatcher`, `DBusObjectManager` and `DBusProxy`
 (including `PropertiesChanged`) belong to internal `DBusSubscription`

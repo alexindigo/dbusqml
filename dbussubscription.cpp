@@ -22,7 +22,7 @@ DBusSubscription *DBusSubscription::create(const QDBusConnection &connection,
             subscription->revoke();
             return nullptr;
         }
-        subscription->m_members.append(member);
+        subscription->m_members.insert(member);
     }
     return subscription;
 }
