@@ -72,6 +72,9 @@ private slots:
 
 private:
     QPointer<DBusConnection> m_conn;
+    // Connection configuration owns the transport, independently of the QML
+    // wrapper and of the live subscription's filter/enable state.
+    QDBusConnection m_bus = QDBusConnection::sessionBus();
     QString m_service;
     QString m_path;
     QString m_iface;

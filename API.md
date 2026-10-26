@@ -138,7 +138,7 @@ handling owns the rest.
 | `service` | `string` | The D-Bus service name. |
 | `path` | `string` | The D-Bus object path. |
 | `iface` | `string` | The D-Bus interface name. |
-| `connection` | `DBusConnection` | The connection associated with this proxy. |
+| `connection` | `DBusConnection` | The connection associated with this proxy (default session bus). Its bus connection is recorded by value when configured; all traffic, including dynamically exposed methods, keeps using it after the QML wrapper is destroyed. |
 | `callTimeout` | `int` | Per-call timeout in milliseconds (`-1` = default). See §`DBus` (Proxy Element). |
 | `_signatures` | `var` (object) | Explicit call-argument signatures, keyed by D-Bus member name (see Shape Selection). |
 
@@ -400,6 +400,10 @@ signals matching only the old filter or arriving on the old connection are
 never delivered after the change, and the new subscription delivers each
 signal exactly once.
 
+The bus connection (default session bus) is recorded by value when configured.
+Destroying its `DBusConnection` wrapper does not move later subscriptions to
+the session bus when a filter changes or the watcher is re-enabled.
+
 ### `DBusServiceWatcher`
 
 Watches one well-known name for appear/disappear/owner change on any bus —
@@ -417,6 +421,10 @@ DBusServiceWatcher {
 ```
 
 `registered` is read-only and tracks the name's presence.
+
+The bus connection (default session bus) is recorded by value when configured.
+After its `DBusConnection` wrapper is destroyed, changing `service` keeps both
+the initial presence lookup and subsequent owner-change watch on that bus.
 
 ### `DBusObjectManager`
 
@@ -448,6 +456,11 @@ Changing `service`, `path` or `connection` at runtime resubscribes on the
 new target (the old subscription is dropped with the exact connection and
 service/path it was made with) and refetches the inventory; live
 `InterfacesAdded`/`InterfacesRemoved` then arrive from the new target only.
+
+The bus connection (default session bus) is recorded by value when configured,
+independently of signal-subscription success. Destroying the `DBusConnection`
+wrapper does not reroute inventory fetches or later service/path refetches to
+the session bus.
 
 ### `DBusAdaptor` (Server Element)
 
@@ -648,7 +661,7 @@ DBusAdaptor {
 | `service` | `string` | The D-Bus service name to claim (optional — omit for unique-name-only registration). |
 | `path` | `string` | The object path to register at. |
 | `iface` | `string` | The interface name to expose. |
-| `connection` | `DBusConnection` | The bus to register on (default session bus). Attach-time only (post-attach changes warn and are ignored). Every send is bound to the recorded attach connection: broadcasts (`emitSignal`, `PropertiesChanged`) go out on it, and each method reply — immediate or held — travels on the connection the call arrived on. Destroying this object after attach does not reroute any of it to the session bus. |
+| `connection` | `DBusConnection` | The bus to register on (default session bus). Attach-time only (post-attach changes warn and are ignored). Every send is bound to the recorded attach connection: broadcasts (auto-forwarded QML signals, `emitSignal`, `PropertiesChanged`) go out on it, and each method reply — immediate or held — travels on the connection the call arrived on. Destroying this object after attach does not reroute any of it to the session bus. |
 | `_signatures` | `var` (object) | Explicit reply signatures, keyed by D-Bus member name (see Shape Selection). |
 | `_options` | `var` (object) | Per-method served option whitelist `{ Method: { key: sig } }` applied to the method's last `a{sv}` in-arg (xdp `xdp_filter_options` semantics): the filter iterates the **declared** keys — unknown caller keys are silently dropped (forward-compat); a declared key present with a matching/coercible-same-kind value delivers the **typed** (coerced) value; a declared key with a wrong-kind (scalar-for-list, list-for-map, container-for-scalar) or non-convertible value gets `org.freedesktop.DBus.Error.InvalidArgs` and the handler never runs. An **empty entry** `{ Method: {} }` is a real rule: filter ON with zero declared keys — every caller key is dropped and the handler receives `{}` (deny-all-keys; no runtime notice). The key may be the QML method name or its advertised wire name (the name introspection shows); the policy then applies to **every accepted spelling** of that method — exact, folded, or client-folded — because dispatch resolves the handler first and looks the whitelist up by the resolved identity. |
 | `allowedSender` | `string` | Unique bus name allowed to call this adaptor (empty = open); mismatch → `AccessDenied` before any handler runs (P10b). The value is compared against the caller's UNIQUE name (`msg.service()`): a well-known name never matches, so setting one denies everyone — attach-time warning. Introspection (`org.freedesktop.DBus.Introspectable`) is answered by the dispatcher before the adaptor gate runs, so it stays public metadata (xdp posture) regardless of `allowedSender`. |

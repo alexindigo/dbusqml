@@ -173,6 +173,7 @@ Q_SIGNALS:
     void nameLost();
 
 private:
+    friend class SignalRelay;
     friend class PropertiesChangedRelay;
     friend class DBusPathDispatcher;
     friend class OwnerChangeRelay;
@@ -181,7 +182,7 @@ private:
     void nameAcquiredInternal();
     void nameLostInternal();
     QString generateXml() const;
-    QDBusConnection bus() const;
+    const QDBusConnection &attachConnection() const { return m_attachConn; }
     QStringList declaredOutTypes(const QString &member, bool *found = nullptr) const;
     // P10a: validate _options entries against the method's in-arg shape
     // (FD4); warn + drop entries without a trailing a{sv}. Also resolves
@@ -221,9 +222,9 @@ private:
     QPointer<DBusConnection> m_conn;
     // CF-29: the attach-time connection BY VALUE — teardown tails
     // (destructor, engine-teardown, unregister) detach on this, and the
-    // broadcast paths (emitSignal, PropertiesChanged) send on it, never by
-    // re-resolving through the null-able m_conn above.
-    QDBusConnection m_teardownConn = QDBusConnection::sessionBus();
+    // broadcast paths (auto-forwarded signals, emitSignal, PropertiesChanged)
+    // send on it, never by re-resolving through the null-able m_conn above.
+    QDBusConnection m_attachConn = QDBusConnection::sessionBus();
     QVariantMap m_signatures;
     QVariantMap m_signals;
     QVariantMap m_members;

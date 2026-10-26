@@ -147,21 +147,10 @@ private:
         QDBusMessage msg = QDBusMessage::createSignal(guard->path(), guard->iface(), m_name);
         if (!args.isEmpty())
             msg.setArguments(args);
-        QDBusConnection conn = busConn();
+        const QDBusConnection &conn = guard->attachConnection();
         if (!conn.send(msg))
             qWarning("dbusqml: signal %s send failed: %s", qPrintable(m_name),
                      qPrintable(conn.lastError().message()));
-    }
-
-    QDBusConnection busConn() const {
-        // CF-28: QPointer + null discipline like PropertiesChangedRelay —
-        // the relay is parented to the adaptor (co-destroyed normally),
-        // but a uniform checked deref beats two lifetime disciplines.
-        QPointer<DBusAdaptor> guard = m_adaptor;
-        if (!guard)
-            return QDBusConnection::sessionBus();
-        return guard->connection() ? static_cast<QDBusConnection>(*guard->connection())
-                                   : QDBusConnection::sessionBus();
     }
 
 private:
@@ -246,7 +235,7 @@ DBusAdaptor::~DBusAdaptor() {
     // re-resolved through the null-able m_conn — the connection QML
     // sibling may have died first.
     if (m_attached)
-        DBusPathDispatcher::detach(m_teardownConn, m_path, m_service, this);
+        DBusPathDispatcher::detach(attachConnection(), m_path, m_service, this);
 }
 
 void DBusAdaptor::setService(const QString &v) {
@@ -725,16 +714,6 @@ void DBusAdaptor::nameLostInternal() {
     emit nameLost();
 }
 
-// Pre-attach resolution ONLY (componentComplete): the configured connection
-// wrapper, else the session bus. Post-attach code NEVER re-resolves —
-// broadcasts use m_teardownConn (recorded here), replies use the delivery
-// connection passed into handleMessage.
-QDBusConnection DBusAdaptor::bus() const {
-    if (m_conn)
-        return static_cast<QDBusConnection>(*m_conn);
-    return QDBusConnection::sessionBus();
-}
-
 void DBusAdaptor::componentComplete() {
     // A12/D2: the attach-time net — the setter strips private targets at
     // any time; this pass shares the same routine (the wire name then
@@ -748,14 +727,15 @@ void DBusAdaptor::componentComplete() {
         qmlInfo(this)
             << "DBusAdaptor: iface is empty — introspection XML will have an empty interface name";
 
-    QDBusConnection conn = bus();
+    QDBusConnection conn =
+        m_conn ? static_cast<QDBusConnection>(*m_conn) : QDBusConnection::sessionBus();
     // CF-29: capture the attach-time connection BY VALUE for the teardown
-    // tails below AND the broadcast paths (emitSignal, PropertiesChanged)
+    // tails below AND every broadcast path (including auto-forwarded signals)
     // — re-resolving through the null-able m_conn QPointer falls back to
     // the SESSION bus when the connection QML sibling died first, leaking
     // the registry entry + claim on the attach connection and rerouting
     // broadcasts to the wrong bus.
-    m_teardownConn = conn;
+    m_attachConn = conn;
     m_attached = DBusPathDispatcher::attach(conn, m_path, m_service, this, m_allowReplacement,
                                             m_replaceExisting, m_queueOnBusy, m_captureSubtree);
     if (!m_attached)
@@ -786,7 +766,7 @@ void DBusAdaptor::componentComplete() {
                 if (m_attached) {
                     // CF-29: same attach-time connection discipline as the
                     // destructor tail below.
-                    DBusPathDispatcher::detach(m_teardownConn, m_path, m_service, this);
+                    DBusPathDispatcher::detach(attachConnection(), m_path, m_service, this);
                     m_attached = false;
                 }
             },
@@ -917,10 +897,10 @@ void DBusAdaptor::emitPropertiesChanged(int propIndex) {
     }
     // Broadcasts go out on the ATTACH connection (recorded by value at
     // componentComplete): the null-able m_conn wrapper may already be
-    // dead — bus()'s session fallback would emit the signal on the wrong
+    // dead — re-resolving would emit the signal on the wrong
     // bus while the object stays attached on the custom connection.
-    if (!m_teardownConn.send(msg))
-        qmlInfo(this) << m_teardownConn.lastError();
+    if (!attachConnection().send(msg))
+        qmlInfo(this) << attachConnection().lastError();
 }
 
 QString DBusAdaptor::introspect(const QString &) const {
@@ -1041,8 +1021,8 @@ void DBusAdaptor::emitSignal(const QString &name, const QJSValue &arguments) {
         msg.setArguments(args);
     }
     // Same attach-connection discipline as emitPropertiesChanged above.
-    if (!m_teardownConn.send(msg))
-        qmlInfo(this) << m_teardownConn.lastError();
+    if (!attachConnection().send(msg))
+        qmlInfo(this) << attachConnection().lastError();
 }
 // Map a QMetaType to its D-Bus type signature.
 static QString metaTypeToDbusSignature(int typeId) {
@@ -2128,7 +2108,7 @@ void DBusAdaptor::unregister() {
     // (idempotent tail). One-way: re-registration is not supported. The
     // QObject stays alive for QML to drop whenever. CF-29: attach-time
     // connection, never re-resolved.
-    DBusPathDispatcher::detach(m_teardownConn, m_path, m_service, this);
+    DBusPathDispatcher::detach(attachConnection(), m_path, m_service, this);
     m_attached = false;
 }
 

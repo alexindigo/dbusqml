@@ -13,6 +13,7 @@ void DBusServiceWatcher::setConnection(DBusConnection *v) {
     if (m_conn == v)
         return;
     m_conn = v;
+    m_bus = v ? static_cast<QDBusConnection>(*v) : QDBusConnection::sessionBus();
     emit connectionChanged();
     setup();
 }
@@ -40,11 +41,8 @@ void DBusServiceWatcher::setup() {
     if (m_service.isEmpty())
         return;
 
-    QDBusConnection conn =
-        m_conn ? static_cast<QDBusConnection>(*m_conn) : QDBusConnection::sessionBus();
-
     m_watcher =
-        new QDBusServiceWatcher(m_service, conn, QDBusServiceWatcher::WatchForOwnerChange, this);
+        new QDBusServiceWatcher(m_service, m_bus, QDBusServiceWatcher::WatchForOwnerChange, this);
     connect(m_watcher, &QDBusServiceWatcher::serviceOwnerChanged, this,
             [this](const QString &service, const QString &oldOwner, const QString &newOwner) {
                 Q_UNUSED(service);
@@ -54,7 +52,7 @@ void DBusServiceWatcher::setup() {
                 emit ownerChanged(oldOwner, newOwner);
             });
 
-    setRegistered(conn.interface()->isServiceRegistered(m_service));
+    setRegistered(m_bus.interface()->isServiceRegistered(m_service));
 }
 
 void DBusServiceWatcher::setRegistered(bool v) {

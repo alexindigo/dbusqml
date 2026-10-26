@@ -17,6 +17,7 @@ void DBusObjectManager::setConnection(DBusConnection *v) {
         return;
     unsubscribe();
     m_conn = v;
+    m_bus = v ? static_cast<QDBusConnection>(*v) : QDBusConnection::sessionBus();
     emit connectionChanged();
     setup();
 }
@@ -62,17 +63,14 @@ void DBusObjectManager::setup() {
     if (!m_complete || m_service.isEmpty() || m_path.isEmpty())
         return;
 
-    QDBusConnection conn =
-        m_conn ? static_cast<QDBusConnection>(*m_conn) : QDBusConnection::sessionBus();
-
     if (!m_subscribed) {
-        if (conn.connect(m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
-                         QStringLiteral("InterfacesAdded"), this,
-                         SLOT(onInterfacesAdded(QDBusMessage))) &&
-            conn.connect(m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
-                         QStringLiteral("InterfacesRemoved"), this,
-                         SLOT(onInterfacesRemoved(QDBusMessage)))) {
-            m_subConn = conn;
+        if (m_bus.connect(m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
+                          QStringLiteral("InterfacesAdded"), this,
+                          SLOT(onInterfacesAdded(QDBusMessage))) &&
+            m_bus.connect(m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
+                          QStringLiteral("InterfacesRemoved"), this,
+                          SLOT(onInterfacesRemoved(QDBusMessage)))) {
+            m_subConn = m_bus;
             m_subService = m_service;
             m_subPath = m_path;
             m_subscribed = true;
@@ -83,13 +81,10 @@ void DBusObjectManager::setup() {
 }
 
 void DBusObjectManager::fetchManagedObjects() {
-    QDBusConnection conn =
-        m_conn ? static_cast<QDBusConnection>(*m_conn) : QDBusConnection::sessionBus();
-
     QDBusMessage msg = QDBusMessage::createMethodCall(
         m_service, m_path, QStringLiteral("org.freedesktop.DBus.ObjectManager"),
         QStringLiteral("GetManagedObjects"));
-    auto pending = conn.asyncCall(msg);
+    auto pending = m_bus.asyncCall(msg);
     auto *watcher = new QDBusPendingCallWatcher(pending, this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
         QVariantList args;
