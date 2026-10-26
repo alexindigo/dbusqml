@@ -274,6 +274,53 @@ static bool enterDecodeContainer(DecodeState &state, DecodeDepth &depth, QChar k
     return state.ok;
 }
 
+static QVariant failReceivedFd(DecodeState &state, const QString &reason) {
+    state.ok = false;
+    state.fdFailure = reason;
+    state.rollbackFds();
+    return {};
+}
+
+static bool canReceiveFd(DecodeState &state) {
+    if (!state.ok)
+        return false;
+    if (state.remainingFds == 0) {
+        failReceivedFd(state, QStringLiteral("fd-reference budget exceeded"));
+        return false;
+    }
+    return true;
+}
+
+// The single fd-reference accounting/ownership boundary, including invalid
+// references (P2). The argument must have a fresh, independent Qt holder.
+static QVariant takeReceivedFd(DecodeState &state, QDBusUnixFileDescriptor &&fd) {
+    if (!canReceiveFd(state))
+        return {};
+    --state.remainingFds;
+    auto owned = DBus::UnixFd::adoptReceivedDescriptor(std::move(fd));
+    state.receivedFds.append(owned);
+    return QVariant::fromValue(owned);
+}
+
+static QVariant readReceivedFd(const QDBusArgument &arg, DecodeState &state) {
+    // Refuse before asking libdbus to allocate even a temporary descriptor.
+    if (!canReceiveFd(state))
+        return {};
+    QDBusUnixFileDescriptor fd;
+    // libdbus get_basic returns -1 both for an invalid index (no syscall)
+    // and for a failed _dbus_dup (errno set). Capture it before any other
+    // operations, preserving invalid -> valid:false without hiding EMFILE.
+    errno = 0;
+    arg >> fd;
+    const int duplicateError = errno;
+    if (!fd.isValid() && duplicateError)
+        return failReceivedFd(state, QStringLiteral("received fd duplication failed"));
+    // Qt 6.8.2/6.11.2: operator>> assigns toUnixFileDescriptor(), whose
+    // local giveFileDescriptor(qIterGet()) owns libdbus's fresh dup. Its
+    // temporary is gone on return; neither message nor iterator shares it.
+    return takeReceivedFd(state, std::move(fd));
+}
+
 QVariant readBySignature(const QDBusArgument &arg, DecodeState &state, DecodeDepth depth) {
     if (!state.ok)
         return {};
@@ -346,7 +393,20 @@ QVariant readBySignature(const QDBusArgument &arg, DecodeState &state, DecodeDep
     }
     if (sig == "v") {
         QDBusVariant v;
+        errno = 0;
         arg >> v;
+        const int duplicateError = errno;
+        // Qt eagerly reads scalar variant payloads (including nested v's).
+        // A failed libdbus dup here must not become a P2 invalid fd when
+        // unwrapDbus subsequently sees the already-demarshalled carrier.
+        if (duplicateError) {
+            QVariant leaf = v.variant();
+            while (leaf.userType() == qMetaTypeId<QDBusVariant>())
+                leaf = leaf.value<QDBusVariant>().variant();
+            if (leaf.userType() == qMetaTypeId<QDBusUnixFileDescriptor>() &&
+                !leaf.value<QDBusUnixFileDescriptor>().isValid())
+                return failReceivedFd(state, QStringLiteral("received fd duplication failed"));
+        }
         return unwrapDbus(v.variant(), state, depth);
     }
     if (sig == "ay") {
@@ -399,17 +459,15 @@ QVariant readBySignature(const QDBusArgument &arg, DecodeState &state, DecodeDep
             return out;
         }
         if (elemType == QLatin1Char('h')) {
-            // Unix fds — each element becomes its own DBusQML.unixFd (a
-            // fresh dup, P1; invalid → valid:false, P2).
             QVariantList out;
             arg.beginArray();
-            while (!arg.atEnd()) {
-                QDBusUnixFileDescriptor fd;
-                arg >> fd;
-                out.append(QVariant::fromValue(DBus::UnixFd(fd)));
+            while (state.ok && !arg.atEnd()) {
+                const QVariant fd = readReceivedFd(arg, state);
+                if (state.ok)
+                    out.append(fd);
             }
             arg.endArray();
-            return out;
+            return state.ok ? QVariant(out) : QVariant();
         }
         if (elemType == QLatin1Char('i')) {
             QList<int> l;
@@ -540,15 +598,8 @@ QVariant readBySignature(const QDBusArgument &arg, DecodeState &state, DecodeDep
         return members;
     }
 
-    if (sig == QLatin1String("h")) {
-        // Unix fd — a DBusQML.unixFd owning a fresh dup() of the message's
-        // descriptor (P1: every decode, hence every listener, owns its own;
-        // the message keeps and closes its copy). An invalid fd arrives as
-        // a unixFd with valid === false (P2).
-        QDBusUnixFileDescriptor fd;
-        arg >> fd;
-        return QVariant::fromValue(DBus::UnixFd(fd));
-    }
+    if (sig == QLatin1String("h"))
+        return readReceivedFd(arg, state);
 
     // Never retry an unconsumed value. The message boundary owns reporting.
     state.ok = false;
@@ -596,8 +647,20 @@ QVariant unwrapDbus(const QVariant &v, DecodeState &state, DecodeDepth depth) {
     }
     // Preserve native scalar carriers for C++ consumers, as before. The
     // signature reader still normalizes o/g inside raw container carriers.
-    if (type == qMetaTypeId<QDBusUnixFileDescriptor>())
-        return QVariant::fromValue(DBus::UnixFd(v.value<QDBusUnixFileDescriptor>()));
+    if (type == qMetaTypeId<QDBusUnixFileDescriptor>()) {
+        if (!canReceiveFd(state))
+            return {};
+        // Native message/variant carriers can be shared with another listener.
+        // Never take() their descriptor, even from a temporary value<T>().
+        const auto source = v.value<QDBusUnixFileDescriptor>();
+        QDBusUnixFileDescriptor fd;
+        if (source.isValid()) {
+            fd.setFileDescriptor(source.fileDescriptor());
+            if (!fd.isValid())
+                return failReceivedFd(state, QStringLiteral("received fd duplication failed"));
+        }
+        return takeReceivedFd(state, std::move(fd));
+    }
     if ((type == QMetaType::QStringList || type == QMetaType::QByteArray) &&
         !enterDecodeContainer(state, depth, QLatin1Char('a')))
         return {};
@@ -615,9 +678,14 @@ bool decodeMessage(const QDBusMessage &message, QVariantList &args, QDBusError *
     for (const auto &arg : message.arguments()) {
         const QVariant value = unwrapDbus(arg, state);
         if (!state.ok) {
-            if (message.type() == QDBusMessage::SignalMessage)
+            state.rollbackFds();
+            if (!state.fdFailure.isEmpty())
+                qWarning("dbusqml: message '%s' could not be decoded: %s (fd-reference limit %d)",
+                         qPrintable(escapeForLog(message.member())), qPrintable(state.fdFailure),
+                         state.fdLimit);
+            else if (message.type() == QDBusMessage::SignalMessage)
                 qWarning("dbusqml: signal could not be decoded — dropping message");
-            else if (error)
+            if (message.type() != QDBusMessage::SignalMessage && error)
                 *error = QDBusError(message.type() == QDBusMessage::MethodCallMessage
                                         ? QDBusError::InvalidArgs
                                         : QDBusError::Failed,

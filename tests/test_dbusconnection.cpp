@@ -1619,6 +1619,147 @@ private slots:
     //
     // RED-capable tests first: they compile against the pre-unixFd tree.
 
+    void testFdDecodeBudget_data() {
+        QTest::addColumn<QString>("scenario");
+        for (const char *name :
+             {"array-limit", "array-over", "mixed-limit", "mixed-over", "duplicate-failure",
+              "demarshal-failure", "variant-failure", "invalid", "invalid-over"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+    }
+
+    void testFdDecodeBudget() {
+        QFETCH(QString, scenario);
+        if (!qEnvironmentVariableIsSet("DBUSQML_FD_BUDGET_CHILD")) {
+            QProcess child;
+            auto env = QProcessEnvironment::systemEnvironment();
+            env.insert(QStringLiteral("DBUSQML_FD_BUDGET_CHILD"), QStringLiteral("1"));
+            child.setProcessEnvironment(env);
+            child.setProcessChannelMode(QProcess::MergedChannels);
+            child.start(QCoreApplication::applicationFilePath(),
+                        {QStringLiteral("testFdDecodeBudget:") + scenario});
+            QVERIFY(child.waitForStarted(5000));
+            QVERIFY(child.waitForFinished(30000));
+            qInfo().noquote() << child.readAll();
+            QCOMPARE(child.exitStatus(), QProcess::NormalExit);
+            QCOMPARE(child.exitCode(), 0);
+            return;
+        }
+
+        rlimit original{};
+        QVERIFY(::getrlimit(RLIMIT_NOFILE, &original) == 0);
+        rlimit lowered = original;
+        lowered.rlim_cur = 256; // budget = clamp(256 / 4, 64, 1024) = 64
+        QVERIFY(::setrlimit(RLIMIT_NOFILE, &lowered) == 0);
+        const auto restore = qScopeGuard([&] { ::setrlimit(RLIMIT_NOFILE, &original); });
+        constexpr int budget = 64;
+        const bool over = scenario.endsWith(QLatin1String("over"));
+        const bool failure = scenario.endsWith(QLatin1String("failure"));
+        const bool invalid = scenario.startsWith(QLatin1String("invalid"));
+        const int count = over ? budget + 1 : budget;
+        const bool native = scenario == QLatin1String("duplicate-failure") || invalid;
+
+        QProcess peer;
+        QDBusMessage wire;
+        if (native) {
+            QDBusUnixFileDescriptor source;
+            if (!invalid) {
+                const int fd = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+                QVERIFY(fd >= 0);
+                source.giveFileDescriptor(fd);
+            }
+            QVariantList refs;
+            for (int i = 0; i < count; ++i)
+                refs.append(QVariant::fromValue(source));
+            wire = QDBusMessage::createSignal(QStringLiteral("/FdBudget"),
+                                              QStringLiteral("org.dbusqml.FdBudget"),
+                                              QStringLiteral("Changed"));
+            wire.setArguments({refs});
+        } else {
+            peer.start(QStringLiteral("python3"),
+                       {QFINDTESTDATA("fd_reference_peer.py"), QString::number(count),
+                        scenario.startsWith(QLatin1String("mixed"))     ? QStringLiteral("mixed")
+                        : scenario.startsWith(QLatin1String("variant")) ? QStringLiteral("variant")
+                                                                        : QStringLiteral("array")});
+            QVERIFY(peer.waitForStarted(5000));
+            QVERIFY(peer.waitForReadyRead(5000));
+            const QString service = QString::fromUtf8(peer.readLine()).trimmed();
+            QVERIFY2(service.startsWith(QLatin1Char(':')), qPrintable(service));
+            const auto call = QDBusMessage::createMethodCall(service, QStringLiteral("/FdBudget"),
+                                                             QStringLiteral("org.dbusqml.FdBudget"),
+                                                             QStringLiteral("Get"));
+            wire = QDBusConnection::sessionBus().call(call, QDBus::Block, 5000);
+            QCOMPARE(wire.type(), QDBusMessage::ReplyMessage);
+        }
+        const auto stopPeer = qScopeGuard([&] {
+            peer.closeWriteChannel();
+            if (peer.state() != QProcess::NotRunning)
+                peer.waitForFinished(5000);
+        });
+        const int baseline = openFdCount();
+        const int live = DBus::UnixFd::liveCount();
+        std::vector<int> filler;
+        if (failure || scenario.endsWith(QLatin1String("limit"))) {
+            // Leave exactly N slots for the N-reference boundary case: an
+            // extra wrapper dup cannot succeed at the last reference.
+            int fd;
+            while ((fd = ::open("/dev/null", O_RDONLY | O_CLOEXEC)) >= 0)
+                filler.push_back(fd);
+            const int available = scenario == QLatin1String("variant-failure") ? count - 1
+                                  : failure                                    ? 3
+                                                                               : budget;
+            QVERIFY(int(filler.size()) >= available);
+            for (int i = 0; i < available; ++i) {
+                ::close(filler.back());
+                filler.pop_back();
+            }
+        }
+        QVariantList decoded;
+        QDBusError error;
+        ConnMessageCapture capture;
+        const bool ok = decodeMessage(wire, decoded, &error);
+        for (int fd : filler)
+            ::close(fd);
+        const bool expected = !over && !failure;
+        QCOMPARE(ok, expected);
+        if (!expected) {
+            QVERIFY(decoded.isEmpty());
+            QCOMPARE(DBus::UnixFd::liveCount(), live);
+            QCOMPARE(openFdCount(), baseline);
+            QCOMPARE(capture.messages.size(), 1);
+            QVERIFY(capture.contains(QStringLiteral("fd-reference limit 64")));
+            if (!native) {
+                QVERIFY(error.isValid());
+                // The same wire carrier must fail before adaptor dispatch,
+                // with an actual method-call error reply to the consumer.
+                if (over)
+                    runDecodeConsumer(QStringLiteral("adaptor"), QVariant(wire.arguments()));
+            }
+        } else {
+            int seen = 0;
+            const auto visit = [&](const auto &self, const QVariant &v) -> void {
+                if (v.userType() == qMetaTypeId<DBus::UnixFd>()) {
+                    auto fd = v.value<DBus::UnixFd>();
+                    QCOMPARE(fd.isValid(), !invalid);
+                    ++seen;
+                    fd.close();
+                } else if (v.userType() == QMetaType::QVariantList) {
+                    for (const auto &item : v.toList())
+                        self(self, item);
+                } else if (v.userType() == QMetaType::QVariantMap) {
+                    for (const auto &item : v.toMap())
+                        self(self, item);
+                }
+            };
+            QCOMPARE(DBus::UnixFd::liveCount() - live, invalid ? 0 : count);
+            QCOMPARE(openFdCount() - baseline, invalid ? 0 : count);
+            visit(visit, decoded);
+            QCOMPARE(seen, count);
+            QCOMPARE(openFdCount(), baseline);
+        }
+        qInfo("FD_BUDGET outcome=%d baseline=%d final=%d live=%d", ok, baseline, openFdCount(),
+              DBus::UnixFd::liveCount());
+    }
+
     // finding #4: a plain number at a declared `h` is a LOCAL error naming
     // DBusQML.unixFd — whatever declared the `h` (peer introspection,
     // the _signatures override, a message signature, variant(x, sig)) and

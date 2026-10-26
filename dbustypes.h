@@ -131,6 +131,9 @@ public:
 
 class UnixFdPrivate;
 
+// Shared by the per-message decode budget and the live-fd pressure valve.
+int fdDecodeBudget();
+
 // DBusQML.unixFd — the only fd value. A unixFd OWNS its descriptor (prior
 // art: Node FileHandle, Go os.File, Qt QDBusUnixFileDescriptor, dbus-python
 // UnixFd). Sending an `h` requires one (a plain number is a local error on
@@ -160,6 +163,10 @@ public:
     // C++ / receive path: duplicates the descriptor (never shares it); an
     // invalid descriptor gives an invalid unixFd.
     explicit UnixFd(const QDBusUnixFileDescriptor &fd);
+    // Internal receive boundary only: fd MUST be the sole holder of a
+    // freshly demarshalled (or freshly duplicated) descriptor. Qt's take
+    // does not detach shared holders. All ordinary constructors still dup.
+    static UnixFd adoptReceivedDescriptor(QDBusUnixFileDescriptor &&fd);
     UnixFd(const UnixFd &other);
     UnixFd &operator=(const UnixFd &other);
     ~UnixFd();
