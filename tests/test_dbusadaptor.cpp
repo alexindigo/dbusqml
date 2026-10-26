@@ -255,6 +255,7 @@ public slots:
 
 static QProcess *s_daemon = nullptr;
 static QString s_originalAddress;
+static void stopOracle();
 
 static bool startPrivateBus() {
     s_daemon = new QProcess();
@@ -289,8 +290,8 @@ static void stopPrivateBus() {
 // ==================== Release-teardown registry (1.0 gate) ====================
 //
 // Every named connection this suite opens is recorded here and disconnected
-// at the end of main(); the static engines and the oracle process are
-// destroyed there too, so the process exits with nothing of ours alive when
+// at the end of main(); the static engines are destroyed there too, while
+// cleanupTestCase stops the helper processes, so nothing of ours is alive when
 // LeakSanitizer takes its snapshot.
 
 // G1 pins (P6): a dynamic QML signal has no C++ member pointer, so the
@@ -364,12 +365,23 @@ public:
     static int s_stressIterations;
 
 private:
+    QProcess m_fdHelper;
     QDBusMessage callOnAdaptor(const QString &iface, const QString &member,
                                const QVariantList &args = {});
 
 private slots:
     void initTestCase() { QVERIFY(startPrivateBus()); }
-    void cleanupTestCase() { stopPrivateBus(); }
+    void cleanupTestCase() {
+        if (m_fdHelper.state() != QProcess::NotRunning) {
+            m_fdHelper.terminate();
+            if (!m_fdHelper.waitForFinished(3000)) {
+                m_fdHelper.kill();
+                m_fdHelper.waitForFinished(3000);
+            }
+        }
+        stopOracle();
+        stopPrivateBus();
+    }
 
     void testGetReturnsVariant();
     void testSetCompletesAndWrites();
@@ -1874,7 +1886,7 @@ static QDBusPendingCallWatcher *asyncCallDeferred(const QString &service, const 
 // spy count. The oracle binary is built alongside the test binaries when
 // libdbus-1 headers are present; pins QSKIP when it is absent.
 
-static QProcess *s_oracleProcess = nullptr; // stopped in main()'s teardown
+static QProcess *s_oracleProcess = nullptr; // stopped in cleanupTestCase
 static QProcess *startOracle() {
     if (s_oracleProcess && s_oracleProcess->state() == QProcess::Running)
         return s_oracleProcess;
@@ -1882,8 +1894,7 @@ static QProcess *startOracle() {
     if (!QFile::exists(path))
         return nullptr;
     s_oracleProcess = new QProcess();
-    s_oracleProcess->setProgram(path);
-    s_oracleProcess->start();
+    s_oracleProcess->start(path, {QDBusConnection::sessionBus().baseService()});
     if (!s_oracleProcess->waitForStarted(3000)) {
         delete s_oracleProcess;
         s_oracleProcess = nullptr;
@@ -10533,13 +10544,8 @@ void TestDBusAdaptor::testFdCrossProcess() {
     const QString helperBin =
         QCoreApplication::applicationDirPath() + QStringLiteral("/fd_helper_service");
 
-    QProcess helper;
-    helper.setProgram(QStringLiteral("/bin/sh"));
-    QStringList shArgs;
-    shArgs << QStringLiteral("-c")
-           << QStringLiteral("exec '%1' '%2' '%3'").arg(helperBin, replyFilePath, service);
-    helper.setArguments(shArgs);
-    helper.start();
+    QProcess &helper = m_fdHelper; // cleanupTestCase also handles an early assertion failure.
+    helper.start(helperBin, {replyFilePath, service, QDBusConnection::sessionBus().baseService()});
     QVERIFY2(helper.waitForStarted(5000), "fd helper service failed to start");
 
     // Wait for the service to appear on the bus.
@@ -10599,8 +10605,6 @@ void TestDBusAdaptor::testFdCrossProcess() {
     receivedFd.close();
     delete reply;
     delete conn;
-    helper.terminate();
-    helper.waitForFinished(3000);
 }
 
 // >>> RED-BASELINE-STRIP-END (item 9)
@@ -11975,8 +11979,11 @@ static void stopOracle() {
     if (!s_oracleProcess)
         return;
     s_oracleProcess->terminate();
-    if (!s_oracleProcess->waitForFinished(3000))
+    if (s_oracleProcess->state() != QProcess::NotRunning &&
+        !s_oracleProcess->waitForFinished(3000)) {
         s_oracleProcess->kill();
+        s_oracleProcess->waitForFinished(3000);
+    }
     delete s_oracleProcess;
     s_oracleProcess = nullptr;
 }
@@ -12026,8 +12033,8 @@ int main(int argc, char *argv[]) {
         app.sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QThread::msleep(1);
     }
-    // Named connections first (the deferred caller last), then the oracle,
-    // then the engines; the QCoreApplication on the stack destroys last.
+    // The helpers stopped in cleanupTestCase. Disconnect named connections
+    // (the deferred caller last), then destroy the engines.
     for (const QString &name : openedConnectionNames()) {
         if (name == QLatin1String("test-deferred-caller"))
             continue;
@@ -12035,7 +12042,6 @@ int main(int argc, char *argv[]) {
     }
     s_deferredCallerConn.reset();
     QDBusConnection::disconnectFromBus(QStringLiteral("test-deferred-caller"));
-    stopOracle();
     destroyStaticEngines();
     return rc;
 }

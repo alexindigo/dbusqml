@@ -62,6 +62,24 @@ data) and never fails the run. CTest wraps its D-Bus targets in private
 sessions; `run-qml-tests` creates a session when no session bus exists.
 The session launchers and coverage tools honor disk-backed `TMPDIR`.
 
+### Wire helper lifetime
+
+The persistent test peers take the owning test's D-Bus **unique name** as
+their final argument: `payload_echo_service <service> <owner>`,
+`fd_helper_service <reply-file> <service> <owner>`, and `oracle <owner>`.
+They subscribe to the owner's disappearance before checking whether it
+still exists, exit immediately if it is already gone, and exit when it
+disappears after normal termination, a crash, or a kill. The Qt peers use
+`QDBusServiceWatcher::WatchForUnregistration`; the Qt-free oracle uses the
+equivalent libdbus match. No peer has a wall-clock lifetime. The owning
+suite also stops and waits for its peers in `cleanupTestCase`.
+
+`testHelperOwnerLifetime` covers already-gone, normal-exit and killed
+owners for all three peers. `testHelpersOutliveSixtySeconds` starts them
+concurrently and verifies real echo, bidirectional fd-transfer and oracle
+replies after 65 seconds with the owner still alive. It is part of the
+default suite and adds approximately 65 seconds to `test_dbus`.
+
 ## QML Linting and Formatting
 
 Inside devcontainer:

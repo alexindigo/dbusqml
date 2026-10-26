@@ -284,7 +284,29 @@ static DBusMessage *handle_call_adaptor_noreply(DBusMessage *msg, DBusConnection
     return ret;
 }
 
-int main(void) {
+struct OwnerWatch {
+    const char *name;
+    dbus_bool_t gone;
+};
+
+static DBusHandlerResult owner_filter(DBusConnection *conn, DBusMessage *msg, void *data) {
+    (void)conn;
+    struct OwnerWatch *watch = data;
+    if (dbus_message_is_signal(msg, DBUS_INTERFACE_DBUS, "NameOwnerChanged") &&
+        dbus_message_has_sender(msg, DBUS_SERVICE_DBUS) &&
+        dbus_message_has_path(msg, DBUS_PATH_DBUS)) {
+        const char *name, *oldOwner, *newOwner;
+        if (dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &name, DBUS_TYPE_STRING, &oldOwner,
+                                 DBUS_TYPE_STRING, &newOwner, DBUS_TYPE_INVALID) &&
+            !strcmp(name, watch->name) && !*newOwner)
+            watch->gone = TRUE;
+    }
+    return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2 || argv[1][0] != ':' || !dbus_validate_bus_name(argv[1], NULL))
+        return 2;
     DBusError err;
     dbus_error_init(&err);
     DBusConnection *conn = dbus_bus_get(DBUS_BUS_SESSION, &err);
@@ -292,6 +314,26 @@ int main(void) {
         fprintf(stderr, "oracle: no session bus: %s\n", err.message);
         return 1;
     }
+    struct OwnerWatch watch = {argv[1], FALSE};
+    if (!dbus_connection_add_filter(conn, owner_filter, &watch, NULL))
+        return 1;
+    // AddMatch completes before NameHasOwner, closing the startup race.
+    char rule[512];
+    snprintf(rule, sizeof(rule),
+             "type='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',"
+             "interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='%s'", watch.name);
+    dbus_bus_add_match(conn, rule, &err);
+    if (dbus_error_is_set(&err)) {
+        fprintf(stderr, "oracle: cannot watch owner: %s\n", err.message);
+        return 1;
+    }
+    const dbus_bool_t alive = dbus_bus_name_has_owner(conn, watch.name, &err);
+    if (dbus_error_is_set(&err)) {
+        fprintf(stderr, "oracle: cannot query owner: %s\n", err.message);
+        return 1;
+    }
+    if (!alive)
+        return 0;
     int rc = dbus_bus_request_name(conn, "org.dbusqml.Oracle", DBUS_NAME_FLAG_DO_NOT_QUEUE, &err);
     if (rc != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) {
         fprintf(stderr, "oracle: cannot own name\n");
@@ -300,7 +342,7 @@ int main(void) {
     printf("ORACLE-READY\n");
     fflush(stdout);
     dbus_connection_add_filter(conn, oracle_filter, NULL, NULL);
-    while (dbus_connection_read_write_dispatch(conn, 100)) {
+    while (!watch.gone && dbus_connection_read_write_dispatch(conn, -1)) {
     }
     return 0;
 }

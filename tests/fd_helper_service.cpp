@@ -10,9 +10,10 @@
 // caller and service — no same-process vacuous pass.
 #include <QCoreApplication>
 #include <QDBusConnection>
+#include <QDBusConnectionInterface>
+#include <QDBusServiceWatcher>
 #include <QDBusUnixFileDescriptor>
 #include <QFile>
-#include <QTimer>
 #include <QQmlParserStatus>
 #include <qqml.h>
 #include <fcntl.h>
@@ -45,10 +46,24 @@ public:
 };
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
-    if (argc < 3)
+    if (argc < 4)
         return 2;
     const QString replyFilePath = argv[1];
     const QString service = argv[2];
+    const QString owner = argv[3];
+
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+    if (!bus.isConnected() || !owner.startsWith(QLatin1Char(':')))
+        return 2;
+    // Subscribe before checking: the owner may vanish during startup.
+    QDBusServiceWatcher ownerWatch(owner, bus, QDBusServiceWatcher::WatchForUnregistration);
+    QObject::connect(&ownerWatch, &QDBusServiceWatcher::serviceUnregistered, &app,
+                     &QCoreApplication::quit);
+    const QDBusReply<bool> alive = bus.interface()->isServiceRegistered(owner);
+    if (!alive.isValid())
+        return 2;
+    if (!alive.value())
+        return 0;
 
     // Pre-write the reply payload and keep the fd — via the quartet
     // ("rw" is O_RDWR|O_CREAT|O_TRUNC: the caller reads the payload
@@ -70,8 +85,6 @@ int main(int argc, char *argv[]) {
     adaptor.classBegin();
     adaptor.componentComplete();
 
-    // Safety: never outlive the test.
-    QTimer::singleShot(60000, &app, &QCoreApplication::quit);
     return QCoreApplication::exec();
 }
 #include "fd_helper_service.moc"
