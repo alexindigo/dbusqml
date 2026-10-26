@@ -78,6 +78,25 @@ private:
 // recursive reader; a failed read never yields a partial container.
 struct DecodeState {
     bool ok = true;
+    const int fdLimit = DBus::fdDecodeBudget();
+    int remainingFds = fdLimit;
+    QString fdFailure;
+    QList<DBus::UnixFd> receivedFds;
+
+    DecodeState() = default;
+    DecodeState(const DecodeState &) = delete;
+    DecodeState &operator=(const DecodeState &) = delete;
+    ~DecodeState() {
+        // Also covers standalone unwrap/Struct readers and non-fd failures
+        // after an fd was read. Copies already placed in containers close too.
+        if (!ok)
+            rollbackFds();
+    }
+    void rollbackFds() {
+        for (auto &fd : receivedFds)
+            fd.close();
+        receivedFds.clear();
+    }
 };
 struct DecodeDepth {
     int arrays = 0;

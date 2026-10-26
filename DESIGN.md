@@ -203,7 +203,8 @@ is the fallback, and a process-wide pressure valve queues a collection when
 wrapper-owned fds pile up. A number is never inferred as an fd from a
 declared `h`: every send site goes through one fd rule (`wireFd`, the send
 boundary reports `DBusFdFailure`), and every decoded `h` becomes a fresh
-`unixFd` holding its own `dup()`.
+`unixFd` holding its own descriptor. Raw reads adopt Qt's freshly
+demarshalled duplicate; shared native Qt carriers are duplicated independently.
 Qt can construct a wrapper at an application-declared `unixFd`-typed
 property/parameter, and constructor-only engines are not registered for
 the pressure valve. These accepted limits are detailed in
@@ -424,6 +425,15 @@ discards the whole message's decoded arguments. Replies settle as local
 `InvalidArgs` before dispatch or property mutation. `DBus::Struct` and the
 string-array demarshaller reuse that reader rather than maintaining separate
 container loops.
+
+The same decode state owns one fd-reference budget across every argument and
+nested `h`/`ah` site, including native Qt carriers. `DBus::fdDecodeBudget()`
+supplies `clamp(RLIMIT_NOFILE soft / 4, 64, 1024)` for both this budget and
+the pressure-valve threshold. The state tracks created `unixFd` values and
+closes them all on any decode failure. An exceeded budget or failed duplicate
+uses the existing failure route with a member/limit warning. Raw reads adopt
+only sole-held freshly demarshalled descriptors; shared QVariant-held Qt fds
+retain duplication, so one listener can never consume another's descriptor.
 
 ### Send boundary
 

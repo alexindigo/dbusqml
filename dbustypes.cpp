@@ -78,15 +78,6 @@ void queueCollections() {
     }
 }
 
-int computePressureThreshold() {
-    // clamp(RLIMIT_NOFILE soft / 4, 64, 1024); no usable limit → the cap.
-    qint64 soft = 4 * 1024;
-    rlimit rl{};
-    if (::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
-        soft = static_cast<qint64>(rl.rlim_cur);
-    return static_cast<int>(qBound(qint64(64), soft / 4, qint64(1024)));
-}
-
 void fdAcquired() {
     const int live = s_liveFds.fetchAndAddRelaxed(1) + 1;
     const int threshold = UnixFd::pressureThreshold();
@@ -103,6 +94,15 @@ void fdAcquired() {
 }
 
 } // namespace
+
+int fdDecodeBudget() {
+    // No usable limit (including infinity) -> the cap. Clamp before the
+    // narrowing conversion: rlim_t need not fit in a signed integer.
+    rlimit rl{};
+    if (::getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY)
+        return 1024;
+    return static_cast<int>(qBound(rlim_t(64), rl.rlim_cur / 4, rlim_t(1024)));
+}
 
 class UnixFdPrivate : public QSharedData {
 public:
@@ -160,6 +160,15 @@ UnixFd::UnixFd(const QDBusUnixFileDescriptor &fd) {
     if (!dup.isValid())
         qWarning("dbusqml: cannot duplicate a received fd: %s", std::strerror(errno));
     init(dup);
+}
+
+UnixFd UnixFd::adoptReceivedDescriptor(QDBusUnixFileDescriptor &&fd) {
+    UnixFd result;
+    result.d = new UnixFdPrivate;
+    result.d->fd.giveFileDescriptor(fd.takeFileDescriptor());
+    if (result.isValid())
+        fdAcquired();
+    return result;
 }
 
 UnixFd::UnixFd(const UnixFd &other) = default;
@@ -236,7 +245,7 @@ int UnixFd::liveCount() {
 }
 
 int UnixFd::pressureThreshold() {
-    static const int threshold = computePressureThreshold();
+    static const int threshold = fdDecodeBudget();
     return threshold;
 }
 

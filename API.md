@@ -1334,6 +1334,21 @@ directions, over session, system and custom buses (the ScreenCast/Camera
   declared `h` in `_options` takes only a received fd; a number there is an
   `InvalidArgs` type mismatch.
 
+**Receive budget.** One message may contain at most
+`clamp(RLIMIT_NOFILE soft / 4, 64, 1024)` fd references, shared across all
+arguments and nested containers (including invalid references). Repeated
+references to the same attached descriptor count separately. Exceeding the
+budget or failing to duplicate a valid descriptor rejects the entire decode
+and closes every `unixFd` it created: method calls receive `InvalidArgs`,
+replies settle as `Failed`, and signals are dropped with a warning naming
+the member and limit. An invalid received descriptor still yields
+`valid === false`; it is not itself a decode failure.
+
+Raw `h` reads adopt Qt's freshly demarshalled duplicate instead of making
+an additional wrapper duplicate. Native Qt fd carriers (including variant
+payloads) may already be shared with other listeners; those still require
+an independent duplicate. Ordinary `unixFd` constructors keep duplicating.
+
 JavaScript excerpt for a proxy declaring `Consume(h)` and `OpenThing() → h`:
 
 ```js
