@@ -1638,8 +1638,9 @@ private slots:
             child.start(QCoreApplication::applicationFilePath(),
                         {QStringLiteral("testFdDecodeBudget:") + scenario});
             QVERIFY(child.waitForStarted(5000));
-            QVERIFY(child.waitForFinished(30000));
+            const bool finished = child.waitForFinished(30000);
             qInfo().noquote() << child.readAll();
+            QVERIFY2(finished, "fd-budget child did not finish");
             QCOMPARE(child.exitStatus(), QProcess::NormalExit);
             QCOMPARE(child.exitCode(), 0);
             return;
