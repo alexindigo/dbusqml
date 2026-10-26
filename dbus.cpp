@@ -1,4 +1,5 @@
 #include "dbus.h"
+#include "dbussubscription.h"
 #include "dbuscatalog.h"
 #include "dbuspendingreply.h"
 #include "dbusintrospection.h"
@@ -99,6 +100,7 @@ DBusProxy::DBusProxy(QObject *parent)
     : QQmlPropertyMap(this, parent), m_bus(QDBusConnection::sessionBus()) {}
 
 DBusProxy::~DBusProxy() {
+    teardownServiceWatcher();
     disconnectSignals();
 }
 
@@ -116,15 +118,11 @@ void DBusProxy::componentComplete() {
 void DBusProxy::setService(const QString &v) {
     if (m_service == v)
         return;
+    disconnectSignals();
     m_service = v;
     ensureServiceWatcher();
     emit serviceChanged();
     prepopulateFromCatalog();
-
-    // Subscriptions (and the owner tracker) bind the OLD service — tear
-    // down with the recorded identity before resubscribing, same as
-    // setIface/setConnection do.
-    disconnectSignals();
 
     if (!m_iface.isEmpty() && !m_path.isEmpty())
         scheduleIntrospect();
@@ -133,11 +131,10 @@ void DBusProxy::setService(const QString &v) {
 void DBusProxy::setPath(const QString &v) {
     if (m_path == v)
         return;
+    disconnectSignals();
     m_path = v;
     emit pathChanged();
     prepopulateFromCatalog();
-
-    disconnectSignals(); // subscriptions bind the old path — see setService
 
     if (!m_iface.isEmpty() && !m_service.isEmpty())
         scheduleIntrospect();
@@ -146,12 +143,11 @@ void DBusProxy::setPath(const QString &v) {
 void DBusProxy::setIface(const QString &v) {
     if (m_iface == v)
         return;
+    disconnectSignals();
     QString oldIface = m_iface;
     m_iface = v;
     emit ifaceChanged();
     prepopulateFromCatalog();
-
-    disconnectSignals();
 
     if (!m_service.isEmpty() && !m_path.isEmpty())
         scheduleIntrospect();
@@ -253,10 +249,8 @@ void DBusProxy::setWatchServiceStatus(bool v) {
     if (v)
         ensureServiceWatcher();
 
-    if (!v && m_serviceWatcher) {
-        m_serviceWatcher->deleteLater();
-        m_serviceWatcher = nullptr;
-    }
+    if (!v)
+        teardownServiceWatcher();
 
     emit watchServiceStatusChanged();
 }
@@ -307,6 +301,7 @@ void DBusProxy::onBusDisconnected() {
     // P5 loss handling: tear down match subscriptions (dead on a dead
     // bus — QtDBus disconnects are no-ops there), flip to Error, mark
     // the service unavailable. No automatic resubscribe (FD5).
+    teardownServiceWatcher();
     disconnectSignals();
     if (m_status != Error) {
         m_status = Error;
@@ -318,14 +313,27 @@ void DBusProxy::onBusDisconnected() {
     }
 }
 
-// Idempotent service-watcher readiness (Nemo-shaped): create-or-rewire on
-// the CURRENT bus, then (re-)run the initial async NameHasOwner. Guarded by
-// watchServiceStatus && service — every entry point in every order lands
-// here, and componentComplete() backfills whatever binding order skipped.
+void DBusProxy::teardownServiceWatcher() {
+    if (m_serviceWatcher) {
+        m_serviceWatcher->disconnect(this);
+        m_serviceWatcher->deleteLater();
+        m_serviceWatcher = nullptr;
+    }
+}
+
+// Idempotent service-watcher readiness: create-or-replace on the CURRENT
+// bus, then (re-)run the initial async NameHasOwner. componentComplete()
+// backfills whatever binding order skipped.
 void DBusProxy::ensureServiceWatcher() {
+    // A watcher is a receiver identity, not just a set of match rules.
+    // Reusing it with setWatchedServices would honor already-posted events
+    // from the previous service. Retire its forwarding connections first.
+    if (m_serviceWatcher && (!m_watchServiceStatus || m_service.isEmpty() ||
+                             m_serviceWatcher->watchedServices() != QStringList{m_service} ||
+                             m_serviceWatcher->connection().name() != m_bus.name()))
+        teardownServiceWatcher();
     if (!m_watchServiceStatus || m_service.isEmpty())
         return;
-
     if (!m_serviceWatcher) {
         m_serviceWatcher = new QDBusServiceWatcher(m_service, m_bus,
                                                    QDBusServiceWatcher::WatchForRegistration |
@@ -343,8 +351,6 @@ void DBusProxy::ensureServiceWatcher() {
             m_serviceAvailable = false;
             emit serviceAvailableChanged();
         });
-    } else {
-        m_serviceWatcher->setWatchedServices({m_service});
     }
 
     // (Re-)check initial state: NameHasOwner on the bus daemon. Gated on
@@ -358,9 +364,11 @@ void DBusProxy::ensureServiceWatcher() {
     QDBusPendingReply<bool> nameReply = m_bus.asyncCall(msg, m_callTimeout);
     auto *watcher = new QDBusPendingCallWatcher(nameReply, this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
-            [this, watched](QDBusPendingCallWatcher *w) {
+            [this, watched, tracker = QPointer<QDBusServiceWatcher>(m_serviceWatcher)](
+                QDBusPendingCallWatcher *w) {
                 QDBusPendingReply<bool> reply = *w;
-                if (!reply.isError() && watched == m_service) {
+                if (!reply.isError() && tracker && tracker == m_serviceWatcher &&
+                    m_watchServiceStatus && watched == m_service) {
                     m_serviceAvailable = reply.value();
                     emit serviceAvailableChanged();
                 }
@@ -409,6 +417,9 @@ void DBusProxy::setConnection(DBusConnection *v) {
 
     disconnectSignals();
     m_introspectCache.clear();
+    // Retire old status forwarding before connectionChanged can reenter
+    // event processing. The replacement is installed on the new bus below.
+    teardownServiceWatcher();
     if (m_conn)
         disconnect(m_conn, &DBusConnection::disconnected, this, &DBusProxy::onBusDisconnected);
 
@@ -424,10 +435,6 @@ void DBusProxy::setConnection(DBusConnection *v) {
 
     // The watcher is bound to the old bus — destroy + recreate on the new
     // bus and re-run the initial check.
-    if (m_serviceWatcher) {
-        m_serviceWatcher->deleteLater();
-        m_serviceWatcher = nullptr;
-    }
     ensureServiceWatcher();
 
     // Re-introspect on the new bus to re-establish signal subscriptions
@@ -838,28 +845,17 @@ void DBusProxy::maybeRefetchAfterFailedWrite(const QString &wireName) {
 }
 
 void DBusProxy::disconnectSignals() {
-    if (!m_signalsConnected)
-        return;
-
-    // The owner tracker exists only while subscriptions do.
     teardownOwnerTracker();
-
-    // Disconnect each recorded per-signal hook with the exact arguments
-    // used at connect time. QtDBus disconnect requires exact-arg match.
-    // On a dead bus these are no-ops (QtDBus guards internally) — safe
-    // to call from onBusDisconnected.
-    for (const QString &sigName : std::as_const(m_connectedSignals)) {
-        m_bus.disconnect(m_connectedService, m_connectedPath, m_connectedIface, sigName, this,
-                         SLOT(onPropertiesChanged(QDBusMessage)));
+    if (m_signalSubscription) {
+        auto *subscription = m_signalSubscription;
+        m_signalSubscription = nullptr;
+        subscription->revoke();
     }
-    m_bus.disconnect(m_connectedService, m_connectedPath, "org.freedesktop.DBus.Properties",
-                     "PropertiesChanged", this, SLOT(onPropertiesChanged(QDBusMessage)));
-
-    m_connectedSignals.clear();
-    m_connectedService.clear();
-    m_connectedPath.clear();
-    m_connectedIface.clear();
-    m_signalsConnected = false;
+    if (m_propertySubscription) {
+        auto *subscription = m_propertySubscription;
+        m_propertySubscription = nullptr;
+        subscription->revoke();
+    }
 }
 
 // #8: the proxy accepts signals only from the CURRENT owner of the
@@ -895,12 +891,14 @@ void DBusProxy::setupOwnerTracker() {
     call.setArguments({m_trackedService});
     auto *watcher = new QDBusPendingCallWatcher(m_bus.asyncCall(call, m_callTimeout), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
-            [this, service = m_trackedService](QDBusPendingCallWatcher *w) {
+            [this, service = m_trackedService,
+             tracker = QPointer<QDBusServiceWatcher>(m_ownerWatcher)](QDBusPendingCallWatcher *w) {
                 QDBusPendingReply<QString> reply = *w;
                 // An error (the name has no owner) or a torn-down/rebuilt
                 // tracker leaves the owner unknown — the daemon's match
                 // rule is the filter until a change arrives.
-                if (!reply.isError() && m_trackedService == service)
+                if (!reply.isError() && tracker && tracker == m_ownerWatcher &&
+                    m_trackedService == service)
                     m_currentOwner = reply.value();
                 w->deleteLater();
             });
@@ -908,6 +906,7 @@ void DBusProxy::setupOwnerTracker() {
 
 void DBusProxy::teardownOwnerTracker() {
     if (m_ownerWatcher) {
+        m_ownerWatcher->disconnect(this);
         m_ownerWatcher->deleteLater();
         m_ownerWatcher = nullptr;
     }
@@ -965,7 +964,17 @@ void DBusProxy::onPropertiesChanged(const QDBusMessage &msg) {
         if (!decodeMessage(msg, unwrapped))
             return;
         DBus::UnixFd::noteDelivered(QVariant(unwrapped), qmlEngine(this));
+        QPointer<DBusProxy> guard(this);
+        QPointer<DBusSubscription> subscription =
+            msg.interface() == QLatin1String("org.freedesktop.DBus.Properties")
+                ? m_propertySubscription
+                : m_signalSubscription;
+        const bool subscribed = !subscription.isNull();
         emit signalReceived(msg.member(), unwrapped);
+        // A handler may retarget/disable/destroy the proxy. Do not continue
+        // applying this old delivery to its property cache after revocation.
+        if (!guard || (subscribed && (!subscription || subscription->isRevoked())))
+            return;
 
         if (msg.member() == "PropertiesChanged") {
             // A2: the interface argument decides — a co-located adaptor's
@@ -1105,26 +1114,24 @@ void DBusProxy::onIntrospectionReady(const QString &xml) {
         }
     }
 
+    disconnectSignals();
     if (m_signalsEnabled) {
         // #8: bind every subscription to the configured service — the
         // daemon's match rule then resolves the well-known name to its
         // current owner on each delivery, so a peer that merely emits the
         // same path/iface/member never reaches this proxy.
         // (DBusSignalWatcher stays the wildcard-listening component.)
-        for (const QString &sigName : signalNames) {
-            m_bus.connect(m_service, m_path, m_iface, sigName, this,
-                          SLOT(onPropertiesChanged(QDBusMessage)));
-        }
-
-        m_bus.connect(m_service, m_path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                      this, SLOT(onPropertiesChanged(QDBusMessage)));
-
-        // Record exact connect args for exact disconnect later
-        m_connectedSignals = signalNames;
-        m_connectedService = m_service;
-        m_connectedPath = m_path;
-        m_connectedIface = m_iface;
-        m_signalsConnected = true;
+        // PropertiesChanged has one owner even when Properties is itself
+        // the configured interface and introspection also advertises it.
+        if (m_iface == QLatin1String("org.freedesktop.DBus.Properties"))
+            signalNames.removeAll(QStringLiteral("PropertiesChanged"));
+        m_signalSubscription = DBusSubscription::create(
+            m_bus, m_service, m_path, m_iface, signalNames,
+            [this](const QDBusMessage &msg) { onPropertiesChanged(msg); }, this);
+        m_propertySubscription = DBusSubscription::create(
+            m_bus, m_service, m_path, QStringLiteral("org.freedesktop.DBus.Properties"),
+            {QStringLiteral("PropertiesChanged")},
+            [this](const QDBusMessage &msg) { onPropertiesChanged(msg); }, this);
 
         setupOwnerTracker();
     }

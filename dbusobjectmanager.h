@@ -10,6 +10,8 @@
 
 #include "dbusconnection.h"
 
+class DBusSubscription;
+
 // ObjectManager client (org.freedesktop.DBus.ObjectManager): fetches and
 // exposes GetManagedObjects for a service+path, and re-emits
 // InterfacesAdded/InterfacesRemoved as QML signals with unwrapped args.
@@ -77,14 +79,6 @@ private:
     QString m_path;
     bool m_ready = false;
     bool m_complete = false;
-    bool m_subscribed = false;
-    // Recorded identity of the live subscription (Class D): the exact
-    // connection + service/path tuple passed to connect(). Disconnect
-    // ALWAYS uses this — never the re-resolved current fields. The
-    // session-bus initializer is only a placeholder: overwritten at every
-    // successful connect, never used while m_subscribed is false.
-    QDBusConnection m_subConn = QDBusConnection::sessionBus();
-    QString m_subService;
-    QString m_subPath;
+    DBusSubscription *m_subscription = nullptr;
     QVariantMap m_objects;
 };

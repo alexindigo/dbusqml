@@ -547,6 +547,56 @@ public:
     QString ifaceName = QStringLiteral("org.dbusqml.SigOwner");
 };
 
+// Subscription-lifetime fixture: a genuinely separate wire connection, with
+// two names/paths on the SAME owner. The proxy's owner check therefore cannot
+// accidentally hide a delivery belonging to a revoked subscription.
+class SubscriptionPeer : public SignalOwnerObject {
+public:
+    explicit SubscriptionPeer(const QString &address)
+        : bus(QDBusConnection::connectToBus(address, QStringLiteral("subscription-peer"))) {
+        ifaceName = QStringLiteral("org.dbusqml.Subscription");
+        valid = bus.isConnected() && bus.registerService(QStringLiteral("org.dbusqml.SubOld")) &&
+                bus.registerService(QStringLiteral("org.dbusqml.SubNew")) &&
+                bus.registerVirtualObject(QStringLiteral("/SubOld"), this) &&
+                bus.registerVirtualObject(QStringLiteral("/SubNew"), this);
+    }
+    ~SubscriptionPeer() override {
+        bus.unregisterObject(QStringLiteral("/SubOld"));
+        bus.unregisterObject(QStringLiteral("/SubNew"));
+        bus.unregisterService(QStringLiteral("org.dbusqml.SubOld"));
+        bus.unregisterService(QStringLiteral("org.dbusqml.SubNew"));
+        QDBusConnection::disconnectFromBus(QStringLiteral("subscription-peer"));
+    }
+    bool handleMessage(const QDBusMessage &msg, const QDBusConnection &conn) override {
+        if (msg.member() == QLatin1String("GetManagedObjects"))
+            return conn.send(msg.createReply(
+                {marshalBySignature(QStringLiteral("a{oa{sa{sv}}}"), QVariantMap{})}));
+        return SignalOwnerObject::handleMessage(msg, conn);
+    }
+    bool send(const QString &member, const QVariantList &args,
+              const QString &path = QStringLiteral("/SubOld"), const QString &iface = {}) {
+        auto msg = QDBusMessage::createSignal(path, iface.isEmpty() ? ifaceName : iface, member);
+        msg.setArguments(args);
+        return bus.send(msg);
+    }
+    bool postDeliveries() {
+        // First flush the sender through the daemon, then block for a reply
+        // on the receiver's connection. The daemon sends that reply AFTER
+        // the preceding signal on the same ordered socket; QtDBus posts its
+        // delivery before completing this call. QDBus::Block runs no main
+        // event loop, so no consumer can run between emission and revocation.
+        const auto barrier = QDBusMessage::createMethodCall(
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+            QStringLiteral("org.freedesktop.DBus"), QStringLiteral("GetId"));
+        if (bus.call(barrier, QDBus::Block, 3000).type() != QDBusMessage::ReplyMessage)
+            return false;
+        return QDBusConnection::sessionBus().call(barrier, QDBus::Block, 3000).type() ==
+               QDBusMessage::ReplyMessage;
+    }
+    QDBusConnection bus;
+    bool valid = false;
+};
+
 // Payload-echo helper: launched as a separate process (payload_echo_service)
 // — a real wire round-trip: the helper replies with a write-built payload of
 // the requested signature; the caller receives it READ-mode.
@@ -2441,6 +2491,397 @@ private slots:
         QTest::qWait(500);
         QCOMPARE(PropertyServerObject::s_lastSetProp, QStringLiteral("PayloadLevel"));
         PropertyServerObject::s_declarePayload = false;
+    }
+
+    // ---- Revocation also drops deliveries already posted by QtDBus ----
+
+    void testWatcherRevokesQueuedDelivery_data() {
+        QTest::addColumn<QString>("change");
+        for (const char *change :
+             {"service", "path", "iface", "member", "connection", "enabled", "wildcard"})
+            QTest::newRow(change) << QString::fromLatin1(change);
+    }
+
+    void testWatcherRevokesQueuedDelivery() {
+        QFETCH(QString, change);
+        SubscriptionPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        QScopedPointer<DBusConnection> other(trackedConnectToBus(s_privateBusAddress));
+        QVERIFY(other);
+        DBusSignalWatcher watcher;
+        watcher.setService(
+            change == QLatin1String("wildcard") ? QString() : QStringLiteral("org.dbusqml.SubOld"));
+        watcher.setPath(QStringLiteral("/SubOld"));
+        watcher.setIface(peer.ifaceName);
+        watcher.setMember(change == QLatin1String("wildcard") ? QString() : QStringLiteral("Ping"));
+        watcher.componentComplete();
+        QSignalSpy delivered(&watcher, &DBusSignalWatcher::received);
+        QVERIFY(peer.send(QStringLiteral("Ping"), {QStringLiteral("before")}));
+        QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, 5000);
+        delivered.clear();
+
+        QVERIFY(peer.send(QStringLiteral("Ping"), {QStringLiteral("stale")}));
+        QVERIFY(peer.postDeliveries());
+        QCOMPARE(delivered.size(), 0); // the main thread has not dispatched it
+        QString path = watcher.path(), iface = watcher.iface(), member = QStringLiteral("Ping");
+        if (change == QLatin1String("service"))
+            watcher.setService(QStringLiteral("org.dbusqml.SubNew"));
+        else if (change == QLatin1String("path"))
+            watcher.setPath(path = QStringLiteral("/SubNew"));
+        else if (change == QLatin1String("iface"))
+            watcher.setIface(iface = QStringLiteral("org.dbusqml.SubNew"));
+        else if (change == QLatin1String("member"))
+            watcher.setMember(member = QStringLiteral("Pong"));
+        else if (change == QLatin1String("connection"))
+            watcher.setConnection(other.data());
+        else
+            watcher.setEnabled(false);
+        // Deliver MetaCalls BEFORE DeferredDelete: this pins the revoked
+        // flag, rather than relying solely on QObject destruction cleanup.
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        QCOMPARE(delivered.size(), 0);
+
+        watcher.setEnabled(true);
+        QVERIFY(peer.send(member, {QStringLiteral("fresh")}, path, iface));
+        QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, 5000);
+        QCOMPARE(delivered.first().at(1).toList(), QVariantList{QStringLiteral("fresh")});
+    }
+
+    void testWatcherRevokesInsideQmlDelivery() {
+        SubscriptionPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        QQmlEngine engine;
+        engine.addImportPath(QCoreApplication::applicationDirPath());
+        QQmlComponent component(&engine);
+        component.setData("import DBus 1.0\n"
+                          "DBusSignalWatcher {\n"
+                          "  service: 'org.dbusqml.SubOld'; path: '/SubOld'\n"
+                          "  iface: 'org.dbusqml.Subscription'; member: 'Ping'\n"
+                          "  property int deliveries: 0\n"
+                          "  onReceived: { deliveries++; if (deliveries === 1)\n"
+                          "      service = 'org.dbusqml.SubNew' }\n"
+                          "}",
+                          QUrl());
+        QScopedPointer<QObject> watcher(component.create());
+        QVERIFY2(watcher, qPrintable(component.errorString()));
+        QVERIFY(peer.send(QStringLiteral("Ping"), {QStringLiteral("first")}));
+        QVERIFY(peer.send(QStringLiteral("Ping"), {QStringLiteral("stale")}));
+        QVERIFY(peer.postDeliveries());
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        QCOMPARE(watcher->property("deliveries").toInt(), 1);
+        QCOMPARE(watcher->property("service").toString(), QStringLiteral("org.dbusqml.SubNew"));
+        QVERIFY(peer.send(QStringLiteral("Ping"), {QStringLiteral("fresh")}));
+        QTRY_COMPARE_WITH_TIMEOUT(watcher->property("deliveries").toInt(), 2, 5000);
+    }
+
+    void testProxyRevokesQueuedDelivery_data() {
+        QTest::addColumn<bool>("properties");
+        QTest::addColumn<QString>("change");
+        for (const char *change : {"path", "service", "connection", "disabled"}) {
+            QTest::newRow(qPrintable(QStringLiteral("signal-%1").arg(change)))
+                << false << QString::fromLatin1(change);
+            QTest::newRow(qPrintable(QStringLiteral("properties-%1").arg(change)))
+                << true << QString::fromLatin1(change);
+        }
+    }
+
+    void testProxyRevokesQueuedDelivery() {
+        QFETCH(bool, properties);
+        QFETCH(QString, change);
+        SubscriptionPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        QScopedPointer<DBusConnection> other(trackedConnectToBus(s_privateBusAddress));
+        QVERIFY(other);
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.SubOld"));
+        proxy.setPath(QStringLiteral("/SubOld"));
+        proxy.setIface(peer.ifaceName);
+        proxy.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        QCOMPARE(proxy.value(QStringLiteral("level")).toUInt(), 7u);
+        QSignalSpy delivered(&proxy, &DBusProxy::signalReceived);
+        auto send = [&](uint value, const QString &path) {
+            if (properties)
+                return peer.send(
+                    QStringLiteral("PropertiesChanged"),
+                    {peer.ifaceName, QVariantMap{{QStringLiteral("Level"), value}}, QStringList{}},
+                    path, QStringLiteral("org.freedesktop.DBus.Properties"));
+            return peer.send(QStringLiteral("Ping"), {QString::number(value)}, path);
+        };
+        QVERIFY(send(11u, proxy.path()));
+        QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, 5000);
+        delivered.clear();
+        QVERIFY(send(99u, proxy.path()));
+        QVERIFY(peer.postDeliveries());
+        QCOMPARE(delivered.size(), 0);
+        QSignalSpy introspected(&proxy, &DBusProxy::introspectionCompleted);
+        if (change == QLatin1String("path"))
+            proxy.setPath(QStringLiteral("/SubNew"));
+        else if (change == QLatin1String("service"))
+            proxy.setService(QStringLiteral("org.dbusqml.SubNew"));
+        else if (change == QLatin1String("connection"))
+            proxy.setConnection(other.data());
+        else
+            proxy.setSignalsEnabled(false);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        QCOMPARE(delivered.size(), 0);
+        QVERIFY(proxy.value(QStringLiteral("level")).toUInt() != 99u);
+
+        proxy.setSignalsEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(!introspected.isEmpty(), 5000);
+        QCOMPARE(proxy.status(), DBusProxy::Ready);
+        QVERIFY(send(42u, proxy.path()));
+        QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, 5000);
+        if (properties)
+            QCOMPARE(proxy.value(QStringLiteral("level")).toUInt(), 42u);
+        else
+            QCOMPARE(delivered.first().at(1).toList(), QVariantList{QStringLiteral("42")});
+    }
+
+    void testProxyRevokesInsidePropertiesDelivery() {
+        SubscriptionPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.SubOld"));
+        proxy.setPath(QStringLiteral("/SubOld"));
+        proxy.setIface(peer.ifaceName);
+        proxy.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        connect(
+            &proxy, &DBusProxy::signalReceived, &proxy,
+            [&proxy](const QString &, const QVariantList &) { proxy.setSignalsEnabled(false); });
+        QVERIFY(
+            peer.send(QStringLiteral("PropertiesChanged"),
+                      {peer.ifaceName, QVariantMap{{QStringLiteral("Level"), 99u}}, QStringList{}},
+                      proxy.path(), QStringLiteral("org.freedesktop.DBus.Properties")));
+        QTRY_VERIFY_WITH_TIMEOUT(!proxy.signalsEnabled(), 5000);
+        QCOMPARE(proxy.value(QStringLiteral("level")).toUInt(), 7u);
+    }
+
+    void testProxyPropertiesInterfaceHasOneSubscription() {
+        class PropertiesPeer : public SubscriptionPeer {
+        public:
+            using SubscriptionPeer::SubscriptionPeer;
+            QString introspect(const QString &) const override {
+                return QStringLiteral("<node><interface name=\"org.freedesktop.DBus.Properties\">"
+                                      "<signal name=\"PropertiesChanged\"><arg type=\"s\"/>"
+                                      "<arg type=\"a{sv}\"/><arg type=\"as\"/></signal>"
+                                      "<property name=\"Level\" type=\"u\" access=\"read\"/>"
+                                      "</interface></node>");
+            }
+        } peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        peer.ifaceName = QStringLiteral("org.freedesktop.DBus.Properties");
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.SubOld"));
+        proxy.setPath(QStringLiteral("/SubOld"));
+        proxy.setIface(peer.ifaceName);
+        proxy.componentComplete();
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.status(), DBusProxy::Ready, 5000);
+        QSignalSpy delivered(&proxy, &DBusProxy::signalReceived);
+        QVERIFY(peer.send(
+            QStringLiteral("PropertiesChanged"),
+            {peer.ifaceName, QVariantMap{{QStringLiteral("Level"), 42u}}, QStringList{}}));
+        QVERIFY(peer.postDeliveries());
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        QCOMPARE(delivered.size(), 1);
+        QCOMPARE(proxy.value(QStringLiteral("level")).toUInt(), 42u);
+    }
+
+    void testProxyRevokesQueuedServiceWatch_data() {
+        QTest::addColumn<QString>("change");
+        QTest::newRow("retarget") << QStringLiteral("retarget");
+        QTest::newRow("disable") << QStringLiteral("disable");
+        QTest::newRow("clear") << QStringLiteral("clear");
+    }
+
+    void testProxyRevokesQueuedServiceWatch() {
+        QFETCH(QString, change);
+        SubscriptionPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.SubOld"));
+        proxy.setWatchServiceStatus(true);
+        proxy.componentComplete();
+        QTRY_VERIFY_WITH_TIMEOUT(proxy.serviceAvailable(), 5000);
+        int unavailable = 0;
+        connect(&proxy, &DBusProxy::serviceAvailableChanged, &proxy, [&] {
+            if (!proxy.serviceAvailable())
+                ++unavailable;
+        });
+        QVERIFY(peer.bus.unregisterService(QStringLiteral("org.dbusqml.SubOld")));
+        QVERIFY(peer.postDeliveries());
+        QCOMPARE(unavailable, 0);
+        if (change == QLatin1String("disable"))
+            proxy.setWatchServiceStatus(false);
+        else if (change == QLatin1String("clear"))
+            proxy.setService(QString());
+        else
+            proxy.setService(QStringLiteral("org.dbusqml.SubNew"));
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        QCOMPARE(unavailable, 0);
+        QVERIFY(proxy.serviceAvailable());
+        if (change == QLatin1String("disable"))
+            proxy.setWatchServiceStatus(true);
+        else if (change == QLatin1String("clear"))
+            proxy.setService(QStringLiteral("org.dbusqml.SubOld"));
+        else
+            QVERIFY(peer.bus.unregisterService(QStringLiteral("org.dbusqml.SubNew")));
+        QTRY_VERIFY_WITH_TIMEOUT(!proxy.serviceAvailable(), 5000);
+    }
+
+    void testProxyConnectionChangeRevokesServiceWatchBeforeNotify() {
+        SubscriptionPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        QScopedPointer<DBusConnection> other(trackedConnectToBus(s_privateBusAddress));
+        QVERIFY(other);
+        DBusProxy proxy;
+        proxy.setService(QStringLiteral("org.dbusqml.SubOld"));
+        proxy.setWatchServiceStatus(true);
+        proxy.componentComplete();
+        QTRY_VERIFY_WITH_TIMEOUT(proxy.serviceAvailable(), 5000);
+        int unavailable = 0;
+        connect(&proxy, &DBusProxy::serviceAvailableChanged, &proxy, [&] {
+            if (!proxy.serviceAvailable())
+                ++unavailable;
+        });
+        bool availableDuringNotify = false;
+        connect(&proxy, &DBusProxy::connectionChanged, &proxy, [&] {
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+            availableDuringNotify = proxy.serviceAvailable();
+        });
+        QVERIFY(peer.bus.unregisterService(QStringLiteral("org.dbusqml.SubOld")));
+        QVERIFY(peer.postDeliveries());
+        proxy.setConnection(other.data());
+        QVERIFY(availableDuringNotify);
+        QCOMPARE(unavailable, 0);
+        QTRY_VERIFY_WITH_TIMEOUT(!proxy.serviceAvailable(), 5000);
+        QVERIFY(peer.bus.registerService(QStringLiteral("org.dbusqml.SubOld")));
+        QTRY_VERIFY_WITH_TIMEOUT(proxy.serviceAvailable(), 5000);
+    }
+
+    void testObjectManagerRevokesQueuedDelivery_data() {
+        QTest::addColumn<bool>("removed");
+        QTest::addColumn<QString>("change");
+        for (const char *change : {"path", "service", "connection"}) {
+            QTest::newRow(qPrintable(QStringLiteral("added-%1").arg(change)))
+                << false << QString::fromLatin1(change);
+            QTest::newRow(qPrintable(QStringLiteral("removed-%1").arg(change)))
+                << true << QString::fromLatin1(change);
+        }
+    }
+
+    void testObjectManagerRevokesQueuedDelivery() {
+        QFETCH(bool, removed);
+        QFETCH(QString, change);
+        SubscriptionPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        QScopedPointer<DBusConnection> other(trackedConnectToBus(s_privateBusAddress));
+        QVERIFY(other);
+        DBusObjectManager manager;
+        manager.setService(QStringLiteral("org.dbusqml.SubOld"));
+        manager.setPath(QStringLiteral("/SubOld"));
+        manager.componentComplete();
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready(), 5000);
+        QSignalSpy added(&manager, &DBusObjectManager::interfacesAdded);
+        QSignalSpy deleted(&manager, &DBusObjectManager::interfacesRemoved);
+        auto send = [&](const QString &objectPath, bool remove) {
+            const QVariant payload =
+                remove
+                    ? QVariant(QStringList{peer.ifaceName})
+                    : marshalBySignature(QStringLiteral("a{sa{sv}}"),
+                                         QVariantMap{{peer.ifaceName,
+                                                      QVariantMap{{QStringLiteral("Level"), 1u}}}});
+            return peer.send(remove ? QStringLiteral("InterfacesRemoved")
+                                    : QStringLiteral("InterfacesAdded"),
+                             {QVariant::fromValue(QDBusObjectPath(objectPath)), payload},
+                             manager.path(), QStringLiteral("org.freedesktop.DBus.ObjectManager"));
+        };
+        const QString keep = QStringLiteral("/keep");
+        QVERIFY(send(keep, false));
+        QTRY_COMPARE_WITH_TIMEOUT(added.size(), 1, 5000);
+        QVERIFY(manager.managedObjects().contains(keep));
+        added.clear();
+        QVERIFY(send(removed ? keep : QStringLiteral("/stale"), removed));
+        QVERIFY(peer.postDeliveries());
+        QCOMPARE(added.size() + deleted.size(), 0);
+        if (change == QLatin1String("path"))
+            manager.setPath(QStringLiteral("/SubNew"));
+        else if (change == QLatin1String("service"))
+            manager.setService(QStringLiteral("org.dbusqml.SubNew"));
+        else
+            manager.setConnection(other.data());
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        QCOMPARE(added.size() + deleted.size(), 0);
+        QVERIFY(!manager.managedObjects().contains(QStringLiteral("/stale")));
+        QVERIFY(manager.managedObjects().contains(keep)); // revoked removal cannot mutate it
+        QTRY_VERIFY_WITH_TIMEOUT(manager.managedObjects().isEmpty(), 5000);
+        QVERIFY(send(QStringLiteral("/fresh"), false));
+        QTRY_COMPARE_WITH_TIMEOUT(added.size(), 1, 5000);
+        QVERIFY(manager.managedObjects().contains(QStringLiteral("/fresh")));
+        QVERIFY(send(QStringLiteral("/fresh"), true));
+        QTRY_COMPARE_WITH_TIMEOUT(deleted.size(), 1, 5000);
+        QVERIFY(!manager.managedObjects().contains(QStringLiteral("/fresh")));
+    }
+
+    void testSubscriptionReceiverDestroyedWithQueuedDelivery_data() {
+        QTest::addColumn<QString>("consumer");
+        QTest::newRow("watcher") << QStringLiteral("watcher");
+        QTest::newRow("proxy") << QStringLiteral("proxy");
+        QTest::newRow("object-manager") << QStringLiteral("object-manager");
+    }
+
+    void testSubscriptionReceiverDestroyedWithQueuedDelivery() {
+        QFETCH(QString, consumer);
+        SubscriptionPeer peer(s_privateBusAddress);
+        QVERIFY(peer.valid);
+        QScopedPointer<QObject> receiver;
+        int deliveries = 0;
+        if (consumer == QLatin1String("watcher")) {
+            auto *watcher = new DBusSignalWatcher;
+            receiver.reset(watcher);
+            watcher->setService(QStringLiteral("org.dbusqml.SubOld"));
+            watcher->setPath(QStringLiteral("/SubOld"));
+            watcher->setIface(peer.ifaceName);
+            watcher->setMember(QStringLiteral("Ping"));
+            watcher->componentComplete();
+            connect(watcher, &DBusSignalWatcher::received, this, [&] { ++deliveries; });
+        } else if (consumer == QLatin1String("proxy")) {
+            auto *proxy = new DBusProxy;
+            receiver.reset(proxy);
+            proxy->setService(QStringLiteral("org.dbusqml.SubOld"));
+            proxy->setPath(QStringLiteral("/SubOld"));
+            proxy->setIface(peer.ifaceName);
+            proxy->componentComplete();
+            QTRY_COMPARE_WITH_TIMEOUT(proxy->status(), DBusProxy::Ready, 5000);
+            connect(proxy, &DBusProxy::signalReceived, this, [&] { ++deliveries; });
+        } else {
+            auto *manager = new DBusObjectManager;
+            receiver.reset(manager);
+            manager->setService(QStringLiteral("org.dbusqml.SubOld"));
+            manager->setPath(QStringLiteral("/SubOld"));
+            manager->componentComplete();
+            QTRY_VERIFY_WITH_TIMEOUT(manager->ready(), 5000);
+            connect(manager, &DBusObjectManager::interfacesRemoved, this, [&] { ++deliveries; });
+        }
+        auto send = [&] {
+            if (consumer == QLatin1String("object-manager"))
+                return peer.send(QStringLiteral("InterfacesRemoved"),
+                                 {QVariant::fromValue(QDBusObjectPath(QStringLiteral("/device"))),
+                                  QStringList{peer.ifaceName}},
+                                 QStringLiteral("/SubOld"),
+                                 QStringLiteral("org.freedesktop.DBus.ObjectManager"));
+            return peer.send(QStringLiteral("Ping"), {QStringLiteral("payload")});
+        };
+        QVERIFY(send());
+        QTRY_COMPARE_WITH_TIMEOUT(deliveries, 1, 5000);
+        deliveries = 0;
+        QVERIFY(send());
+        QVERIFY(peer.postDeliveries());
+        QCOMPARE(deliveries, 0);
+        receiver.reset();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        QCOMPARE(deliveries, 0);
     }
 
     // ---- #8: proxy signals only from the configured service's owner ----

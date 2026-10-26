@@ -378,6 +378,22 @@ plus user/system drop-ins (`$XDG_CONFIG_HOME/dbusqml/types/`,
 `$XDG_DATA_DIRS/*/dbusqml/types/`, `$DBUSQML_TYPES_PATH` override) —
 see `docs/TYPES.md`.
 
+### Subscription lifetime
+
+Signal hooks in `DBusSignalWatcher`, `DBusObjectManager` and `DBusProxy`
+(including `PropertiesChanged`) belong to internal `DBusSubscription`
+objects. Each subscription records its connection and match tuple and is
+itself the QtDBus receiver. Reconfiguration, disabling or destruction revokes
+the old subscription before replacing it: revocation marks it inactive,
+disconnects the recorded hooks and schedules `deleteLater()`. Its receiver
+checks that state before forwarding, so deliveries QtDBus already posted
+cannot reach the consumer after revocation. Deferred deletion makes revoking
+from inside a QML signal handler safe; proxy property handling also stops if
+that handler revokes the delivery before cache mutation. The proxy retains
+its additional current-owner check. Service watchers likewise use a distinct
+`QDBusServiceWatcher` per setup; proxy tracker teardown disconnects forwarding
+before deferred deletion.
+
 ### Decode boundary
 
 All incoming argument consumers share `decodeMessage`: the recursive
